@@ -78,10 +78,10 @@ use sure_core::harness_event::ingest_event_str;
 use sure_core::hook_protection::{
     Assessment, Danger, ProtectionDecision, ToolRequest, acts_a_tool_could_be_held_for,
     allowance_could_not_be_spent_reason, allowance_reason, allowance_unreadable_reason,
-    assess_claude_code_tool, assess_cursor_tool,
+    assess_claude_code_tool, assess_cursor_tool, assess_miqi_tool,
 };
 use sure_core::ids::{EventId, FingerprintId};
-use sure_core::normalizer::{claude_code, codex, cursor};
+use sure_core::normalizer::{claude_code, codex, cursor, miqi};
 use sure_core::paths::Paths;
 use sure_core::protection_history::{DecisionRecord, NotRecorded, not_recorded_reason};
 use sure_core::session_event_store::SessionEventStore;
@@ -419,6 +419,14 @@ fn run_ingest_with_paths(
             Ok(envelope) => envelope,
             Err(error) => return failed("The event could not be normalised.", error.to_string()),
         },
+        // MiQi's events are MiQi's own shape, sent from its plugin layer
+        // rather than from a shell launcher in a harness config file;
+        // `integrations/miqi/README.md` records the shape and what v1 of the
+        // integration does not send.
+        Some("miqi") => match miqi::normalize(stdin) {
+            Ok(envelope) => envelope,
+            Err(error) => return failed("The event could not be normalised.", error.to_string()),
+        },
         Some(other) => {
             return failed(
                 "The event source is not supported.",
@@ -564,6 +572,7 @@ fn run_ingest_with_paths(
             Some("claude-code" | "codex") => {
                 assess_claude_code_tool(&request, mode, &permissions, protection)
             }
+            Some("miqi") => assess_miqi_tool(&request, mode, &permissions, protection),
             // `Some("cursor")`, and anything else: the match above has already
             // refused a source SURE does not know.
             _ => assess_cursor_tool(&request, mode, &permissions, protection),
