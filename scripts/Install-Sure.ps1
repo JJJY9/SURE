@@ -361,11 +361,24 @@ function Assert-EntryIsInside {
 }
 
 # Read the manifest a previous install wrote, or nothing.
+#
+# `-Encoding UTF8` because this is the file `[System.IO.File]::WriteAllText`
+# below writes, which is UTF-8 without a BOM. Windows PowerShell 5.1's default
+# reader decodes that as the machine's ANSI code page, and an `install_root`
+# holding a non-ASCII user name right before a separator — the shape of
+# `C:\Users\<name>\AppData\...` — comes back as mojibake that the parse then
+# rejects. Measured 2026-10-13 on Windows 11 with a Chinese user name and no
+# PowerShell 7 installed: a second install of an archive the first had written
+# stopped with "not readable as this install's manifest" against the manifest
+# that first install had written itself.
+# `crates/sure-cli/tests/install_flow.rs`'s
+# `the_manifest_round_trips_under_a_non_ascii_user_name` is the case that
+# reddens without this flag.
 function Read-PreviousManifest {
     param([Parameter(Mandatory)][string] $Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try {
-        $document = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     } catch {
         Stop-Install "there is a file at $Path that is not readable as this install's manifest, so what an earlier install wrote cannot be established. SURE stopped rather than replace files it cannot account for. Move that file aside and run this again."
     }
