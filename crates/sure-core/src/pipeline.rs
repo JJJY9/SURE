@@ -106,8 +106,13 @@
 
 use std::path::Path;
 
-use sure_domain::evidence::{ClaimAssessment, EvidenceClass, StalenessReason};
+use sure_domain::evidence::{
+    ClaimAssessment, Evidence, EvidenceAnchor, EvidenceClass, StalenessReason,
+};
 use sure_domain::execution::{ExecutionMode, ExecutionPermissions};
+use sure_domain::finding::{
+    AssessmentSource, Finding, FindingBuilder, FindingStatus, SeverityRationale,
+};
 use sure_domain::ids::{CheckId, ClaimId, FingerprintId};
 use sure_domain::intent::{IntentSource, ProjectIntent};
 use sure_domain::severity::Severity;
@@ -975,7 +980,8 @@ impl Pipeline<'_> {
         );
 
         // ---- 8. Grounded model assessment ------------------------------------
-        let (model_outcome, model_results) = self.model_assessment(&fingerprint);
+        let (model_outcome, model_results, model_findings) =
+            self.model_assessment(&fingerprint, &candidates);
         results.extend(model_results);
         stages.push(Stage::ModelAssessment, model_outcome);
 
@@ -1067,7 +1073,8 @@ impl Pipeline<'_> {
         // Read from `report.results()` and not from `not_checked` below, although
         // the two overlap: `not_checked` is the subset with no result, and a check
         // that ran and failed is a finding with no entry in it.
-        let findings = findings_from_checks(report.results(), &schedule);
+        let mut findings = findings_from_checks(report.results(), &schedule);
+        findings.extend(model_findings);
         let verdict = build_verdict(
             fingerprint,
             report.aggregate().clone(),
@@ -1256,7 +1263,11 @@ impl Pipeline<'_> {
     /// own word for it, and [`crate::project_verdict`] already has a sentence for
     /// what that costs. The run is then `needs_attention` rather than green, and it
     /// is never reported as having passed something it did not do.
-    fn model_assessment(&self, fingerprint: &FingerprintId) -> (StageOutcome, Vec<CheckResult>) {
+    fn model_assessment(
+        &self,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
         let analysis = &self.analysis;
         let not_checked = |reason: NotCheckedReason, detail: &str| {
             CheckResult::not_run(
@@ -1283,23 +1294,16 @@ impl Pipeline<'_> {
                     NotCheckedReason::AnalysisProviderDisabled,
                     detail,
                 )],
+                Vec::new(),
             );
         }
 
         match analysis_provider::build(analysis, self.project) {
-            // A provider is configured. No check in this build asks for
-            // model-backed analysis, so the stage has nothing to do — a different
-            // statement from "it could not run", and recorded as one.
-            Ok(_analyzer) => (
-                StageOutcome::NotPartOfWork {
-                    detail: format!(
-                        "the {} provider is configured, and no planned check asks for \
-                         model-backed analysis in this build.",
-                        analysis.provider.as_str()
-                    ),
-                },
-                Vec::new(),
-            ),
+            // 模型评估接入(最小版):把阶段 7 找到的候选(material)交给配置好
+            // 的分析器做 grounded 评估——每条候选要么被确认(成为一条
+            // model_assessment 证据类的 finding),要么被判为噪音(不加 finding,
+            // 但原样保留在阶段明细里)。没有候选时如实记录"没有可评估的东西"。
+            Ok(analyzer) => self.assess_candidates(analyzer.as_ref(), fingerprint, candidates),
             // The project asked for a provider SURE cannot build — a local-command
             // provider with no command, say. That is a configuration fault rather
             // than a scope limit, it is visible as one, and it is not a crash.
@@ -1314,9 +1318,119 @@ impl Pipeline<'_> {
                         NotCheckedReason::AnalysisProviderDisabled,
                         &detail,
                     )],
+                    Vec::new(),
                 )
             }
         }
+    }
+
+    /// 阶段 8 的接入面(最小版):把阶段 7 的候选交给分析器逐条评估。
+    ///
+    /// 每条被确认的候选产出一 LinkFinding:证据类如实标
+    /// [`EvidenceClass::ModelAssessment`],锚为 `model_only`(模型意见没有
+    /// 具体项目位置可指,不可核——`is_model_only` 判据据此命中),严重度按
+    /// `docs/adr/0005-evidence-hierarchy.md` 以 ShouldFixFirst 为上限
+    /// (模型独证不能支撑 must_fix),rationale 与之自动配对(builder 校验)。
+    /// 上游预留的 planned-check 管道(`disabled_result`/模型检查提案)接线
+    /// 后,这里迁回检查结果通道。
+    fn assess_candidates(
+        &self,
+        analyzer: &dyn analysis_provider::Analyzer,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
+        if candidates.material.is_empty() {
+            return (
+                StageOutcome::NotPartOfWork {
+                    detail: "the analysis provider is configured, and the completeness \
+                             analysis found no candidate for a model to assess."
+                        .to_owned(),
+                },
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        let prompt = assessment_prompt(self.project, candidates);
+        let response = match analyzer
+            .analyze(analysis_provider::AnalysisRequest { prompt: &prompt })
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let detail =
+                    format!("the configured model provider could not assess the project: {error}");
+                return (
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::AnalysisProviderDisabled),
+                        detail: detail.clone(),
+                    },
+                    vec![
+                        CheckResult::not_run(
+                            Stage::ModelAssessment.id(),
+                            Stage::ModelAssessment.title(),
+                            Severity::Note,
+                            false,
+                            NotCheckedReason::AnalysisProviderDisabled,
+                            fingerprint.clone(),
+                        )
+                        .with_reason(detail),
+                    ],
+                    Vec::new(),
+                );
+            }
+        };
+        let verdicts = parse_assessment(&response.text, candidates);
+        let flagged = verdicts.iter().filter(|verdict| verdict.is_problem).count();
+        let mut findings = Vec::new();
+        for verdict in verdicts.iter().filter(|verdict| verdict.is_problem) {
+            let Some(candidate) = candidates
+                .material
+                .iter()
+                .find(|candidate| candidate.id == verdict.candidate_id)
+            else {
+                continue;
+            };
+            // 第一版直接以 Finding 进入报告(见函数 doc 的迁移说明)。
+            let severity = model_supported_severity(candidate.severity);
+            if let Ok(finding) = FindingBuilder::new(
+                AssessmentSource::ModelAssessment,
+                SeverityRationale::for_severity(severity)
+                    .unwrap_or(SeverityRationale::Informational),
+            )
+            .title(format!("Model assessment: {}", candidate.title))
+            .severity(severity)
+            .status(FindingStatus::Open)
+            .explanation(verdict.reason.clone())
+            .user_impact(
+                "A model's assessment of what SURE observed. Model opinion is evidence and \
+                 not proof: it may be wrong, and what to do about it stays your call."
+                    .to_owned(),
+            )
+            .next_step("Review the flagged candidate, decide what to do, and re-check.".to_owned())
+            .evidence([Evidence::new(
+                EvidenceClass::ModelAssessment,
+                candidate.because.clone(),
+                EvidenceAnchor::model_only(format!("{} ({})", candidate.title, candidate.id)),
+                Some(fingerprint.clone()),
+                severity,
+            )])
+            .fingerprint(fingerprint.clone())
+            .build()
+            {
+                findings.push(finding);
+            }
+        }
+        (
+            StageOutcome::Ran {
+                detail: format!(
+                    "the configured model provider assessed {} completeness candidate(s): \
+                     {flagged} flagged as problems, {} judged style noise.",
+                    candidates.material.len(),
+                    verdicts.len() - flagged,
+                ),
+            },
+            Vec::new(),
+            findings,
+        )
     }
 
     /// Stage 9: what the project's agent claimed, against what was recorded.
@@ -1710,6 +1824,93 @@ fn reading_observation(proposal: &CheckProposal) -> CheckOperation {
 }
 
 /// Stage 7: the completeness scanners, and the aggregator that orders them.
+/// 阶段 8 发给模型的评估请求(纯函数,可测)。
+///
+/// grounded:只给阶段 7 已经观察到的候选(各自的 id、标题、严重度与判据理由),
+/// 要求模型逐条回答"problem/noise + 一句理由",并明确禁止发明候选之外的
+/// 内容。行格式供 [`parse_assessment`] 解析;无法解析的整段文本不进 finding。
+fn assessment_prompt(project: &Path, candidates: &Candidates) -> String {
+    let mut prompt =
+        String::from("You are assessing completeness candidates SURE observed in the project at ");
+    prompt.push_str(&project.display().to_string());
+    prompt.push_str(
+        ".\nFor EACH candidate below answer with exactly one line:\n\
+         <candidate id>: problem — <one short sentence: why the evidence supports this is a \
+         real problem for hand-off>\n\
+         or\n\
+         <candidate id>: noise — <one short sentence: why this is style noise>\n\
+         Assess only the candidates listed. Do not invent candidates.\n\nCandidates:\n",
+    );
+    for candidate in &candidates.material {
+        prompt.push_str(&format!(
+            "- {}: {} (severity: {}; because: {})\n",
+            candidate.id,
+            candidate.title,
+            candidate.severity.as_str(),
+            candidate.because
+        ));
+    }
+    prompt
+}
+
+/// 一条候选的模型判定。
+#[derive(Debug)]
+struct ModelVerdict {
+    candidate_id: String,
+    is_problem: bool,
+    reason: String,
+}
+
+/// 解析模型回复里的 `id: problem|noise — reason` 行(纯函数,可测)。
+///
+/// 宽容但绝不猜测:大小写不敏感;只认 [`Candidates::material`] 里出现过的
+/// id;分隔符接受 em dash 或 " - ";无法识别的行一律忽略——finding 只从
+/// 被理解的行里来。
+fn parse_assessment(text: &str, candidates: &Candidates) -> Vec<ModelVerdict> {
+    let mut verdicts: Vec<ModelVerdict> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*']).trim_start();
+        let Some((id_part, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let id = id_part.trim();
+        if !candidates
+            .material
+            .iter()
+            .any(|candidate| candidate.id == id)
+        {
+            continue;
+        }
+        let rest = rest.trim();
+        let (word, reason) = rest
+            .split_once('—')
+            .or_else(|| rest.split_once(" - "))
+            .unwrap_or((rest, ""));
+        let word = word.trim().to_ascii_lowercase();
+        if word != "problem" && word != "noise" {
+            continue;
+        }
+        if verdicts.iter().any(|verdict| verdict.candidate_id == id) {
+            continue; // 同一候选出现多行:只认第一行,后面的不覆盖也不叠加
+        }
+        verdicts.push(ModelVerdict {
+            candidate_id: id.to_owned(),
+            is_problem: word == "problem",
+            reason: reason.trim().to_owned(),
+        });
+    }
+    verdicts
+}
+
+/// ADR 0005 的执行点:模型评估证据不能单独支撑 must_fix,确认项的严重度
+/// 因此以 ShouldFixFirst 为上限,其余原样(只执行既有规则,不发明新档)。
+fn model_supported_severity(severity: Severity) -> Severity {
+    match severity {
+        Severity::MustFix => Severity::ShouldFixFirst,
+        other => other,
+    }
+}
+
 fn completeness(discovery: &Discovery, intent: &ProjectIntent) -> Candidates {
     let aggregated =
         false_completion_aggregator::aggregate(completeness_proposals(discovery, intent));
@@ -2460,6 +2661,153 @@ mod tests {
     /// agree with this one on everything except the thing being measured.
     ///
     /// [`Termination::CancelledBeforeStart`]: crate::process::Termination::CancelledBeforeStart
+    /// 阶段 8 接入(最小版)的测试用分析器:回放一段固定文本。
+    struct ScriptedAnalyzer(String);
+
+    impl crate::analysis_provider::Analyzer for ScriptedAnalyzer {
+        fn analyze(
+            &self,
+            _request: crate::analysis_provider::AnalysisRequest<'_>,
+        ) -> Result<
+            crate::analysis_provider::AnalysisResponse,
+            crate::analysis_provider::AnalysisError,
+        > {
+            Ok(crate::analysis_provider::AnalysisResponse::new(
+                self.0.clone(),
+            ))
+        }
+    }
+
+    fn one_candidate() -> Candidates {
+        Candidates {
+            material: vec![CandidateSummary {
+                id: "cand_todo".to_owned(),
+                title: "TODO comment in production code".to_owned(),
+                severity: Severity::MustFix,
+                critical: true,
+                because: "a TODO comment was found in a source file".to_owned(),
+            }],
+            style_noise: Vec::new(),
+            duplicates_dropped: 0,
+        }
+    }
+
+    fn assessment_probe<'a>(
+        project: &'a Path,
+        config: &'a Config,
+        runner: &'a dyn CheckRunner,
+    ) -> Pipeline<'a> {
+        Pipeline {
+            project,
+            purpose: Purpose::Recheck,
+            config,
+            execution: ExecutionSettings::inspect_only(),
+            store: None,
+            goal: None,
+            analysis: Default::default(),
+            runner,
+        }
+    }
+
+    #[test]
+    fn a_model_flagged_candidate_becomes_a_model_only_result() {
+        // 接线:模型确认的候选成为一条 fail 结果,证据类 ModelAssessment,
+        // 且按 ADR 0005 钳制严重度与 critical——模型独证不判"不可交付"。
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        assert!(results.is_empty(), "{results:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].status, FindingStatus::Open);
+        assert_eq!(
+            findings[0].assessment_source,
+            AssessmentSource::ModelAssessment
+        );
+        assert_eq!(findings[0].severity, Severity::ShouldFixFirst);
+        assert!(findings[0].explanation.contains("unfinished work"));
+        assert!(findings[0].title.starts_with("Model assessment:"));
+        assert_eq!(findings[0].evidence.len(), 1);
+        assert_eq!(
+            findings[0].evidence[0].class,
+            EvidenceClass::ModelAssessment
+        );
+        assert_eq!(
+            findings[0].evidence[0].anchor.subject,
+            sure_domain::evidence::AnchorSubject::Model
+        );
+    }
+
+    #[test]
+    fn a_noise_verdict_produces_no_result() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: noise — style only\n".to_owned());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        assert!(results.is_empty(), "{results:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn no_candidates_keeps_stage_8_out_of_the_work() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer(String::new());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &Candidates::default());
+
+        assert!(
+            matches!(outcome, StageOutcome::NotPartOfWork { .. }),
+            "{outcome:?}"
+        );
+        assert!(results.is_empty());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn the_assessment_prompt_lists_candidates_and_the_line_format() {
+        let prompt = assessment_prompt(Path::new("/tmp/project"), &one_candidate());
+        assert!(prompt.contains("cand_todo"), "{prompt}");
+        assert!(prompt.contains("problem — "), "{prompt}");
+        assert!(prompt.contains("Do not invent candidates."), "{prompt}");
+    }
+
+    #[test]
+    fn parse_assessment_reads_verdict_lines_and_ignores_the_rest() {
+        let candidates = one_candidate();
+        let verdicts = parse_assessment(
+            "Sure!\ncand_todo: PROBLEM — real issue\ncand_unknown: problem — not listed\n\
+             cand_todo: noise — duplicate line\nunparseable line\n",
+            &candidates,
+        );
+        assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+        assert!(verdicts[0].is_problem);
+        assert_eq!(verdicts[0].reason, "real issue");
+        // " - " 分隔也认;noise 判定如实
+        let alt = parse_assessment("cand_todo: noise - just style\n", &candidates);
+        assert_eq!(alt.len(), 1);
+        assert!(!alt[0].is_problem);
+        assert_eq!(alt[0].reason, "just style");
+    }
+
     fn nothing_starts() -> ProcessRunner {
         let stop = Cancellation::new();
         stop.cancel();
