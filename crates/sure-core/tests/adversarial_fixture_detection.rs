@@ -2213,6 +2213,7 @@ fn pipelined_with(
         execution,
         store: None,
         goal,
+        analysis: Default::default(),
         runner: &runner,
     }
     .run()

@@ -143,6 +143,7 @@ fn the_run(fixture: &Fixture) -> (Config, PipelineOutcome) {
         execution: authority.execution(),
         store: None,
         goal: None,
+        analysis: Default::default(),
         runner: &runner,
     }
     .run();

@@ -75,7 +75,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value as Json, json};
 use serde_yaml_ng::{Mapping, Value};
-use sure_core::config::{Authority, Config, PrivacyMode, ProjectRequest, ProtectionMode};
+use sure_core::config::{
+    AnalysisProvider, Authority, Config, PrivacyMode, ProjectRequest, ProtectionMode,
+};
 use sure_core::execution::ExecutionMode;
 use sure_core::paths::Paths;
 
@@ -161,6 +163,13 @@ const WRITABLE: &[Setting] = &[
         decides: "what may leave this machine, and what a model may be shown",
     },
     Setting {
+        name: "analysis.provider",
+        path: &["analysis", "provider"],
+        kind: Kind::OneOf(analysis_providers),
+        decides: "which analysis provider a run may consult when the project names none; a \
+                  project's own file naming one is the one in force",
+    },
+    Setting {
         name: "protection.mode",
         path: &["protection", "mode"],
         kind: Kind::OneOf(protection_modes),
@@ -177,6 +186,10 @@ fn execution_modes() -> Vec<&'static str> {
 
 fn privacy_modes() -> Vec<&'static str> {
     PrivacyMode::ALL.iter().map(|mode| mode.as_str()).collect()
+}
+
+fn analysis_providers() -> Vec<&'static str> {
+    AnalysisProvider::ALL.iter().map(|p| p.as_str()).collect()
 }
 
 fn protection_modes() -> Vec<&'static str> {
@@ -199,11 +212,22 @@ const NOT_WRITABLE: &[(&str, &str)] = &[
          that does nothing: the file would look like a decision you had made.",
     ),
     (
-        "analysis.",
-        "the provider, endpoint and model a run uses are read from the checked project's own \
-         sure.yaml, so a value in your own file would change nothing. What your file decides about \
-         analysis is whether a project's request for an external provider is allowed, and every \
-         report says which provider was in force.",
+        "analysis.endpoint",
+        "written by editing your settings file rather than by this command: `sure config set` \
+         writes settings that are a word, a flag or a number of days, and the endpoint, model and \
+         command are none of those. `analysis.provider` is writable.",
+    ),
+    (
+        "analysis.model",
+        "written by editing your settings file rather than by this command: `sure config set` \
+         writes settings that are a word, a flag or a number of days, and the endpoint, model and \
+         command are none of those. `analysis.provider` is writable.",
+    ),
+    (
+        "analysis.command",
+        "written by editing your settings file rather than by this command: `sure config set` \
+         writes settings that are a word, a flag or a number of days, and the endpoint, model and \
+         command are none of those. `analysis.provider` is writable.",
     ),
     (
         "project_intent.",
@@ -1114,6 +1138,20 @@ mod tests {
         assert!(!file_of(&directory).exists());
     }
 
+    /// 该通道存在的理由:没有项目文件的机器上,用户自己的分析 provider 必须
+    /// 可经 `config set` 写入(权威仲裁在项目未指定时取用户层值)。
+    #[test]
+    fn the_users_own_analysis_provider_is_writable() {
+        let directory = scratch("analysis-provider");
+        let report = set_in(&directory, "analysis.provider", "local_command");
+        let Report::Settings(change) = &report else {
+            panic!("{report:?}");
+        };
+        assert_eq!(change.outcome, SettingsOutcome::Written);
+        let after = std::fs::read_to_string(file_of(&directory)).unwrap();
+        assert!(after.contains("provider: local_command"), "{after}");
+    }
+
     /// A file with comments and other settings is edited, not rewritten.
     #[test]
     fn an_edit_keeps_every_other_line_of_the_file() {
@@ -1210,7 +1248,6 @@ mod tests {
 
         let paths = paths_for(&directory);
         for (setting, value) in [
-            ("analysis.provider", "local_command"),
             ("project_intent.goal", "a bookmark manager"),
             ("checks.existing_tests", "true"),
             ("report.format", "json"),
@@ -1284,7 +1321,7 @@ mod tests {
             "execution:\n  mode: host_confirmed\n  allow_dependency_install: true\n  \
              allow_network: true\n  allow_project_write: true\nprivacy:\n  mode: fully_local\n  \
              full_recording: true\n  full_recording_retention_days: 11\nprotection:\n  \
-             mode: strict\n",
+             mode: strict\nanalysis:\n  provider: local_command\n",
         )
         .unwrap();
         let authority = Authority::new(
@@ -1314,6 +1351,9 @@ mod tests {
                 }
                 "privacy.mode" => authority.privacy_mode().value == PrivacyMode::FullyLocal,
                 "protection.mode" => authority.protection().value == ProtectionMode::Strict,
+                "analysis.provider" => {
+                    authority.analysis().value.provider == AnalysisProvider::LocalCommand
+                }
                 other => panic!("{other} is writable and this test does not know what reads it"),
             };
             assert!(moved, "{} is writable and changes nothing", setting.name);

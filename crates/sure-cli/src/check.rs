@@ -339,6 +339,7 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
         purpose,
         config: &loaded.config,
         execution: authority.execution(),
+        analysis: authority.analysis().value,
         store: store.as_ref(),
         goal: goal_as_recorded,
         runner: &runner,

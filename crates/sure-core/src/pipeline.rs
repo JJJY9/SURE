@@ -121,6 +121,7 @@ use crate::capability_report;
 use crate::checks::{self, check_id};
 use crate::claim_checker::{self, CheckedClaim};
 use crate::components::ComponentGraph;
+use crate::config::AnalysisConfig;
 use crate::config::AnalysisProvider;
 use crate::config::Config;
 use crate::config::ExecutionSettings;
@@ -656,6 +657,15 @@ pub struct Pipeline<'a> {
     /// nothing else — values only an [`Enforcement`] can produce — so this field
     /// cannot be used to start something the mode did not admit.
     pub runner: &'a dyn CheckRunner,
+    /// The analysis settings in force, **already arbitrated between the two
+    /// files**.
+    ///
+    /// Not read from [`Self::config`] here, for the same reason
+    /// [`Self::execution`] is not: the project's own file holds a *request*,
+    /// and a stage that read it directly would consult a provider the
+    /// arbitration had not put in force. When the project names no provider,
+    /// the user's own file decides (`Authority::analysis`).
+    pub analysis: AnalysisConfig,
 }
 
 /// A stage that stopped the run.
@@ -1247,7 +1257,7 @@ impl Pipeline<'_> {
     /// what that costs. The run is then `needs_attention` rather than green, and it
     /// is never reported as having passed something it did not do.
     fn model_assessment(&self, fingerprint: &FingerprintId) -> (StageOutcome, Vec<CheckResult>) {
-        let analysis = &self.config.analysis;
+        let analysis = &self.analysis;
         let not_checked = |reason: NotCheckedReason, detail: &str| {
             CheckResult::not_run(
                 Stage::ModelAssessment.id(),
@@ -2310,6 +2320,7 @@ mod tests {
                 execution: ExecutionSettings::inspect_only(),
                 store: Some(store),
                 goal: None,
+                analysis: Default::default(),
                 runner: &runner,
             }
             .run()
@@ -2634,6 +2645,7 @@ mod tests {
             execution: ExecutionSettings::inspect_only(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -2691,6 +2703,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -2765,6 +2778,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -3113,6 +3127,7 @@ mod tests {
                 execution: authority.execution(),
                 store: None,
                 goal: None,
+                analysis: Default::default(),
                 runner: &runner,
             }
             .run();
@@ -3368,6 +3383,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
