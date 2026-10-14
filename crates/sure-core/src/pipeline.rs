@@ -1611,19 +1611,31 @@ impl Pipeline<'_> {
                 )
             })
             .collect();
+        // Which checks this run planned, whatever their results — the
+        // comparison needs the distinction between "planned and unobserved"
+        // and "a candidate check the scanner no longer proposes" (its subject
+        // is gone), which is the one absence that resolves a finding.
+        let planned: Vec<CheckId> = run
+            .schedule
+            .checks()
+            .iter()
+            .map(|scheduled| scheduled.proposal().id().clone())
+            .collect();
         let update = recheck_lifecycle::reconcile(
             LifecycleInputs {
                 previous_open: &previous,
                 current_findings: &run.verdict.findings,
                 check_results: run.report.results(),
                 rechecks: &rechecks,
+                planned: &planned,
                 case,
             },
             run.project_state.id.clone(),
         );
         let detail = format!(
-            "{} earlier finding(s) stayed open, {} resolved. A finding closes only when every \
-             check its repair contract named has passed in this run.",
+            "{} earlier finding(s) stayed open, {} resolved. A finding closes when every check \
+             its repair contract named has passed in this run — or, for a candidate-driven check, \
+             when this run no longer plans it because the marker it was built from is gone.",
             update.kept_open.len(),
             update.resolved.len(),
         );

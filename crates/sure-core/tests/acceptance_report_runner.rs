@@ -1708,12 +1708,19 @@ fn half(finding: &Finding, repair: Repair) -> Half {
     let after = run_the_checks(&repaired);
 
     let (_, selected) = contract_and_selection(&after, finding);
+    let planned: Vec<CheckId> = after
+        .schedule
+        .checks()
+        .iter()
+        .map(|scheduled| scheduled.proposal().id().clone())
+        .collect();
     let update = reconcile(
         LifecycleInputs {
             previous_open: std::slice::from_ref(finding),
             current_findings: &[],
             check_results: &after.results,
             rechecks: &[(finding.id.clone(), selected.clone())],
+            planned: &planned,
             case: CaseSensitivity::Sensitive,
         },
         after.state.clone(),
