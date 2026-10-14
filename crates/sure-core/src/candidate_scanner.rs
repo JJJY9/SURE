@@ -257,7 +257,8 @@ impl CandidateScanner {
         // Stable order, so two runs over one project cannot produce two plans.
         proposals.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
 
-        Self { proposals }    }
+        Self { proposals }
+    }
 
     /// The checks SURE would run, in no particular order.
     #[must_use]

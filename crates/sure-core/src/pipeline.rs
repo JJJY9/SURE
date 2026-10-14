@@ -1593,15 +1593,33 @@ impl Pipeline<'_> {
         }
 
         // Which checks have to pass before an earlier finding may close. The list
-        // is `repair_impact::select_impacted_checks`'s answer, asked of each
-        // contract stage 11 wrote — the module that owns the rule, not a second
-        // rule written here. It is asked rather than stored because a copy of it
-        // on the run would be a second list that could disagree with the contract
-        // it was copied from, and the function is pure.
+        // is `repair_impact::select_impacted_checks`'s answer — the module that
+        // owns the rule, not a second rule written here — asked of the contract
+        // that governs each finding. It is asked rather than stored because a
+        // copy of it on the run would be a second list that could disagree with
+        // the contract it was copied from, and the function is pure.
         //
-        // A finding with no entry here is one `recheck_lifecycle` keeps open, and
-        // that is the right reading for a run that produced no contract for it.
-        let rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
+        // **Two sources of contracts, and the second is what makes closing
+        // reachable at all.** A finding the current run still produces has the
+        // contract stage 11 just wrote for it. A finding the current run no
+        // longer produces — the fix removed what it was about, the very case
+        // this stage exists to resolve — has no contract here, and its contract
+        // is the earlier repair run's; that one is reconstructed the way the
+        // repository answers every *which checks can observe a fix* question:
+        // from the finding itself ([`repair_impact::named_checks`]), through the
+        // same `RepairContract::from_finding` + `select_impacted_checks` pair the
+        // writing path uses, widened against this run's plan. Without the
+        // reconstruction, stage 12 could not tell "the marker the candidate
+        // check was built from is gone" — the one absence `recheck_lifecycle`
+        // resolves — from "nothing observed the fix", which stays open; a fix
+        // that worked would carry its finding open forever (measured 2026-10-14,
+        // the MiQi full-repair E2E: subagent fixed the TODO, re-check reported
+        // both findings still open).
+        //
+        // A finding with no contract from either source — one whose anchors name
+        // no check, so nothing could ever observe a fix — gets no entry, and
+        // `recheck_lifecycle` keeps it open. That is the right reading.
+        let mut rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
             .repairs
             .iter()
             .map(|contract| {
@@ -1611,6 +1629,18 @@ impl Pipeline<'_> {
                 )
             })
             .collect();
+        for earlier in &previous {
+            let named = crate::repair_impact::named_checks(earlier);
+            let Ok(reconstructed) =
+                sure_domain::vocabulary::RepairContract::from_finding(earlier, named)
+            else {
+                continue;
+            };
+            rechecks.push((
+                earlier.id.clone(),
+                select_impacted_checks(&reconstructed, &run.schedule),
+            ));
+        }
         // Which checks this run planned, whatever their results — the
         // comparison needs the distinction between "planned and unobserved"
         // and "a candidate check the scanner no longer proposes" (its subject
@@ -2658,6 +2688,174 @@ mod tests {
             "a run whose stage 12 could not read what the last run left open reported itself \
              as clean"
         );
+    }
+
+    // --- the repair loop's closing half ----------------------------------
+
+    /// A stored finding whose anchor names the check that produced it.
+    ///
+    /// The shape the store really holds for a finding a check produced, measured
+    /// off the TODO candidate's stored row: `subject_id` is the check id
+    /// (`chk_candidatetodo<…>`), which is what a re-check reads to answer *which
+    /// checks can observe a fix for this finding*. [`a_stored_finding`] anchors at
+    /// a file and names no check — right for a test about the history read and
+    /// nothing for a test about closing.
+    fn a_stored_finding_about_a_check(
+        title: &str,
+        location: &str,
+        check: &str,
+    ) -> sure_domain::finding::Finding {
+        use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceClass};
+        use sure_domain::finding::{
+            AssessmentSource, FindingBuilder, FindingStatus, SeverityRationale,
+        };
+        use sure_domain::ids::{CheckId, FindingId};
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let check = CheckId::parse(check).expect("a fixture check id");
+        FindingBuilder::new(
+            AssessmentSource::DeterministicCheck,
+            SeverityRationale::BlocksHandOff,
+        )
+        .id(FindingId::generate())
+        .title(title)
+        .severity(Severity::MustFix)
+        .status(FindingStatus::Open)
+        .explanation("the marker the check was built from")
+        .user_impact("the work is unfinished")
+        .next_step("remove the marker")
+        .fingerprint(fingerprint.clone())
+        .evidence(vec![Evidence::new(
+            EvidenceClass::DeterministicCheck,
+            "the check did not pass",
+            EvidenceAnchor::new(
+                AnchorSubject::LineRange,
+                location,
+                "the candidate on line 1",
+            )
+            .with_subject_id(check),
+            Some(fingerprint),
+            Severity::MustFix,
+        )])
+        .build()
+        .expect("the fixture finding is valid")
+    }
+
+    /// A fix that removed its marker closes the stored finding on the next
+    /// re-check — while a check the run never observed keeps its finding open.
+    ///
+    /// **This is the wiring the full-repair loop needed, observed through the
+    /// stage rather than through `recheck_lifecycle`.** `c4fd952` taught
+    /// `recheck_passed` that *a candidate check this run did not plan* is the
+    /// scanner saying the marker it was built from is gone — a resolution — but
+    /// stage 12 only ever handed it the contracts of the *current* run's findings,
+    /// and a fix that worked leaves the current run with no finding to write one
+    /// from. An earlier finding's contract is answered here the way
+    /// `repair_impact`'s own doctrine answers it: **asked**, of the finding (the
+    /// checks its anchors name, [`crate::repair_impact::named_checks`]), widened
+    /// against this run's plan — never stored a second time, so the store stays
+    /// the only copy and this stage stays a reading rather than a cache.
+    ///
+    /// The control is the second stored finding, anchored at a check that is also
+    /// not planned and is *not* candidate-driven: its absence is an absence of
+    /// observation and it must stay open. Without it, a stage that closed every
+    /// earlier finding would satisfy the first assertion.
+    #[test]
+    fn a_recheck_closes_a_stored_finding_whose_candidate_check_is_no_longer_planned() {
+        let root = crate::store::scratch_root().join(format!(
+            "pipeline-recheck-candidate-gone-{}",
+            std::process::id()
+        ));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot clear {}: {error}", root.display()),
+        }
+        let project = root.join("project");
+        let store_dir = root.join("store");
+        std::fs::create_dir_all(&project).expect("a scratch project");
+        std::fs::create_dir_all(&store_dir).expect("a scratch store directory");
+        std::fs::write(
+            project.join("README.md"),
+            "# A project SURE was pointed at\n\nThe marker the stored finding was about is \
+             gone, and this run's own plan is where that shows.\n",
+        )
+        .expect("a project file");
+
+        let store = Store::open_at(&store_dir.join("sure.db")).expect("the store opens");
+        let config = Config::default();
+        let runner = nothing_starts();
+        let run_recheck = |store: &Store| {
+            Pipeline {
+                project: &project,
+                purpose: Purpose::Recheck,
+                config: &config,
+                execution: ExecutionSettings::inspect_only(),
+                store: Some(store),
+                goal: None,
+                analysis: Default::default(),
+                runner: &runner,
+            }
+            .run()
+        };
+
+        // The first run answers what text the pipeline uses as this project's
+        // root; the stored rows must carry exactly it to be read back.
+        let first = run_recheck(&store);
+        let first_run = first
+            .run
+            .as_ref()
+            .expect("a run over a readable scratch project reaches its verdict");
+        let project_root = first_run.project_root.clone();
+
+        let removed_marker = a_stored_finding_about_a_check(
+            "project contains TODO or FIXME comments in production code",
+            "pay.py",
+            "chk_candidatetodo9a707a1f764658ab",
+        );
+        let never_observed = a_stored_finding_about_a_check(
+            "a declared command did not run",
+            "package.json",
+            "chk_nodetest",
+        );
+        crate::recheck_lifecycle::store_run(
+            &store,
+            &project_root,
+            &first_run.project_state.id,
+            &[removed_marker.clone(), never_observed.clone()],
+            &[],
+        )
+        .expect("the earlier run's findings are stored");
+
+        let second = run_recheck(&store);
+        let run = second.run.as_ref().expect("the run finishes");
+        let lifecycle = run
+            .lifecycle
+            .as_ref()
+            .expect("a readable history is compared against");
+        assert_eq!(
+            lifecycle.resolved.len(),
+            1,
+            "the finding whose marker the fix removed did not close; kept open: {:?}",
+            lifecycle
+                .kept_open
+                .iter()
+                .map(|finding| finding.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(lifecycle.resolved[0].title, removed_marker.title);
+        assert_eq!(
+            lifecycle.resolved[0].status,
+            sure_domain::finding::FindingStatus::Resolved
+        );
+        assert_eq!(
+            lifecycle.kept_open.len(),
+            1,
+            "a check the run did not plan and never observed lost its finding, or the fixed \
+             finding was not the only one that closed"
+        );
+        assert_eq!(lifecycle.kept_open[0].title, never_observed.title);
     }
 
     // --- what a run may start, read rather than argued --------------------
