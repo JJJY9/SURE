@@ -160,7 +160,12 @@ fn map_event_type(
             Some("build") => Ok("build.ran"),
             Some("compile") => Ok("compile.ran"),
             Some("run") => Ok("run.ran"),
-            Some("git") => Ok("git.command"),
+            // 2026-10-20: named "git.action", not "git.command" — recording_
+            // projection routes any event type containing "command" to the
+            // Command projection before it ever asks whether it names git, so
+            // a "git.command" event could never be projected as Git and a
+            // git_state claim could never be matched against it.
+            Some("git") => Ok("git.action"),
             other => Err(MiqiNormalizeError::UnknownEventType {
                 event: format!("ExecClassified(kind={})", other.unwrap_or("<missing>")),
             }),
@@ -342,7 +347,7 @@ mod tests {
     fn exec_classified_git_carries_subcommand() {
         let text = r#"{"event":"ExecClassified","harness_session_id":"c:s1","timestamp_utc":"2026-10-20T07:30:00Z","source":"miqi","project_root":"D:\\work","kind":"git","target":"git commit","success":true,"subcommand":"commit"}"#;
         let envelope = normalize(text).expect("valid event");
-        assert_eq!(envelope.event_type, "git.command");
+        assert_eq!(envelope.event_type, "git.action");
         assert_eq!(
             envelope.payload["subcommand"],
             Value::String("commit".to_owned())

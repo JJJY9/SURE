@@ -200,11 +200,21 @@ pub fn check_claims_against_events(
 
 /// Check one claim against the available events.
 ///
-/// Returns [`ClaimAssessment::Confirmed`] when a matching event is found and
-/// its evidence is still fresh, [`ClaimAssessment::CannotConfirm`] when no
-/// matching event exists or the matching evidence has been superseded by a
-/// later code change, and [`ClaimAssessment::NotCheckable`] when the claim type
-/// is missing or unknown. Never returns [`ClaimAssessment::Contradicted`].
+/// Matching is by the claim's **own words** and its type. The type names the
+/// event family that may support the claim (`test.*`, `file.*`, `git.*`,
+/// `build.|compile.|run.*`); the words decide which member of that family
+/// counts: a `test_ran` claim that names `pytest` needs a recorded pytest run,
+/// a `file_changed` claim that names `pay.py` needs a recorded write of that
+/// file, a `git_state` claim that names `commit` needs a recorded commit, and
+/// a `current_code` claim that says "builds" needs a successful recorded build.
+///
+/// Returns [`ClaimAssessment::Confirmed`] when every part the claim names is
+/// matched by a recorded event and the evidence is still fresh (for result
+/// claims), [`ClaimAssessment::CannotConfirm`] when the claim names nothing
+/// SURE can match, a named part has no recorded event, or the matching
+/// evidence has been superseded by a later code change, and
+/// [`ClaimAssessment::NotCheckable`] when the claim type is missing or
+/// unknown. Never returns [`ClaimAssessment::Contradicted`].
 pub fn check_claim(
     claim: &ClaimDocument,
     events: &[IngestedEvent],
@@ -240,59 +250,59 @@ pub fn check_claim(
         };
     }
 
-    let matching_event = events
-        .iter()
-        .find(|event| event_matches_claim_type(event, claim_type));
+    let matched = match_claim_evidence(claim, claim_type, events);
 
-    if let Some(event) = matching_event {
-        let freshness = if is_result_claim_type(claim_type) {
-            evidence_freshness(event, events)
-        } else {
-            Freshness::Fresh
-        };
-
-        let projection = project(event);
-        let category_name = match projection {
-            Some(StandardProjection::Tool { .. }) => "Tool",
-            Some(StandardProjection::Command { .. }) => "Command",
-            Some(StandardProjection::Git { .. }) => "Git",
-            Some(StandardProjection::File { .. }) => "File",
-            Some(StandardProjection::BuildTest { .. }) => "BuildTest",
-            Some(StandardProjection::Outcome { .. }) => "Outcome",
-            None => "unknown",
-        };
-        let evidence = sure_domain::evidence::Evidence::new(
-            sure_domain::evidence::EvidenceClass::ObservedFact,
-            format!("Recorded {category_name} event in harness session"),
-            sure_domain::evidence::EvidenceAnchor::new(
-                sure_domain::evidence::AnchorSubject::Event,
-                event.envelope.event_type.clone(),
-                event.envelope.timestamp.clone(),
+    if let Some(detail) = matched.missing {
+        return CheckedClaim {
+            record_id: claim.record_id,
+            id: claim.id.clone(),
+            claim_text: claim.claim_text.clone(),
+            claim_type: claim_type.to_owned(),
+            assessment: ClaimAssessment::CannotConfirm,
+            evidence: evidence_for(&matched.events, fingerprint),
+            reason: format!(
+                "SURE has no recorded event that supports this claim: {}.",
+                crate::redact::escape_control_characters(&detail)
             ),
-            Some(fingerprint.clone()),
-            sure_domain::severity::Severity::Note,
-        );
+        };
+    }
 
-        match freshness {
-            Freshness::Fresh => CheckedClaim {
+    if !matched.events.is_empty() {
+        // A result claim is only as fresh as its oldest matched proof: any
+        // later code change supersedes every one of them.
+        let stale = if is_result_claim_type(claim_type) {
+            matched
+                .events
+                .iter()
+                .find_map(|event| match evidence_freshness(event, events) {
+                    Freshness::Fresh => None,
+                    Freshness::Stale(reason) => Some(reason),
+                })
+        } else {
+            None
+        };
+        let evidence = evidence_for(&matched.events, fingerprint);
+
+        match stale {
+            None => CheckedClaim {
                 record_id: claim.record_id,
                 id: claim.id.clone(),
                 claim_text: claim.claim_text.clone(),
                 claim_type: claim_type.to_owned(),
                 assessment: ClaimAssessment::Confirmed,
-                evidence: vec![evidence],
+                evidence,
                 reason: format!(
                     "A recorded harness event supports this {} claim.",
                     crate::redact::escape_control_characters(claim_type)
                 ),
             },
-            Freshness::Stale(reason) => CheckedClaim {
+            Some(reason) => CheckedClaim {
                 record_id: claim.record_id,
                 id: claim.id.clone(),
                 claim_text: claim.claim_text.clone(),
                 claim_type: claim_type.to_owned(),
                 assessment: ClaimAssessment::CannotConfirm,
-                evidence: vec![evidence],
+                evidence,
                 reason: String::from(reason.plain_explanation()),
             },
         }
@@ -307,6 +317,37 @@ pub fn check_claim(
             reason: String::from("SURE has no recorded event that supports this claim."),
         }
     }
+}
+
+fn evidence_for(
+    events: &[&IngestedEvent],
+    fingerprint: &FingerprintId,
+) -> Vec<sure_domain::evidence::Evidence> {
+    events
+        .iter()
+        .map(|event| {
+            let category_name = match project(event) {
+                Some(StandardProjection::Tool { .. }) => "Tool",
+                Some(StandardProjection::Command { .. }) => "Command",
+                Some(StandardProjection::Git { .. }) => "Git",
+                Some(StandardProjection::File { .. }) => "File",
+                Some(StandardProjection::BuildTest { .. }) => "BuildTest",
+                Some(StandardProjection::Outcome { .. }) => "Outcome",
+                None => "unknown",
+            };
+            sure_domain::evidence::Evidence::new(
+                sure_domain::evidence::EvidenceClass::ObservedFact,
+                format!("Recorded {category_name} event in harness session"),
+                sure_domain::evidence::EvidenceAnchor::new(
+                    sure_domain::evidence::AnchorSubject::Event,
+                    event.envelope.event_type.clone(),
+                    event.envelope.timestamp.clone(),
+                ),
+                Some(fingerprint.clone()),
+                sure_domain::severity::Severity::Note,
+            )
+        })
+        .collect()
 }
 
 fn is_known_claim_type(claim_type: &str) -> bool {
@@ -344,41 +385,391 @@ fn event_type_matches_claim_family(event_type: &str, claim_type: &str) -> bool {
     }
 }
 
-fn event_matches_claim_type(event: &IngestedEvent, claim_type: &str) -> bool {
-    if !event_type_matches_claim_family(&event.envelope.event_type, claim_type) {
-        return false;
+/// Evidence a claim's own words can be matched to, plus what is missing when
+/// they cannot be matched.
+struct ClaimEvidenceMatch<'a> {
+    events: Vec<&'a IngestedEvent>,
+    missing: Option<String>,
+}
+
+impl<'a> ClaimEvidenceMatch<'a> {
+    fn incomplete(detail: impl Into<String>) -> Self {
+        Self {
+            events: Vec::new(),
+            missing: Some(detail.into()),
+        }
+    }
+}
+
+/// Match a claim against events using the claim's own words, not only its type.
+///
+/// The type alone says which family may support a claim; it does not say the
+/// family event is about the thing the claim asserts. A `test_ran` claim that
+/// names `pytest` must be matched to a recorded pytest run, not to any test
+/// event; a `file_changed` claim that names `pay.py` must be matched to a
+/// recorded write of that file. A claim that names nothing SURE can match is
+/// answered "cannot confirm" with the reason, never widened to the family.
+fn match_claim_evidence<'a>(
+    claim: &ClaimDocument,
+    claim_type: &str,
+    events: &'a [IngestedEvent],
+) -> ClaimEvidenceMatch<'a> {
+    let text = normalize_claim_text(&claim.claim_text);
+    match claim_type {
+        CLAIM_TYPE_TEST_RAN => match_test_ran(&text, events),
+        CLAIM_TYPE_FILE_CHANGED => match_file_changed(&text, events),
+        CLAIM_TYPE_GIT_STATE => match_git_state(&text, events),
+        CLAIM_TYPE_CURRENT_CODE => match_current_code(&text, events),
+        _ => ClaimEvidenceMatch::incomplete("the claim type is not one SURE can match"),
+    }
+}
+
+fn normalize_claim_text(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_word_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Whether `needle` appears in `haystack` delimited by non-word characters.
+///
+/// The tables below match short words (`tox`, `tag`, `jest`); without the
+/// boundary check a word such as "tagged" or an unrelated identifier would
+/// smuggle a different action into the claim.
+fn contains_phrase(haystack: &str, needle: &str) -> bool {
+    let mut search = 0;
+    while let Some(offset) = haystack[search..].find(needle) {
+        let start = search + offset;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_word_char(haystack.as_bytes()[start - 1]);
+        let after_ok = end >= haystack.len() || !is_word_char(haystack.as_bytes()[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        search = start + 1;
+    }
+    false
+}
+
+/// (phrase in a claim, canonical name) — longer spellings first so that
+/// "committed" is not also read as "commit" twice (dedupe handles the rest).
+const TEST_RUNNER_PHRASES: &[(&str, &str)] = &[
+    ("npm run test", "npm test"),
+    ("npm test", "npm test"),
+    ("pnpm run test", "pnpm test"),
+    ("pnpm test", "pnpm test"),
+    ("yarn run test", "yarn test"),
+    ("yarn test", "yarn test"),
+    ("cargo test", "cargo test"),
+    ("dotnet test", "dotnet test"),
+    ("gradle test", "gradle test"),
+    ("make test", "make test"),
+    ("go test", "go test"),
+    ("mvn test", "mvn test"),
+    ("py.test", "pytest"),
+    ("pytest", "pytest"),
+    ("unittest", "unittest"),
+    ("vitest", "vitest"),
+    ("jest", "jest"),
+    ("ctest", "ctest"),
+    ("tox", "tox"),
+    ("nox", "nox"),
+];
+
+const GIT_ACTION_PHRASES: &[(&str, &str)] = &[
+    ("cherry-picked", "cherry-pick"),
+    ("cherry-pick", "cherry-pick"),
+    ("checked out", "checkout"),
+    ("committed", "commit"),
+    ("commit", "commit"),
+    ("merged", "merge"),
+    ("merge", "merge"),
+    ("rebased", "rebase"),
+    ("rebase", "rebase"),
+    ("reset", "reset"),
+    ("checkout", "checkout"),
+    ("pulled", "pull"),
+    ("pull", "pull"),
+    ("pushed", "push"),
+    ("push", "push"),
+    ("reverted", "revert"),
+    ("revert", "revert"),
+    ("tagged", "tag"),
+    ("tag", "tag"),
+    ("stashed", "stash"),
+    ("stash", "stash"),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodeResultKind {
+    Build,
+    Compile,
+    Import,
+}
+
+const CODE_RESULT_PHRASES: &[(&str, CodeResultKind)] = &[
+    ("type-checked", CodeResultKind::Compile),
+    ("type-check", CodeResultKind::Compile),
+    ("type-checks", CodeResultKind::Compile),
+    ("typechecked", CodeResultKind::Compile),
+    ("typecheck", CodeResultKind::Compile),
+    ("compiles", CodeResultKind::Compile),
+    ("compiled", CodeResultKind::Compile),
+    ("compile", CodeResultKind::Compile),
+    ("builds", CodeResultKind::Build),
+    ("built", CodeResultKind::Build),
+    ("building", CodeResultKind::Build),
+    ("build", CodeResultKind::Build),
+    ("imports", CodeResultKind::Import),
+    ("import", CodeResultKind::Import),
+];
+
+fn distinct_phrases(text: &str, table: &[(&'static str, &'static str)]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (phrase, canonical) in table {
+        if contains_phrase(text, phrase) && !out.contains(canonical) {
+            out.push(canonical);
+        }
+    }
+    out
+}
+
+fn canonical_runner_target(event: &IngestedEvent) -> Option<&'static str> {
+    let target = event_target(event)?;
+    TEST_RUNNER_PHRASES
+        .iter()
+        .find(|(phrase, _)| contains_phrase(&target, phrase))
+        .map(|(_, canonical)| *canonical)
+}
+
+fn event_target(event: &IngestedEvent) -> Option<String> {
+    event
+        .envelope
+        .payload
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+}
+
+fn match_test_ran<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {
+    let runners = distinct_phrases(text, TEST_RUNNER_PHRASES);
+    if runners.is_empty() {
+        return ClaimEvidenceMatch::incomplete(
+            "the claim does not name a test runner, so no recorded test event can be matched to it",
+        );
     }
 
-    let projection = match project(event) {
-        Some(p) => p,
-        None => return false,
-    };
+    let mut matched = Vec::new();
+    for runner in runners {
+        let hit = events.iter().find(|event| {
+            event_type_matches_claim_family(&event.envelope.event_type, CLAIM_TYPE_TEST_RAN)
+                && matches!(
+                    project(event),
+                    Some(StandardProjection::BuildTest {
+                        kind: BuildTestKind::Test,
+                        ..
+                    })
+                )
+                && canonical_runner_target(event) == Some(runner)
+        });
+        match hit {
+            Some(event) => matched.push(event),
+            None => {
+                return ClaimEvidenceMatch {
+                    events: matched,
+                    missing: Some(format!(
+                        "the claim names '{runner}', but no recorded test event for that runner was found"
+                    )),
+                };
+            }
+        }
+    }
+    ClaimEvidenceMatch {
+        events: matched,
+        missing: None,
+    }
+}
 
-    match claim_type {
-        CLAIM_TYPE_TEST_RAN => matches!(
-            projection,
-            StandardProjection::BuildTest {
-                kind: BuildTestKind::Test,
-                ..
+const CLAIM_FILE_EXTENSIONS: &[&str] = &[
+    "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "rs", "go", "java", "kt", "kts", "c", "h",
+    "cc", "cpp", "hpp", "cs", "rb", "php", "sh", "bash", "ps1", "yaml", "yml", "toml", "json",
+    "md", "html", "css", "scss", "sql", "txt", "ini", "cfg",
+];
+
+/// File names a claim asserts it changed (basenames, lowercased).
+///
+/// Only tokens with a source-file extension count: version numbers
+/// (`v0.1.3`) and prose without an extension are not file claims.
+fn claim_file_tokens(text: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for raw in text.split_whitespace() {
+        let trimmed = raw.trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '\\'))
+        });
+        let basename = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+        let lower = basename.to_lowercase();
+        let Some((stem, extension)) = lower.rsplit_once('.') else {
+            continue;
+        };
+        if stem.is_empty()
+            || !stem.chars().any(|c| c.is_ascii_alphabetic())
+            || !CLAIM_FILE_EXTENSIONS.contains(&extension)
+        {
+            continue;
+        }
+        if !files.contains(&lower) {
+            files.push(lower);
+        }
+    }
+    files
+}
+
+fn event_file_basename(event: &IngestedEvent) -> Option<String> {
+    match project(event) {
+        Some(StandardProjection::File { basename, .. }) => Some(basename.to_lowercase()),
+        _ => None,
+    }
+}
+
+fn match_file_changed<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {
+    let files = claim_file_tokens(text);
+    if files.is_empty() {
+        return ClaimEvidenceMatch::incomplete(
+            "the claim does not name a changed file, so no recorded write can be matched to it",
+        );
+    }
+
+    let mut matched = Vec::new();
+    for file in files {
+        let hit = events.iter().find(|event| {
+            event_type_matches_claim_family(&event.envelope.event_type, CLAIM_TYPE_FILE_CHANGED)
+                && matches!(
+                    project(event),
+                    Some(StandardProjection::File {
+                        operation: FileOperation::Write,
+                        ..
+                    })
+                )
+                && event_file_basename(event).as_deref() == Some(file.as_str())
+        });
+        match hit {
+            Some(event) => matched.push(event),
+            None => {
+                return ClaimEvidenceMatch {
+                    events: matched,
+                    missing: Some(format!(
+                        "the claim names '{file}', but SURE found no recorded write of that file"
+                    )),
+                };
             }
-        ),
-        CLAIM_TYPE_FILE_CHANGED => matches!(
-            projection,
-            StandardProjection::File {
-                operation: FileOperation::Write,
-                ..
+        }
+    }
+    ClaimEvidenceMatch {
+        events: matched,
+        missing: None,
+    }
+}
+
+fn event_git_subcommand(event: &IngestedEvent) -> Option<String> {
+    match project(event) {
+        Some(StandardProjection::Git { subcommand, .. }) => Some(subcommand.to_lowercase()),
+        _ => None,
+    }
+}
+
+fn match_git_state<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {
+    let actions = distinct_phrases(text, GIT_ACTION_PHRASES);
+    if actions.is_empty() {
+        return ClaimEvidenceMatch::incomplete(
+            "the claim does not name a git action SURE can match to recorded events",
+        );
+    }
+
+    let mut matched = Vec::new();
+    for action in actions {
+        let hit = events.iter().find(|event| {
+            event_type_matches_claim_family(&event.envelope.event_type, CLAIM_TYPE_GIT_STATE)
+                && matches!(project(event), Some(StandardProjection::Git { .. }))
+                && event_git_subcommand(event).as_deref() == Some(action)
+        });
+        match hit {
+            Some(event) => matched.push(event),
+            None => {
+                return ClaimEvidenceMatch {
+                    events: matched,
+                    missing: Some(format!(
+                        "the claim names '{action}', but SURE has no recorded git event for that action"
+                    )),
+                };
             }
-        ),
-        CLAIM_TYPE_GIT_STATE => matches!(projection, StandardProjection::Git { .. }),
-        CLAIM_TYPE_CURRENT_CODE => matches!(
-            projection,
-            StandardProjection::BuildTest {
-                kind: BuildTestKind::Build | BuildTestKind::Compile | BuildTestKind::Run,
-                success: true,
-                ..
+        }
+    }
+    ClaimEvidenceMatch {
+        events: matched,
+        missing: None,
+    }
+}
+
+fn match_current_code<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {
+    let mut kinds: Vec<CodeResultKind> = Vec::new();
+    for (phrase, kind) in CODE_RESULT_PHRASES {
+        if contains_phrase(text, phrase) && !kinds.contains(kind) {
+            kinds.push(*kind);
+        }
+    }
+    if kinds.is_empty() {
+        return ClaimEvidenceMatch::incomplete(
+            "the claim does not name a build, compile, or import result SURE can match to recorded events",
+        );
+    }
+
+    let mut matched = Vec::new();
+    for wanted in kinds {
+        let hit = events.iter().find(|event| {
+            if !event_type_matches_claim_family(&event.envelope.event_type, CLAIM_TYPE_CURRENT_CODE)
+            {
+                return false;
             }
-        ),
-        _ => false,
+            match project(event) {
+                Some(StandardProjection::BuildTest {
+                    kind,
+                    success: true,
+                    ..
+                }) => match wanted {
+                    CodeResultKind::Build => kind == BuildTestKind::Build,
+                    CodeResultKind::Compile => kind == BuildTestKind::Compile,
+                    CodeResultKind::Import => {
+                        kind == BuildTestKind::Compile
+                            && event_target(event).is_some_and(|target| target.contains("import"))
+                    }
+                },
+                _ => false,
+            }
+        });
+        match hit {
+            Some(event) => matched.push(event),
+            None => {
+                let label = match wanted {
+                    CodeResultKind::Build => "build",
+                    CodeResultKind::Compile => "compile",
+                    CodeResultKind::Import => "import",
+                };
+                return ClaimEvidenceMatch {
+                    events: matched,
+                    missing: Some(format!(
+                        "the claim names a {label} result, but no successful recorded {label} event supports it"
+                    )),
+                };
+            }
+        }
+    }
+    ClaimEvidenceMatch {
+        events: matched,
+        missing: None,
     }
 }
 
@@ -574,12 +965,12 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("tests ran"),
+            claim_text: String::from("ran pytest; 10 passed"),
             claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
         };
         let event = make_event(
             "test.finished",
-            json!({"target": "unit tests", "success": false, "counts": {"passed": 10, "failed": 2}}),
+            json!({"target": "pytest", "success": false, "counts": {"passed": 10, "failed": 2}}),
         );
         let fingerprint = FingerprintId::generate();
         let result = check_claim(&claim, &[event], &fingerprint);
@@ -599,7 +990,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("file was changed"),
+            claim_text: String::from("edited src/main.rs"),
             claim_type: Some(String::from(CLAIM_TYPE_FILE_CHANGED)),
         };
         let event = make_event("file.write", json!({"path": "src/main.rs", "size": 1024}));
@@ -617,7 +1008,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("git state"),
+            claim_text: String::from("committed the change"),
             claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
         };
         let event = make_event(
@@ -659,7 +1050,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("tests ran"),
+            claim_text: String::from("ran pytest; 10 passed"),
             claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
         };
         let event = make_event(
@@ -717,7 +1108,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("tests ran"),
+            claim_text: String::from("ran pytest; 10 passed"),
             claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
         };
         let fingerprint = FingerprintId::generate();
@@ -738,14 +1129,18 @@ mod tests {
         let fingerprint = FingerprintId::generate();
 
         // Store a claim.
-        let claim_event = make_claim_event("claim-1", "tests ran", Some(CLAIM_TYPE_TEST_RAN));
+        let claim_event = make_claim_event(
+            "claim-1",
+            "ran pytest; 10 passed",
+            Some(CLAIM_TYPE_TEST_RAN),
+        );
         capture_agent_claim(&claim_event, &store, "C:\\work\\my project", &fingerprint)
             .expect("capture succeeds");
 
         // Store a matching test event.
         let test_event = make_event(
             "test.finished",
-            json!({"target": "unit tests", "success": true}),
+            json!({"target": "pytest", "success": true}),
         );
         let event_id = EventId::generate();
         SessionEventStore::new(&store)
@@ -766,13 +1161,17 @@ mod tests {
         let store = store_in("evidence_fingerprint");
         let fingerprint = FingerprintId::generate();
 
-        let claim_event = make_claim_event("claim-1", "tests ran", Some(CLAIM_TYPE_TEST_RAN));
+        let claim_event = make_claim_event(
+            "claim-1",
+            "ran pytest; 10 passed",
+            Some(CLAIM_TYPE_TEST_RAN),
+        );
         capture_agent_claim(&claim_event, &store, "C:\\work\\my project", &fingerprint)
             .expect("capture succeeds");
 
         let test_event = make_event(
             "test.finished",
-            json!({"target": "unit tests", "success": true}),
+            json!({"target": "pytest", "success": true}),
         );
         let event_id = EventId::generate();
         SessionEventStore::new(&store)
@@ -806,13 +1205,13 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("tests ran"),
+            claim_text: String::from("ran pytest; 10 passed"),
             claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
         };
         let test_event = make_event_at(
             "test.finished",
             "2026-09-14T09:10:56.000Z",
-            json!({"target": "unit tests", "success": true}),
+            json!({"target": "pytest", "success": true}),
         );
         let later_write = make_event_at(
             "file.write",
@@ -869,7 +1268,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("file was changed"),
+            claim_text: String::from("edited src/main.rs"),
             claim_type: Some(String::from(CLAIM_TYPE_FILE_CHANGED)),
         };
         let write_event = make_event_at(
@@ -895,7 +1294,7 @@ mod tests {
         let claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("git state"),
+            claim_text: String::from("committed the change"),
             claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
         };
         let commit_event = make_event_at(
@@ -923,12 +1322,12 @@ mod tests {
         let test_claim = ClaimDocument {
             record_id: 1,
             id: String::from("claim-1"),
-            claim_text: String::from("tests ran"),
+            claim_text: String::from("ran pytest; 10 passed"),
             claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
         };
         let spoof_test = make_event(
             "mytest.finished",
-            json!({"target": "unit tests", "success": true}),
+            json!({"target": "pytest", "success": true}),
         );
         assert_eq!(
             check_claim(&test_claim, &[spoof_test], &fingerprint).assessment,
@@ -938,7 +1337,7 @@ mod tests {
         let file_claim = ClaimDocument {
             record_id: 2,
             id: String::from("claim-2"),
-            claim_text: String::from("file changed"),
+            claim_text: String::from("edited src/main.rs"),
             claim_type: Some(String::from(CLAIM_TYPE_FILE_CHANGED)),
         };
         let spoof_file = make_event("myfile.write", json!({"path": "src/main.rs"}));
@@ -950,7 +1349,7 @@ mod tests {
         let git_claim = ClaimDocument {
             record_id: 3,
             id: String::from("claim-3"),
-            claim_text: String::from("git state"),
+            claim_text: String::from("committed the change"),
             claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
         };
         let spoof_git = make_event(
@@ -1016,6 +1415,194 @@ mod tests {
         assert!(
             text.contains("evil\\rmsg"),
             "attacker-controlled carriage return was not escaped: {text}"
+        );
+    }
+
+    #[test]
+    fn test_ran_claim_needs_a_named_runner_not_any_test_event() {
+        let fingerprint = FingerprintId::generate();
+        // A test event ran, but the claim is about a "sure check", not a test
+        // runner: the family alone must not confirm it.
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran sure check and sure recheck on the project"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": true}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
+        assert!(
+            result.reason.contains("does not name a test runner"),
+            "{}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn test_ran_claim_needs_the_runner_it_names() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran python -m unittest discover; 16 tests passed"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let pytest_event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": true}),
+        );
+        assert_eq!(
+            check_claim(&claim, &[pytest_event], &fingerprint).assessment,
+            ClaimAssessment::CannotConfirm
+        );
+        let unittest_event = make_event(
+            "test.finished",
+            json!({"target": "unittest", "success": true}),
+        );
+        assert_eq!(
+            check_claim(&claim, &[unittest_event], &fingerprint).assessment,
+            ClaimAssessment::Confirmed
+        );
+    }
+
+    #[test]
+    fn file_changed_claim_needs_the_files_it_names() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("rewrote pay.py and added tests/test_pay.py"),
+            claim_type: Some(String::from(CLAIM_TYPE_FILE_CHANGED)),
+        };
+        let pay = make_event("file.write", json!({"path": "pay.py"}));
+        // One named file has a recorded write; the other does not yet.
+        assert_eq!(
+            check_claim(&claim, &[pay], &fingerprint).assessment,
+            ClaimAssessment::CannotConfirm
+        );
+        let pay = make_event("file.write", json!({"path": "pay.py"}));
+        let tests = make_event("file.write", json!({"path": "tests/test_pay.py"}));
+        let result = check_claim(&claim, &[pay, tests], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Confirmed);
+        assert_eq!(result.evidence.len(), 2);
+    }
+
+    #[test]
+    fn file_changed_claim_needs_a_named_file() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("changed some code"),
+            claim_type: Some(String::from(CLAIM_TYPE_FILE_CHANGED)),
+        };
+        let write = make_event("file.write", json!({"path": "src/main.rs"}));
+        let result = check_claim(&claim, &[write], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
+        assert!(
+            result.reason.contains("does not name a changed file"),
+            "{}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn git_state_claim_needs_the_action_it_names() {
+        let fingerprint = FingerprintId::generate();
+        let push_claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("committed and pushed the fix"),
+            claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
+        };
+        let commit = make_event("git.commit", json!({"subcommand": "commit"}));
+        // SURE does not record pushes; a commit alone cannot confirm a claim
+        // that also says "pushed".
+        let result = check_claim(&push_claim, &[commit], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
+        assert!(result.reason.contains("'push'"), "{}", result.reason);
+
+        let commit_claim = ClaimDocument {
+            record_id: 2,
+            id: String::from("claim-2"),
+            claim_text: String::from("committed the fix"),
+            claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
+        };
+        let commit_event = make_event("git.commit", json!({"subcommand": "commit"}));
+        assert_eq!(
+            check_claim(&commit_claim, &[commit_event], &fingerprint).assessment,
+            ClaimAssessment::Confirmed
+        );
+    }
+
+    #[test]
+    fn git_action_event_is_projected_as_git() {
+        // Guards the event-type name: recording_projection routes any type
+        // containing "command" to the Command projection first, so a
+        // "git.command" event would never be a Git projection and could never
+        // confirm a git_state claim. MiQi's classifier emits "git.action".
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("committed the fix"),
+            claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
+        };
+        let event = make_event(
+            "git.action",
+            json!({"subcommand": "commit", "target": "git commit", "success": true}),
+        );
+        assert_eq!(
+            check_claim(&claim, &[event], &fingerprint).assessment,
+            ClaimAssessment::Confirmed
+        );
+    }
+
+    #[test]
+    fn current_code_claim_names_build_vs_import() {
+        let fingerprint = FingerprintId::generate();
+        let import_claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("pay.py imports successfully"),
+            claim_type: Some(String::from(CLAIM_TYPE_CURRENT_CODE)),
+        };
+        // A build event is not an import check.
+        let build = make_event(
+            "build.finished",
+            json!({"target": "npm run build", "success": true}),
+        );
+        assert_eq!(
+            check_claim(&import_claim, &[build], &fingerprint).assessment,
+            ClaimAssessment::CannotConfirm
+        );
+        let import_check = make_event(
+            "compile.finished",
+            json!({"target": "python import", "success": true}),
+        );
+        assert_eq!(
+            check_claim(&import_claim, &[import_check], &fingerprint).assessment,
+            ClaimAssessment::Confirmed
+        );
+    }
+
+    #[test]
+    fn current_code_claim_needs_a_successful_result() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("the code builds"),
+            claim_type: Some(String::from(CLAIM_TYPE_CURRENT_CODE)),
+        };
+        let failed_build = make_event("build.finished", json!({"target": "x", "success": false}));
+        assert_eq!(
+            check_claim(&claim, &[failed_build], &fingerprint).assessment,
+            ClaimAssessment::CannotConfirm
         );
     }
 }
