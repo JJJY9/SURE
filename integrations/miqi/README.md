@@ -23,6 +23,7 @@ wherever the user keeps them.
 | `PostToolUse` | after a tool call **completed** | `tool.completed`; a completed `write_file` / `edit_file` / `apply_patch` is `file.written` (payload carries `path` and `written: true`) |
 | `Stop` | the session ends | `session.stopped` |
 | `AgentClaim` | the agent asserts something it did (`claim_id`, `claim_text`, `claim_type`) | `agent.claim` |
+| `ExecClassified` | a successful `exec`, classified locally by MiQi (`kind`: `test` / `build` / `compile` / `run` / `git`; `target`: a short label such as `pytest`; `success: true`; `subcommand` for git) | `test.ran` / `build.ran` / `compile.ran` / `run.ran` / `git.command` — the families `claim_checker` reads for `test_ran` and `current_code` |
 
 Required fields: `event`, `harness_session_id` (MiQi's session key),
 `timestamp_utc` (RFC 3339), `source` (the literal string `miqi`).
@@ -32,7 +33,9 @@ Optional fields: `project_root` (the session's project, an absolute path),
 the string `ok`), `args`, `error`, `path`, `claim_id` / `claim_text` /
 `claim_type` (AgentClaim only; SURE stores the claim as a Claim document and
 checks it against the recorded events — `claim_text` is redacted before it is
-stored).
+stored), and `kind` / `target` / `success` / `subcommand` (ExecClassified
+only — these are MiQi's own normalized classification, never the command
+line).
 
 A failed or refused tool call sends **no** `PostToolUse`: it appears in the
 record as a request without a completion, which is what it was. Nothing is
@@ -44,7 +47,10 @@ reported as completed unless it completed.
 The consequence is stated rather than hidden: a shell request from this
 harness carries no command line, so SURE holds it on the strength of the tool
 name alone, and no recorded allowance can name the command's own acts until a
-later version adds an explicit opt-in for forwarding arguments.
+later version adds an explicit opt-in for forwarding arguments. `ExecClassified`
+does not weaken this: MiQi classifies the command locally and sends only the
+normalized label (`pytest`, `cargo build`, `git commit`), never the command
+text, its arguments, or the paths it named.
 
 ## Tools and vocabulary
 

@@ -53,6 +53,19 @@ pub struct MiqiRawEvent {
     pub claim_text: Option<String>,
     #[serde(default)]
     pub claim_type: Option<String>,
+    /// 2026-10-20 (P3): a successful exec, classified by MiQi itself into one
+    /// of test/build/compile/run/git. Only the normalized label is sent; the
+    /// command line never leaves MiQi. `target` is a short label (`pytest`,
+    /// `cargo build`, `git commit`), and `success` is always true today —
+    /// failed executions are not sent at all.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default)]
+    pub subcommand: Option<String>,
 }
 
 /// Why a MiQi raw event could not be normalized.
@@ -102,7 +115,7 @@ pub fn normalize(text: &str) -> Result<EventEnvelope, MiqiNormalizeError> {
         return Err(MiqiNormalizeError::WrongSource { source: raw.source });
     }
 
-    let event_type = map_event_type(&raw.event, raw.tool.as_deref())?;
+    let event_type = map_event_type(&raw.event, raw.tool.as_deref(), raw.kind.as_deref())?;
     let mut envelope = EventEnvelope::new("miqi", event_type, &raw.timestamp_utc)
         .with_capability_tier(CapabilityTier::Observed)
         .with_session_id(&raw.harness_session_id);
@@ -120,6 +133,7 @@ pub fn normalize(text: &str) -> Result<EventEnvelope, MiqiNormalizeError> {
 fn map_event_type(
     miqi_event: &str,
     tool: Option<&str>,
+    kind: Option<&str>,
 ) -> Result<&'static str, MiqiNormalizeError> {
     match miqi_event {
         "SessionStart" => Ok("session.started"),
@@ -135,6 +149,22 @@ fn map_event_type(
         "Stop" => Ok("session.stopped"),
         // 2026-10-20: completion claims (claim_capture::AGENT_CLAIM_EVENT_TYPE).
         "AgentClaim" => Ok(crate::claim_capture::AGENT_CLAIM_EVENT_TYPE),
+        // 2026-10-20 (P3): a successful exec, classified by MiQi into one of
+        // five families. claim_checker requires the event type to sit in the
+        // family it checks (`test.` / `git.` / `build.|compile.|run.`) and the
+        // projection to carry `target`/`success` (and `subcommand` for git).
+        // An unknown kind is refused, not guessed — the same fail-closed rule
+        // as every other event name.
+        "ExecClassified" => match kind {
+            Some("test") => Ok("test.ran"),
+            Some("build") => Ok("build.ran"),
+            Some("compile") => Ok("compile.ran"),
+            Some("run") => Ok("run.ran"),
+            Some("git") => Ok("git.command"),
+            other => Err(MiqiNormalizeError::UnknownEventType {
+                event: format!("ExecClassified(kind={})", other.unwrap_or("<missing>")),
+            }),
+        },
         other => Err(MiqiNormalizeError::UnknownEventType {
             event: other.to_owned(),
         }),
@@ -173,6 +203,18 @@ fn build_payload(raw: MiqiRawEvent, event_type: &str) -> Value {
     }
     if let Some(claim_type) = raw.claim_type {
         map.insert("claim_type".to_owned(), Value::String(claim_type));
+    }
+    // P3: the build/test/git projections read these three keys. The command
+    // line itself is never part of the event (MiQi classifies locally and
+    // sends the label only).
+    if let Some(target) = raw.target {
+        map.insert("target".to_owned(), Value::String(target));
+    }
+    if let Some(success) = raw.success {
+        map.insert("success".to_owned(), Value::Bool(success));
+    }
+    if let Some(subcommand) = raw.subcommand {
+        map.insert("subcommand".to_owned(), Value::String(subcommand));
     }
 
     // Preserve the original event type for audit.
@@ -280,6 +322,42 @@ mod tests {
     }
 
     #[test]
+    fn exec_classified_maps_to_claim_families() {
+        let text = fixture("exec-classified-test.json");
+        let envelope = normalize(&text).expect("valid fixture");
+        // claim_checker's test_ran requires the test.* family and a Test
+        // projection; both come from MiQi's locally classified label — the
+        // command line itself is never part of the event.
+        assert_eq!(envelope.event_type, "test.ran");
+        assert_eq!(
+            envelope.payload["target"],
+            Value::String("unittest".to_owned())
+        );
+        assert_eq!(envelope.payload["success"], Value::Bool(true));
+        assert!(envelope.payload.get("command").is_none());
+        assert!(envelope.payload.get("args").is_none());
+    }
+
+    #[test]
+    fn exec_classified_git_carries_subcommand() {
+        let text = r#"{"event":"ExecClassified","harness_session_id":"c:s1","timestamp_utc":"2026-10-20T07:30:00Z","source":"miqi","project_root":"D:\\work","kind":"git","target":"git commit","success":true,"subcommand":"commit"}"#;
+        let envelope = normalize(text).expect("valid event");
+        assert_eq!(envelope.event_type, "git.command");
+        assert_eq!(
+            envelope.payload["subcommand"],
+            Value::String("commit".to_owned())
+        );
+    }
+
+    #[test]
+    fn exec_classified_unknown_kind_is_refused() {
+        let text = r#"{"event":"ExecClassified","harness_session_id":"c:s1","timestamp_utc":"2026-10-20T07:30:00Z","source":"miqi","kind":"deploy","target":"deploy"}"#;
+        let err = normalize(text).unwrap_err();
+        assert!(matches!(err, MiqiNormalizeError::UnknownEventType { .. }));
+        assert!(err.to_string().contains("deploy"));
+    }
+
+    #[test]
     fn unknown_event_type_is_rejected() {
         let text = r#"{"event":"UnknownThing","harness_session_id":"c:s1","timestamp_utc":"2026-10-12T09:00:00Z","source":"miqi"}"#;
         let err = normalize(text).unwrap_err();
@@ -318,6 +396,7 @@ mod tests {
             "post-tool-use.json",
             "post-tool-use-write.json",
             "agent-claim.json",
+            "exec-classified-test.json",
             "stop.json",
         ] {
             let text = fixture(name);

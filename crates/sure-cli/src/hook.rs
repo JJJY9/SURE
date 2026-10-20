@@ -1051,9 +1051,8 @@ mod tests {
         assert!(matches!(report, Report::HookDecision(_)), "{report:?}");
 
         let store = Store::open(&paths, Path::new(&project)).expect("store");
-        let fingerprint =
-            project_fingerprint(Path::new(&project), &FingerprintOptions::default())
-                .expect("fingerprint");
+        let fingerprint = project_fingerprint(Path::new(&project), &FingerprintOptions::default())
+            .expect("fingerprint");
         let claims =
             sure_core::claim_checker::check_claims_in_store(&store, &project, &fingerprint.id)
                 .expect("claims");
@@ -1070,7 +1069,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_fails() {        // The four refusals below happen before SURE reaches a store at all —
+    fn missing_source_fails() {
+        // The four refusals below happen before SURE reaches a store at all —
         // there is nothing to read, nothing to normalise, nothing to record — so
         // they name none, which is also the honest statement that the store is
         // not what they are about.

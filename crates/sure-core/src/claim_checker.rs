@@ -150,12 +150,9 @@ pub fn check_claims_in_store(
 ) -> Result<Vec<CheckedClaim>, ClaimCheckError> {
     let case = crate::recheck_lifecycle::case_rule_for(project_root);
     let mine = |record: &crate::store::StoredRecord| {
-        record
-            .project_root
-            .as_deref()
-            .is_some_and(|recorded| {
-                crate::recheck_lifecycle::same_project_root(recorded, project_root, case)
-            })
+        record.project_root.as_deref().is_some_and(|recorded| {
+            crate::recheck_lifecycle::same_project_root(recorded, project_root, case)
+        })
     };
 
     let claim_filter = HistoryFilter {
@@ -755,9 +752,8 @@ mod tests {
             .persist(&test_event, "C:\\work\\my project", &fingerprint, &event_id)
             .expect("persist succeeds");
 
-        let results =
-            check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
-                .expect("check succeeds");
+        let results = check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
+            .expect("check succeeds");
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].assessment,
@@ -783,9 +779,8 @@ mod tests {
             .persist(&test_event, "C:\\work\\my project", &fingerprint, &event_id)
             .expect("persist succeeds");
 
-        let results =
-            check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
-                .expect("check succeeds");
+        let results = check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
+            .expect("check succeeds");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].evidence.len(), 1);
         assert_eq!(
