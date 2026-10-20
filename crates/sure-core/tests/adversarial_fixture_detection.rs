@@ -1365,7 +1365,7 @@ fn read_recording(what: &str, scratch: &str, claim: &Value, events: &[DeclaredEv
         ingested.push(stored);
     }
 
-    let through_the_store = check_claims_in_store(&store, &fingerprint)
+    let through_the_store = check_claims_in_store(&store, CLAIM_PROJECT_ROOT, &fingerprint)
         .unwrap_or_else(|error| panic!("{what}: the claim check failed: {error}"));
     assert_eq!(
         through_the_store.len(),

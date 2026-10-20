@@ -767,6 +767,21 @@ fn persist_event_with_paths(
         .persist(ingested, project_root, &fingerprint.id, event_id)
         .map_err(|e| e.to_string())?;
 
+    // 2026-10-20: an agent completion claim is also a Claim document, not only
+    // an event. claim_checker reads Claim documents, so without this call the
+    // event would be recorded and never checked (capture_agent_claim used to
+    // have no production caller at all). Best-effort: a malformed claim is
+    // ignored here — the event is already persisted and the hook's decision
+    // must not change because of it.
+    if ingested.envelope.event_type == sure_core::claim_capture::AGENT_CLAIM_EVENT_TYPE {
+        let _ = sure_core::claim_capture::capture_agent_claim(
+            ingested,
+            &store,
+            project_root,
+            &fingerprint.id,
+        );
+    }
+
     // Best-effort full recording. Failure must not affect the hook decision.
     //
     // Both recording settings are read through one `Authority::load`, because
@@ -910,6 +925,15 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
+    fn miqi_fixture(name: &str) -> String {
+        let path = repository_root()
+            .join("integrations")
+            .join("miqi")
+            .join("fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
     /// Locations for an event this test ingests, so that the row it produces
     /// lands in a store this test named rather than in the store on the machine
     /// running the suite.
@@ -1012,8 +1036,41 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_fails() {
-        // The four refusals below happen before SURE reaches a store at all —
+    fn miqi_agent_claim_is_captured_as_a_claim_document() {
+        // 2026-10-20: before this wiring, agent.claim events were persisted as
+        // events and never became Claim documents, so claim_checker always saw
+        // an empty claim list.
+        let text = miqi_fixture("agent-claim.json");
+        let (paths, project) = roots_and_project_of_our_own("miqi-agent-claim");
+        let report = run_ingest_with_paths(
+            Some("miqi"),
+            None,
+            &session_event_at(&text, &project),
+            &paths,
+        );
+        assert!(matches!(report, Report::HookDecision(_)), "{report:?}");
+
+        let store = Store::open(&paths, Path::new(&project)).expect("store");
+        let fingerprint =
+            project_fingerprint(Path::new(&project), &FingerprintOptions::default())
+                .expect("fingerprint");
+        let claims =
+            sure_core::claim_checker::check_claims_in_store(&store, &project, &fingerprint.id)
+                .expect("claims");
+        assert_eq!(claims.len(), 1, "the claim was not captured: {claims:?}");
+        assert_eq!(claims[0].id, "claim-1");
+        assert_eq!(claims[0].claim_text, "ran cargo test; 42 passed");
+        assert_eq!(claims[0].claim_type, "test_ran");
+        // No test.* event was recorded, so the claim cannot be confirmed — the
+        // honest reading, not a pass.
+        assert_eq!(
+            claims[0].assessment,
+            sure_core::evidence::ClaimAssessment::CannotConfirm
+        );
+    }
+
+    #[test]
+    fn missing_source_fails() {        // The four refusals below happen before SURE reaches a store at all —
         // there is nothing to read, nothing to normalise, nothing to record — so
         // they name none, which is also the honest statement that the store is
         // not what they are about.

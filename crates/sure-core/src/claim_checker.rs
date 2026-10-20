@@ -121,7 +121,21 @@ impl From<StoreError> for ClaimCheckError {
     }
 }
 
-/// Read claim and event records for a fingerprint and check every claim.
+/// Read claim and event records for a project and check every claim.
+///
+/// The read is by **project root**, not by the run's fingerprint id. A
+/// [`ProjectFingerprint`](sure_domain::vocabulary::ProjectFingerprint) carries
+/// a freshly minted id beside its content digest, so a claim written by a hook
+/// (one process) and the check run (another process) never share an id; a
+/// filter on the id would find nothing and report "no claims" about a project
+/// that has them. `recheck_lifecycle::previous_open_findings` met the same
+/// question and answers it the same way — a row is this project's when
+/// `recheck_lifecycle::same_project_root` says so — and the same rule is used
+/// here so two readers of one store cannot answer "when are two paths one
+/// project" two ways.
+///
+/// `fingerprint` still names the state this run read: it is the value every
+/// returned claim's evidence is anchored to.
 ///
 /// # Errors
 ///
@@ -131,21 +145,40 @@ impl From<StoreError> for ClaimCheckError {
 /// reconstructed.
 pub fn check_claims_in_store(
     store: &Store,
+    project_root: &str,
     fingerprint: &FingerprintId,
 ) -> Result<Vec<CheckedClaim>, ClaimCheckError> {
+    let case = crate::recheck_lifecycle::case_rule_for(project_root);
+    let mine = |record: &crate::store::StoredRecord| {
+        record
+            .project_root
+            .as_deref()
+            .is_some_and(|recorded| {
+                crate::recheck_lifecycle::same_project_root(recorded, project_root, case)
+            })
+    };
+
     let claim_filter = HistoryFilter {
-        project_fingerprint: Some(fingerprint),
+        project_fingerprint: None,
         kind: Some(RecordKind::Document(DocumentKind::Claim)),
         include_recordings: false,
     };
-    let claim_records = store.history(&claim_filter, 10_000)?;
+    let claim_records: Vec<_> = store
+        .history(&claim_filter, 10_000)?
+        .into_iter()
+        .filter(mine)
+        .collect();
 
     let event_filter = HistoryFilter {
-        project_fingerprint: Some(fingerprint),
+        project_fingerprint: None,
         kind: Some(RecordKind::Document(DocumentKind::Event)),
         include_recordings: false,
     };
-    let event_records = store.history(&event_filter, 10_000)?;
+    let event_records: Vec<_> = store
+        .history(&event_filter, 10_000)?
+        .into_iter()
+        .filter(mine)
+        .collect();
 
     let claims = parse_claim_records(&claim_records)?;
     let events = parse_event_records(&event_records)?;
@@ -722,7 +755,9 @@ mod tests {
             .persist(&test_event, "C:\\work\\my project", &fingerprint, &event_id)
             .expect("persist succeeds");
 
-        let results = check_claims_in_store(&store, &fingerprint).expect("check succeeds");
+        let results =
+            check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
+                .expect("check succeeds");
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].assessment,
@@ -748,7 +783,9 @@ mod tests {
             .persist(&test_event, "C:\\work\\my project", &fingerprint, &event_id)
             .expect("persist succeeds");
 
-        let results = check_claims_in_store(&store, &fingerprint).expect("check succeeds");
+        let results =
+            check_claims_in_store(&store, "C:\\work\\my project", &fingerprint)
+                .expect("check succeeds");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].evidence.len(), 1);
         assert_eq!(

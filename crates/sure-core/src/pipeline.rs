@@ -1472,7 +1472,10 @@ impl Pipeline<'_> {
             );
         };
 
-        match claim_checker::check_claims_in_store(store, fingerprint) {
+        // 2026-10-20: claims are matched to the project by root, not by this
+        // run's minted fingerprint id — see the function's own doc comment.
+        let project_root = self.project.to_string_lossy();
+        match claim_checker::check_claims_in_store(store, &project_root, fingerprint) {
             Ok(checked) => {
                 let detail = if checked.is_empty() {
                     "the history holds no claims about this project.".to_owned()

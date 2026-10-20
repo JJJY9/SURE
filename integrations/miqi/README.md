@@ -20,15 +20,19 @@ wherever the user keeps them.
 |---|---|---|
 | `SessionStart` | the session begins | `session.started` |
 | `PreToolUse` | before a tool call executes | `tool.requested` |
-| `PostToolUse` | after a tool call **completed** | `tool.completed` |
+| `PostToolUse` | after a tool call **completed** | `tool.completed`; a completed `write_file` / `edit_file` / `apply_patch` is `file.written` (payload carries `path` and `written: true`) |
 | `Stop` | the session ends | `session.stopped` |
+| `AgentClaim` | the agent asserts something it did (`claim_id`, `claim_text`, `claim_type`) | `agent.claim` |
 
 Required fields: `event`, `harness_session_id` (MiQi's session key),
 `timestamp_utc` (RFC 3339), `source` (the literal string `miqi`).
 
 Optional fields: `project_root` (the session's project, an absolute path),
 `tool` (MiQi's own tool name — see the vocabulary below), `result` (v1 sends
-the string `ok`), `args`, `error`, `path`.
+the string `ok`), `args`, `error`, `path`, `claim_id` / `claim_text` /
+`claim_type` (AgentClaim only; SURE stores the claim as a Claim document and
+checks it against the recorded events — `claim_text` is redacted before it is
+stored).
 
 A failed or refused tool call sends **no** `PostToolUse`: it appears in the
 record as a request without a completion, which is what it was. Nothing is
