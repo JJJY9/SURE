@@ -83,6 +83,13 @@ impl PackageLaunchers {
     /// machine where npm is missing or is a real executable is untouched.
     #[must_use]
     pub fn resolve(&self, program: &OsStr, arguments: &[OsString]) -> Option<Launch> {
+        // Only Windows completes a bare name with `.cmd`/`.bat`; on every other
+        // platform npm is the file itself and is started as it stands. The
+        // guard is a value rather than `#[cfg]` so the module compiles — and
+        // its type is usable — everywhere.
+        if !cfg!(windows) {
+            return None;
+        }
         let named = Path::new(program);
         // A path is the plan talking about a file, not a name on PATH.
         if named.components().count() != 1 {
@@ -143,7 +150,7 @@ fn node_beside(directory: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
