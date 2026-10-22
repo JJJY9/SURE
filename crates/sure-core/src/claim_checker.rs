@@ -305,7 +305,7 @@ pub fn check_claim(
                     .iter()
                     .map(|event| event_success(event))
                     .collect();
-                let any_failed = latest_success.iter().any(|value| *value == Some(false));
+                let any_failed = latest_success.contains(&Some(false));
                 let text = normalize_claim_text(&claim.claim_text);
                 let contradicted = match claim_type {
                     // 声称"通过/OK"却记录到失败 → 与证据矛盾。
@@ -382,7 +382,7 @@ pub fn check_claim(
                                 ),
                             };
                         }
-                        if !recorded.iter().any(|count| *count == value) {
+                        if !recorded.contains(&value) {
                             return CheckedClaim {
                                 record_id: claim.record_id,
                                 id: claim.id.clone(),

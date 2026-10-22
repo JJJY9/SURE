@@ -49,6 +49,7 @@ pub mod intent_implementation;
 pub mod intent_model;
 pub mod noop_heuristics;
 pub mod normalizer;
+pub mod package_launcher;
 pub mod paths;
 pub mod pipeline;
 pub mod plain_language_finding;
