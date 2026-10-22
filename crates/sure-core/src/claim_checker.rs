@@ -209,12 +209,15 @@ pub fn check_claims_against_events(
 /// a `current_code` claim that says "builds" needs a successful recorded build.
 ///
 /// Returns [`ClaimAssessment::Confirmed`] when every part the claim names is
-/// matched by a recorded event and the evidence is still fresh (for result
-/// claims), [`ClaimAssessment::CannotConfirm`] when the claim names nothing
-/// SURE can match, a named part has no recorded event, or the matching
-/// evidence has been superseded by a later code change, and
-/// [`ClaimAssessment::NotCheckable`] when the claim type is missing or
-/// unknown. Never returns [`ClaimAssessment::Contradicted`].
+/// matched by a recorded (successful, where required) event and the evidence
+/// is still fresh (for result claims); [`ClaimAssessment::Contradicted`] when
+/// the most recent matching event records an explicit failure and the claim
+/// asserts success (a `test_ran` claim that says "passed", any `current_code`
+/// or `git_state` claim); [`ClaimAssessment::CannotConfirm`] when the claim
+/// names nothing SURE can match, a named part has no recorded event, the
+/// latest matching run failed without the claim asserting success, or the
+/// matching evidence has been superseded by a later code change; and
+/// [`ClaimAssessment::NotCheckable`] when the claim type is missing or unknown.
 pub fn check_claim(
     claim: &ClaimDocument,
     events: &[IngestedEvent],
@@ -284,18 +287,6 @@ pub fn check_claim(
         let evidence = evidence_for(&matched.events, fingerprint);
 
         match stale {
-            None => CheckedClaim {
-                record_id: claim.record_id,
-                id: claim.id.clone(),
-                claim_text: claim.claim_text.clone(),
-                claim_type: claim_type.to_owned(),
-                assessment: ClaimAssessment::Confirmed,
-                evidence,
-                reason: format!(
-                    "A recorded harness event supports this {} claim.",
-                    crate::redact::escape_control_characters(claim_type)
-                ),
-            },
             Some(reason) => CheckedClaim {
                 record_id: claim.record_id,
                 id: claim.id.clone(),
@@ -305,6 +296,83 @@ pub fn check_claim(
                 evidence,
                 reason: String::from(reason.plain_explanation()),
             },
+            None => {
+                // 2026-10-22:记录到的失败运行不是"没有证据",而是反证。
+                // 只把显式的 success=false 当失败;没有该字段的事件保持旧语义
+                // (test_ran/git_state 可确认,current_code 需成功)。
+                let latest_success: Vec<Option<bool>> = matched
+                    .events
+                    .iter()
+                    .map(|event| event_success(event))
+                    .collect();
+                let any_failed = latest_success.iter().any(|value| *value == Some(false));
+                let text = normalize_claim_text(&claim.claim_text);
+                let contradicted = match claim_type {
+                    // 声称"通过/OK"却记录到失败 → 与证据矛盾。
+                    CLAIM_TYPE_TEST_RAN => any_failed && claim_asserts_success(&text),
+                    // current_code / git_state 的声明天然断言成功。
+                    CLAIM_TYPE_CURRENT_CODE | CLAIM_TYPE_GIT_STATE => any_failed,
+                    _ => false,
+                };
+                if contradicted {
+                    return CheckedClaim {
+                        record_id: claim.record_id,
+                        id: claim.id.clone(),
+                        claim_text: claim.claim_text.clone(),
+                        claim_type: claim_type.to_owned(),
+                        assessment: ClaimAssessment::Contradicted,
+                        evidence,
+                        reason: format!(
+                            "A recorded harness event contradicts this {} claim: the most recent matching run did not succeed.",
+                            crate::redact::escape_control_characters(claim_type)
+                        ),
+                    };
+                }
+                // current_code 没有成功记录就不算确认(失败已在上面判为矛盾,
+                // 缺 success 字段视为无法确认——旧语义)。
+                if claim_type == CLAIM_TYPE_CURRENT_CODE
+                    && latest_success.iter().any(|value| *value != Some(true))
+                {
+                    return CheckedClaim {
+                        record_id: claim.record_id,
+                        id: claim.id.clone(),
+                        claim_text: claim.claim_text.clone(),
+                        claim_type: claim_type.to_owned(),
+                        assessment: ClaimAssessment::CannotConfirm,
+                        evidence,
+                        reason: String::from(
+                            "SURE has no recorded event that supports this claim: no successful recorded build, compile, or run was found.",
+                        ),
+                    };
+                }
+                // test_ran 点名了 runner、最新一次运行失败、且声明没有断言成功:
+                // 它确实运行过,但没有通过——如实"无法确认",不当成支持。
+                if claim_type == CLAIM_TYPE_TEST_RAN && any_failed {
+                    return CheckedClaim {
+                        record_id: claim.record_id,
+                        id: claim.id.clone(),
+                        claim_text: claim.claim_text.clone(),
+                        claim_type: claim_type.to_owned(),
+                        assessment: ClaimAssessment::CannotConfirm,
+                        evidence,
+                        reason: String::from(
+                            "SURE has no recorded event that supports this claim: the most recent matching test run failed.",
+                        ),
+                    };
+                }
+                CheckedClaim {
+                    record_id: claim.record_id,
+                    id: claim.id.clone(),
+                    claim_text: claim.claim_text.clone(),
+                    claim_type: claim_type.to_owned(),
+                    assessment: ClaimAssessment::Confirmed,
+                    evidence,
+                    reason: format!(
+                        "A recorded harness event supports this {} claim.",
+                        crate::redact::escape_control_characters(claim_type)
+                    ),
+                }
+            }
         }
     } else {
         CheckedClaim {
@@ -429,6 +497,34 @@ fn normalize_claim_text(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The explicit `success` flag a harness recorded for an event, if any.
+///
+/// `None` (the harness did not say) is kept distinct from `Some(false)`:
+/// only an explicit failure can contradict a claim, and legacy events without
+/// the flag keep the old confirmation semantics.
+fn event_success(event: &IngestedEvent) -> Option<bool> {
+    event
+        .envelope
+        .payload
+        .get("success")
+        .and_then(Value::as_bool)
+}
+
+/// Whether a claim's own words assert that a run succeeded.
+fn claim_asserts_success(text: &str) -> bool {
+    const SUCCESS_WORDS: &[&str] = &[
+        "passed",
+        "pass",
+        "ok",
+        "succeeded",
+        "success",
+        "green",
+        "通过",
+        "成功",
+    ];
+    SUCCESS_WORDS.iter().any(|word| contains_phrase(text, word))
 }
 
 fn is_word_char(byte: u8) -> bool {
@@ -735,11 +831,7 @@ fn match_current_code<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvide
                 return false;
             }
             match project(event) {
-                Some(StandardProjection::BuildTest {
-                    kind,
-                    success: true,
-                    ..
-                }) => match wanted {
+                Some(StandardProjection::BuildTest { kind, .. }) => match wanted {
                     CodeResultKind::Build => kind == BuildTestKind::Build,
                     CodeResultKind::Compile => kind == BuildTestKind::Compile,
                     CodeResultKind::Import => {
@@ -970,7 +1062,7 @@ mod tests {
         };
         let event = make_event(
             "test.finished",
-            json!({"target": "pytest", "success": false, "counts": {"passed": 10, "failed": 2}}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10, "failed": 2}}),
         );
         let fingerprint = FingerprintId::generate();
         let result = check_claim(&claim, &[event], &fingerprint);
@@ -1591,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn current_code_claim_needs_a_successful_result() {
+    fn current_code_claim_is_contradicted_by_a_failed_build() {
         let fingerprint = FingerprintId::generate();
         let claim = ClaimDocument {
             record_id: 1,
@@ -1600,9 +1692,69 @@ mod tests {
             claim_type: Some(String::from(CLAIM_TYPE_CURRENT_CODE)),
         };
         let failed_build = make_event("build.finished", json!({"target": "x", "success": false}));
-        assert_eq!(
-            check_claim(&claim, &[failed_build], &fingerprint).assessment,
-            ClaimAssessment::CannotConfirm
+        let result = check_claim(&claim, &[failed_build], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Contradicted);
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.reason.contains("contradicts"));
+    }
+
+    #[test]
+    fn test_ran_failed_run_contradicts_a_passed_claim() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran pytest; 12 passed"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": false}),
         );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Contradicted);
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.reason.contains("contradicts"));
+    }
+
+    #[test]
+    fn test_ran_failed_run_is_cannot_confirm_without_a_success_assertion() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran pytest"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": false}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
+        assert!(
+            result
+                .reason
+                .contains("most recent matching test run failed")
+        );
+    }
+
+    #[test]
+    fn git_state_failed_action_contradicts_a_claim() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("committed the fix"),
+            claim_type: Some(String::from(CLAIM_TYPE_GIT_STATE)),
+        };
+        let event = make_event(
+            "git.action",
+            json!({"subcommand": "commit", "target": "git commit", "success": false}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Contradicted);
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.reason.contains("contradicts"));
     }
 }

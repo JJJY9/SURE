@@ -23,7 +23,7 @@ wherever the user keeps them.
 | `PostToolUse` | after a tool call **completed** | `tool.completed`; a completed `write_file` / `edit_file` / `apply_patch` is `file.written` (payload carries `path` and `written: true`) |
 | `Stop` | the session ends | `session.stopped` |
 | `AgentClaim` | the agent asserts something it did (`claim_id`, `claim_text`, `claim_type`) | `agent.claim` |
-| `ExecClassified` | a successful `exec`, classified locally by MiQi (`kind`: `test` / `build` / `compile` / `run` / `git`; `target`: a short label such as `pytest`; `success: true`; `subcommand` for git) | `test.ran` / `build.ran` / `compile.ran` / `run.ran` / `git.action` — the families `claim_checker` reads for `test_ran` / `current_code` / `git_state` |
+| `ExecClassified` | an `exec`, classified locally by MiQi (`kind`: `test` / `build` / `compile` / `run` / `git`; `target`: a short label such as `pytest`; `success` records whether the run succeeded — failures are sent too, so a "passed" claim can be contradicted; `subcommand` for git) | `test.ran` / `build.ran` / `compile.ran` / `run.ran` / `git.action` — the families `claim_checker` reads for `test_ran` / `current_code` / `git_state` |
 
 Required fields: `event`, `harness_session_id` (MiQi's session key),
 `timestamp_utc` (RFC 3339), `source` (the literal string `miqi`).
