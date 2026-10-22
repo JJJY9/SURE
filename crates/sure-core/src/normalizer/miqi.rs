@@ -66,6 +66,11 @@ pub struct MiqiRawEvent {
     pub success: Option<bool>,
     #[serde(default)]
     pub subcommand: Option<String>,
+    /// 2026-10-22: counts MiQi parsed from the test output (`passed` /
+    /// `failed` / `total`). claim_checker compares numbers a claim states
+    /// against these; absent means "the event does not carry counts".
+    #[serde(default)]
+    pub counts: Option<Value>,
 }
 
 /// Why a MiQi raw event could not be normalized.
@@ -221,6 +226,9 @@ fn build_payload(raw: MiqiRawEvent, event_type: &str) -> Value {
     if let Some(subcommand) = raw.subcommand {
         map.insert("subcommand".to_owned(), Value::String(subcommand));
     }
+    if let Some(counts) = raw.counts {
+        map.insert("counts".to_owned(), counts);
+    }
 
     // Preserve the original event type for audit.
     map.insert("miqi_event".to_owned(), Value::String(raw.event));
@@ -360,6 +368,14 @@ mod tests {
         let err = normalize(text).unwrap_err();
         assert!(matches!(err, MiqiNormalizeError::UnknownEventType { .. }));
         assert!(err.to_string().contains("deploy"));
+    }
+
+    #[test]
+    fn exec_classified_carries_counts() {
+        let text = r#"{"event":"ExecClassified","harness_session_id":"c:s1","timestamp_utc":"2026-10-22T02:00:00Z","source":"miqi","project_root":"D:\\work","kind":"test","target":"pytest","success":true,"counts":{"passed":12,"failed":1}}"#;
+        let envelope = normalize(text).expect("valid event");
+        assert_eq!(envelope.payload["counts"]["passed"], Value::from(12));
+        assert_eq!(envelope.payload["counts"]["failed"], Value::from(1));
     }
 
     #[test]

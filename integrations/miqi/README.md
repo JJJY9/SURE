@@ -33,7 +33,7 @@ Optional fields: `project_root` (the session's project, an absolute path),
 the string `ok`), `args`, `error`, `path`, `claim_id` / `claim_text` /
 `claim_type` (AgentClaim only; SURE stores the claim as a Claim document and
 checks it against the recorded events — `claim_text` is redacted before it is
-stored), and `kind` / `target` / `success` / `subcommand` (ExecClassified
+stored), and `kind` / `target` / `success` / `subcommand` / `counts` (ExecClassified
 only — these are MiQi's own normalized classification, never the command
 line).
 

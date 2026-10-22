@@ -360,6 +360,44 @@ pub fn check_claim(
                         ),
                     };
                 }
+                // 2026-10-22:声明里点名的数字必须与记录到的计数一致。
+                // 数字不符 → 矛盾;记录没有计数 → 无法确认(不猜)。
+                if claim_type == CLAIM_TYPE_TEST_RAN {
+                    for (key, value) in claimed_counts(&text) {
+                        let recorded: Vec<u64> = matched
+                            .events
+                            .iter()
+                            .filter_map(|event| counts_value(event, key))
+                            .collect();
+                        if recorded.is_empty() {
+                            return CheckedClaim {
+                                record_id: claim.record_id,
+                                id: claim.id.clone(),
+                                claim_text: claim.claim_text.clone(),
+                                claim_type: claim_type.to_owned(),
+                                assessment: ClaimAssessment::CannotConfirm,
+                                evidence,
+                                reason: format!(
+                                    "SURE has no recorded event that supports this claim: the claim states {value} {key}, but the recorded event carries no such count."
+                                ),
+                            };
+                        }
+                        if !recorded.iter().any(|count| *count == value) {
+                            return CheckedClaim {
+                                record_id: claim.record_id,
+                                id: claim.id.clone(),
+                                claim_text: claim.claim_text.clone(),
+                                claim_type: claim_type.to_owned(),
+                                assessment: ClaimAssessment::Contradicted,
+                                evidence,
+                                reason: format!(
+                                    "A recorded harness event contradicts this test_ran claim: the claim states {value} {key}, but the recorded count is {}.",
+                                    recorded[0]
+                                ),
+                            };
+                        }
+                    }
+                }
                 CheckedClaim {
                     record_id: claim.record_id,
                     id: claim.id.clone(),
@@ -525,6 +563,52 @@ fn claim_asserts_success(text: &str) -> bool {
         "成功",
     ];
     SUCCESS_WORDS.iter().any(|word| contains_phrase(text, word))
+}
+
+/// Counts a claim's own words assert (`12 passed`, `Ran 16 tests`, ...).
+///
+/// Returns `(count key, value)` pairs; keys match the event payload's
+/// `counts` object (`passed` / `failed` / `total`).
+fn claimed_counts(text: &str) -> Vec<(&'static str, u64)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut counts: Vec<(&'static str, u64)> = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        let token = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let Ok(value) = token.parse::<u64>() else {
+            continue;
+        };
+        let Some(next) = words.get(index + 1) else {
+            continue;
+        };
+        let next = next
+            .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            .to_lowercase();
+        let key = if next.starts_with("passed") {
+            "passed"
+        } else if next.starts_with("failed") {
+            "failed"
+        } else if next == "test" || next == "tests" {
+            "total"
+        } else {
+            continue;
+        };
+        if !counts
+            .iter()
+            .any(|(existing_key, existing_value)| *existing_key == key && *existing_value == value)
+        {
+            counts.push((key, value));
+        }
+    }
+    counts
+}
+
+fn counts_value(event: &IngestedEvent, key: &str) -> Option<u64> {
+    event
+        .envelope
+        .payload
+        .get("counts")
+        .and_then(|counts| counts.get(key))
+        .and_then(Value::as_u64)
 }
 
 fn is_word_char(byte: u8) -> bool {
@@ -1232,7 +1316,7 @@ mod tests {
         // Store a matching test event.
         let test_event = make_event(
             "test.finished",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         let event_id = EventId::generate();
         SessionEventStore::new(&store)
@@ -1263,7 +1347,7 @@ mod tests {
 
         let test_event = make_event(
             "test.finished",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         let event_id = EventId::generate();
         SessionEventStore::new(&store)
@@ -1303,7 +1387,7 @@ mod tests {
         let test_event = make_event_at(
             "test.finished",
             "2026-09-14T09:10:56.000Z",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         let later_write = make_event_at(
             "file.write",
@@ -1419,7 +1503,7 @@ mod tests {
         };
         let spoof_test = make_event(
             "mytest.finished",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         assert_eq!(
             check_claim(&test_claim, &[spoof_test], &fingerprint).assessment,
@@ -1523,7 +1607,7 @@ mod tests {
         };
         let event = make_event(
             "test.finished",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         let result = check_claim(&claim, &[event], &fingerprint);
         assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
@@ -1545,7 +1629,7 @@ mod tests {
         };
         let pytest_event = make_event(
             "test.finished",
-            json!({"target": "pytest", "success": true}),
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
         );
         assert_eq!(
             check_claim(&claim, &[pytest_event], &fingerprint).assessment,
@@ -1553,7 +1637,7 @@ mod tests {
         );
         let unittest_event = make_event(
             "test.finished",
-            json!({"target": "unittest", "success": true}),
+            json!({"target": "unittest", "success": true, "counts": {"total": 16}}),
         );
         assert_eq!(
             check_claim(&claim, &[unittest_event], &fingerprint).assessment,
@@ -1756,5 +1840,66 @@ mod tests {
         assert_eq!(result.assessment, ClaimAssessment::Contradicted);
         assert_eq!(result.evidence.len(), 1);
         assert!(result.reason.contains("contradicts"));
+    }
+
+    #[test]
+    fn test_ran_claim_stating_counts_is_contradicted_by_different_counts() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran pytest; 12 passed"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": true, "counts": {"passed": 10}}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Contradicted);
+        assert!(
+            result.reason.contains("states 12 passed"),
+            "{}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn test_ran_claim_stating_counts_needs_recorded_counts() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran pytest; 12 passed"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "pytest", "success": true}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::CannotConfirm);
+        assert!(
+            result.reason.contains("carries no such count"),
+            "{}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn test_ran_claim_counts_match_confirms() {
+        let fingerprint = FingerprintId::generate();
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("ran unittest; Ran 16 tests, OK"),
+            claim_type: Some(String::from(CLAIM_TYPE_TEST_RAN)),
+        };
+        let event = make_event(
+            "test.finished",
+            json!({"target": "unittest", "success": true, "counts": {"total": 16}}),
+        );
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(result.assessment, ClaimAssessment::Confirmed);
     }
 }
