@@ -10,25 +10,30 @@
 //!
 //! # What this module starts instead
 //!
-//! The shim itself runs one thing: the Node executable beside it, with npm's
-//! own JavaScript entry (`node_modules/npm/bin/npm-cli.js`). This module
-//! resolves the planned name to exactly that pair — **a real executable and the
-//! JavaScript file the installed npm ships**, found from the shim's own
-//! directory and never from the project — and the runner starts it with the
-//! plan's arguments unchanged (`run test`, …). It does not build a command
-//! line, does not read the batch file, and does not start a command
-//! interpreter: `node` is a program [`crate::safety`] classifies, and a project
-//! allowed to run its own scripts is allowed to run npm's entry with them.
+//! The shim itself runs one thing: the Node executable beside it, with the
+//! package manager's own JavaScript entry (`node_modules/npm/bin/npm-cli.js`,
+//! `node_modules/pnpm/bin/pnpm.cjs`, `node_modules/yarn/bin/yarn.js`). This
+//! module resolves the planned name to exactly that pair — **a real executable
+//! and the JavaScript file the installed manager ships**, found from the shim's
+//! own directory and never from the project — and the runner starts it with the
+//! plan's arguments unchanged (`run test`, …). When the shim is a corepack
+//! wrapper (`node_modules/corepack/dist/corepack.js`) the dispatcher is used
+//! with the command the plan named, which is what the shim itself calls. It
+//! does not build a command line, does not read the batch file, and does not
+//! start a command interpreter: `node` is a program [`crate::safety`]
+//! classifies, and a project allowed to run its own scripts is allowed to run
+//! the package manager's entry with them.
 //!
 //! # What it refuses
 //!
-//! Only a bare `npm`/`npx` name whose resolved file is a `.cmd` or `.bat` **and**
-//! whose directory carries both `node.exe` (or a startable `node` on `PATH`)
-//! and the shipped CLI JavaScript is translated. Every other shape — a
-//! `yarn.cmd`/`pnpm.cmd` shim, a `.ps1`, a name that resolves to nothing, an
-//! npm installed without its JavaScript side — returns `None`, and the
-//! original program is used: the check then fails with the honest
-//! `InterpreterRequired`/not-found reason it already had. Nothing is guessed.
+//! Only a bare `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` name whose resolved
+//! file is a `.cmd` or `.bat` **and** whose directory carries both a startable
+//! `node` (beside the shim or on `PATH`) and either the manager's shipped entry
+//! or the corepack dispatcher is translated. Every other shape — a `.ps1`, a
+//! name that resolves to nothing, an install without its JavaScript side —
+//! returns `None`, and the original program is used: the check then fails with
+//! the honest `InterpreterRequired`/not-found reason it already had. Nothing is
+//! guessed.
 //!
 //! # Where it is bound
 //!
@@ -96,15 +101,20 @@ impl PackageLaunchers {
             return None;
         }
         let name = named.file_stem()?.to_str()?.to_ascii_lowercase();
-        let entry = match name.as_str() {
-            "npm" => "npm-cli.js",
-            "npx" => "npx-cli.js",
+        // The package's own directory and the JavaScript entry its shim runs.
+        // `yarnpkg` is Yarn's alternative name; `pnpx` is pnpm's npx.
+        let (package, entry) = match name.as_str() {
+            "npm" => ("npm", "npm-cli.js"),
+            "npx" => ("npm", "npx-cli.js"),
+            "pnpm" => ("pnpm", "pnpm.cjs"),
+            "pnpx" => ("pnpm", "pnpx.cjs"),
+            "yarn" | "yarnpkg" => ("yarn", "yarn.js"),
             _ => return None,
         };
 
         let Resolution::InterpreterRequired(shim) = self.path.resolve(program) else {
-            // Executable (the platforms where npm is a script) or nothing at
-            // all: nothing to translate.
+            // Executable (the platforms where the manager is a script) or
+            // nothing at all: nothing to translate.
             return None;
         };
         let extension = shim.extension()?.to_str()?.to_ascii_lowercase();
@@ -115,23 +125,36 @@ impl PackageLaunchers {
         }
 
         let directory = shim.parent()?;
-        let cli = directory
-            .join("node_modules")
-            .join("npm")
-            .join("bin")
-            .join(entry);
-        if !cli.is_file() {
-            return None;
-        }
-
         let node =
             node_beside(directory).or_else(|| match self.path.resolve(OsStr::new("node")) {
                 Resolution::Executable(found) => Some(found),
                 _ => None,
             })?;
 
-        let mut launched: Vec<OsString> = Vec::with_capacity(arguments.len() + 1);
-        launched.push(cli.into_os_string());
+        // The manager's own JavaScript entry, as an npm-global install ships
+        // it; otherwise the corepack dispatcher the shim may be a wrapper for.
+        let package_entry = directory
+            .join("node_modules")
+            .join(package)
+            .join("bin")
+            .join(entry);
+        let mut launched: Vec<OsString> = Vec::with_capacity(arguments.len() + 2);
+        if package_entry.is_file() {
+            launched.push(package_entry.into_os_string());
+        } else {
+            let corepack = directory
+                .join("node_modules")
+                .join("corepack")
+                .join("dist")
+                .join("corepack.js");
+            if !corepack.is_file() {
+                return None;
+            }
+            // `corepack pnpm …` / `corepack yarn …` — the same dispatcher the
+            // generated shim calls, with the command the plan named.
+            launched.push(corepack.into_os_string());
+            launched.push(OsString::from(name));
+        }
         launched.extend(arguments.iter().cloned());
         Some(Launch {
             program: node,
@@ -271,6 +294,75 @@ mod tests {
         assert_eq!(
             launchers(scratch.path()).resolve(OsStr::new("pnpm"), &[]),
             None
+        );
+    }
+
+    #[test]
+    fn a_pnpm_shim_becomes_node_and_its_entry() {
+        let scratch = Scratch::new("pnpm");
+        let node = scratch.file("node.exe");
+        scratch.file("pnpm.cmd");
+        let cli = scratch.file("node_modules/pnpm/bin/pnpm.cjs");
+
+        let launch = launchers(scratch.path())
+            .resolve(
+                OsStr::new("pnpm"),
+                &[OsString::from("run"), OsString::from("test")],
+            )
+            .expect("the pnpm shim is translatable");
+
+        assert_eq!(launch.program, node);
+        assert_eq!(
+            launch.arguments,
+            vec![
+                cli.into_os_string(),
+                OsString::from("run"),
+                OsString::from("test")
+            ]
+        );
+    }
+
+    #[test]
+    fn yarnpkg_uses_the_yarn_entry() {
+        let scratch = Scratch::new("yarn");
+        let node = scratch.file("node.exe");
+        scratch.file("yarnpkg.cmd");
+        let cli = scratch.file("node_modules/yarn/bin/yarn.js");
+
+        let launch = launchers(scratch.path())
+            .resolve(OsStr::new("yarnpkg"), &[OsString::from("test")])
+            .expect("the yarn shim is translatable");
+
+        assert_eq!(launch.program, node);
+        assert_eq!(
+            launch.arguments,
+            vec![cli.into_os_string(), OsString::from("test")]
+        );
+    }
+
+    #[test]
+    fn a_corepack_shim_uses_the_dispatcher() {
+        let scratch = Scratch::new("corepack");
+        let node = scratch.file("node.exe");
+        scratch.file("pnpm.cmd");
+        let dispatcher = scratch.file("node_modules/corepack/dist/corepack.js");
+
+        let launch = launchers(scratch.path())
+            .resolve(
+                OsStr::new("pnpm"),
+                &[OsString::from("run"), OsString::from("test")],
+            )
+            .expect("the corepack shim is translatable");
+
+        assert_eq!(launch.program, node);
+        assert_eq!(
+            launch.arguments,
+            vec![
+                dispatcher.into_os_string(),
+                OsString::from("pnpm"),
+                OsString::from("run"),
+                OsString::from("test")
+            ]
         );
     }
 
