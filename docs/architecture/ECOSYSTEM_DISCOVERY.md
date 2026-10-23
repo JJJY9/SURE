@@ -574,13 +574,11 @@ three facts wearing one label.
 level.** It is the input to it: `sure_core::support::classify` takes the weakest
 of these grades and the best level this build's capability allows, and
 `docs/product/SUPPORTED_STACKS.md` defines the levels by what SURE can do —
-including running checks, which this build does not do. So a readable
-`Cargo.toml` is graded `generic` here and the project it is in is reported at
-level `inspect_only`, with the reason naming both and saying why. The two are
-kept apart rather than merged because collapsing them would mean one of the two
-questions getting a wrong answer; the conflict between the two definitions of
-`generic` is recorded in `sure_core::support`'s module comment and in
-`progress/HANDOFF.md` as an open decision.
+including running approved checks. Since ADR 0017 the ceiling is B, so a
+readable `Cargo.toml` graded `generic` here is reported at level B (generic); a
+project discovery grades `inspect_only` stays C. The two are kept apart rather
+than merged because collapsing them would mean one of the two questions getting
+a wrong answer; level A remains a higher bar than the discovery grade.
 
 ## What is bounded, and how
 

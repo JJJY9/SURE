@@ -1,6 +1,8 @@
 # ADR 0015 — The support ceiling, on the measurements that were taken
 
-Status: Accepted
+Status: Accepted — **superseded by ADR 0017 (2026-10-23)**, which raised the
+ceiling to `Generic` once the `Revisit when` reading existed. The readings below
+remain the evidence record; this record's decision is no longer the ship state.
 
 Date: 2026-09-22
 
@@ -8,8 +10,8 @@ Implementation: **`P18-T012` took the readings and left `support::CEILING` where
 Three files carry the consequence: `crates/sure-core/src/support.rs`'s module comment no
 longer says the macOS and Linux legs have never run (they have), `crates/sure-core/tests/
 browser_probe.rs`'s walk covers every crate rather than one, and this record is the
-measurement ADR 0014's last consequence pointed forward to. The constant itself is
-unchanged: `pub const CEILING: SupportLevel = SupportLevel::InspectOnly;`
+measurement ADR 0014's last consequence pointed forward to. The constant itself was
+unchanged at the time; ADR 0017 is the later record that moves it.
 (`crates/sure-core/src/support.rs:180` — it was `:152` before this task rewrote the
 module comment above it).
 

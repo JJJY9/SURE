@@ -25,11 +25,11 @@
 //! a `ProcessRequest`, and **that rule is the whole of the reason**. It is a rule
 //! about which files may *name* a request, not about whether this build is able
 //! to run one: since `P18-T007` a product path does run project code, which is
-//! what `sure_core::support`'s module comment records, and the ceiling of level C
-//! rests on platform coverage rather than on that path having been absent. A
-//! sentence here used to say the opposite — that the ceiling *rests on no product
-//! path running project code* — and it was a true conclusion resting on a premise
-//! that had gone; `P18-T012` corrected it. So the module reports the case
+//! what `sure_core::support`'s module comment records, and the ceiling of level B
+//! rests on the tracked three-platform reading, not on that path having been
+//! absent (ADR 0017). A sentence here used to say the opposite — that the ceiling
+//! *rests on no product path running project code* — and it was a true conclusion
+//! resting on a premise that had gone; `P18-T012` corrected it. So the module reports the case
 //! `cannot_confirm` with that rule written into the row, and this file measures
 //! it and supplies the measurement through
 //! `acceptance_report_with` — which is why the row's `surfaces` name this file

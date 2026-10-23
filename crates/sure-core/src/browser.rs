@@ -108,19 +108,15 @@
 //! begun naming it* is answered by that file being outside the tree the rule
 //! walks rather than by the absence it used to record.
 //!
-//! **`support::CEILING` did not move with it, and the reason is not this
-//! module's.** The ceiling's reason is the platform argument `P18-T007` wrote
-//! beside it, re-read on 2026-10-22: a Node check whose only program on the
-//! machine is `npm.cmd` still comes back `InterpreterRequired`, but the product
-//! runner now starts the known package-manager shims through their own
-//! JavaScript entry (`crate::package_launcher`), so that case is reachable
-//! rather than stopped. A Rust project's declared check now completes in the
-//! tracked CLI test `finished_declared_check.rs` on all three CI legs, and
-//! `docs/adr/0015-support-ceiling-evidence.md`'s amendment records why moving
-//! the constant is now a separate open decision rather than a reading this
-//! module can take. A new caller is not evidence about which platforms SURE has
-//! been shown to run project code on, and the paragraph beside the ceiling is
-//! where that argument lives.
+//! **`support::CEILING` moved to B on 2026-10-23, and this module is not why.**
+//! The reading that earned it is the tracked CLI test
+//! `finished_declared_check.rs` (ADR 0017), not a new browser caller. The
+//! platform facts this module relied on still hold: a Node check whose only
+//! program on the machine is `npm.cmd` comes back `InterpreterRequired`, and the
+//! product runner starts the known package-manager shims through their own
+//! JavaScript entry (`crate::package_launcher`). A new caller is not evidence
+//! about which platforms SURE has been shown to run project code on, and the
+//! paragraph beside the ceiling is where that argument lives.
 //!
 //! **The loopback rule is [`Endpoint`]'s**, and it is reused rather than
 //! restated — see [`Target`]. A browser will navigate to the internet happily,
