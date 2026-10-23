@@ -1702,6 +1702,12 @@ impl Pipeline<'_> {
 ///
 /// # When it cannot write one
 ///
+/// A finding whose evidence cannot carry its severity — a `must_fix` candidate
+/// the scanner inferred from source text, or a model-only finding — gets no
+/// contract: there is no check that can settle it, and asking an agent to
+/// "fix" evidence SURE never established is the false task this rule exists to
+/// prevent. It stays in the report as `cannot_confirm` with a manual next step.
+///
 /// A finding whose evidence names no check this run planned gets an empty seed,
 /// and `from_finding` refuses it — correctly, because a contract naming a check
 /// nobody can run is worse than no contract. The refusal is not swallowed: the
@@ -1711,6 +1717,46 @@ impl Pipeline<'_> {
 ///
 /// [`RepairContract::from_finding`]: sure_domain::vocabulary::RepairContract::from_finding
 /// [`seed_rechecks`]: crate::repair_impact::seed_rechecks
+/// The contracts the findings justify, and the ones they do not.
+///
+/// Split out from [`repair_contracts`] so the rule can be tested without a whole
+/// run: a finding whose evidence cannot carry its severity is a candidate (or a
+/// model opinion), not a settled defect, and no check can settle it. It stays in
+/// the report with a manual next step; it does not become a repair task.
+fn contracts_for(
+    findings: &[sure_domain::finding::Finding],
+    schedule: &crate::schedule::CheckSchedule,
+) -> (Vec<sure_domain::vocabulary::RepairContract>, Vec<String>) {
+    let mut contracts = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for finding in findings {
+        // A contract is an instruction to change the project and a check that
+        // can observe the change. A finding whose own evidence cannot carry its
+        // severity — a `must_fix` candidate the scanner inferred from source
+        // text, or a model-only finding — has no such check: the candidate
+        // scanner's question is not settled by a command, and writing a repair
+        // contract for it asks an agent to "fix" evidence SURE never
+        // established. The finding stays in the report as `cannot_confirm` with
+        // a manual next step (see `findings_from_checks`); it does not become a
+        // repair task.
+        if !finding.is_grounded() {
+            refused.push(format!(
+                "{} (candidate evidence: no check can settle it)",
+                finding.title
+            ));
+            continue;
+        }
+        // The seed comes from the finding and is filtered to checks this run
+        // planned, so it can never name a check nobody can re-run.
+        let seed = seed_rechecks(finding, schedule);
+        match sure_domain::vocabulary::RepairContract::from_finding(finding, seed) {
+            Ok(contract) => contracts.push(contract),
+            Err(error) => refused.push(format!("{} ({error})", finding.title)),
+        }
+    }
+    (contracts, refused)
+}
+
 fn repair_contracts(
     run: &RunOutcome,
 ) -> (Vec<sure_domain::vocabulary::RepairContract>, StageOutcome) {
@@ -1725,17 +1771,7 @@ fn repair_contracts(
         );
     }
 
-    let mut contracts = Vec::new();
-    let mut refused: Vec<String> = Vec::new();
-    for finding in &run.verdict.findings {
-        // The seed comes from the finding and is filtered to checks this run
-        // planned, so it can never name a check nobody can re-run.
-        let seed = seed_rechecks(finding, &run.schedule);
-        match sure_domain::vocabulary::RepairContract::from_finding(finding, seed) {
-            Ok(contract) => contracts.push(contract),
-            Err(error) => refused.push(format!("{} ({error})", finding.title)),
-        }
-    }
+    let (contracts, refused) = contracts_for(&run.verdict.findings, &run.schedule);
 
     let findings = run.verdict.findings.len();
     if contracts.is_empty() {
@@ -1744,8 +1780,9 @@ fn repair_contracts(
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{findings} finding(s) need instructions and none of them names a check this \
-                     run planned, so SURE has no acceptance test it is willing to write: {}",
+                    "{findings} finding(s) need instructions and none of them is grounded in \
+                     evidence a check can settle, so SURE has no acceptance test it is willing to \
+                     write: {}",
                     refused.join("; ")
                 ),
             },
@@ -1758,8 +1795,9 @@ fn repair_contracts(
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{written} of {findings} finding(s) have instructions; the rest name no check \
-                     this run planned and SURE will not invent an acceptance test for them: {}",
+                    "{written} of {findings} finding(s) have instructions; the rest are not \
+                     grounded in evidence a check can settle, and SURE will not invent an \
+                     acceptance test for them: {}",
                     refused.join("; ")
                 ),
             },
@@ -4003,6 +4041,78 @@ mod tests {
             line.contains(&now.digest),
             "the line does not name the state the project is actually in, so a reader cannot tell \
              what this run's results are stale against: {line}"
+        );
+    }
+
+    #[test]
+    fn a_candidate_must_fix_is_not_offered_as_a_repair_contract() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::finding::FindingStatus;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "UI action: click handler on element",
+            Severity::MustFix,
+            true,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        assert_eq!(findings[0].status, FindingStatus::CannotConfirm);
+        let (contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            contracts.is_empty(),
+            "a candidate was offered as a repair contract: {contracts:?}"
+        );
+        assert!(
+            refused
+                .iter()
+                .any(|reason| reason.contains("candidate evidence")),
+            "the refusal does not say the finding is candidate evidence: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_todo_candidate_is_not_excluded_by_the_candidate_rule() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "project contains TODO comments",
+            Severity::CanFixLater,
+            false,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        let (_contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            refused
+                .iter()
+                .all(|reason| !reason.contains("candidate evidence")),
+            "a non-blocking TODO candidate was excluded by the candidate rule: {refused:?}"
         );
     }
 }
