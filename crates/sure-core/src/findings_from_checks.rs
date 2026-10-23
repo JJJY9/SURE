@@ -253,11 +253,14 @@ fn next_step_for(anchor: &EvidenceAnchor, spoke: bool, settled: bool) -> String 
     if !spoke {
         if anchor.subject == AnchorSubject::Command && !anchor.locator.trim().is_empty() {
             return format!(
-                "Run `{}` and let SURE re-check it, or allow SURE to run it.",
+                "Run `{}` and let SURE re-check it, or allow SURE to run it with `sure config \
+                 set execution.mode host_confirmed`.",
                 anchor.locator.trim()
             );
         }
-        return "Allow SURE to run this check, then re-check.".to_owned();
+        return "Allow SURE to run this check with `sure config set execution.mode \
+                host_confirmed`, then re-check."
+            .to_owned();
     }
     if !settled {
         return "Check this by hand in the project and decide whether a change is needed; do not \
@@ -452,6 +455,13 @@ mod tests {
              reaches the report and cannot become a repair"
         );
         assert_eq!(finding.evidence[0].class, EvidenceClass::ObservedFact);
+        assert!(
+            finding
+                .next_step
+                .contains("sure config set execution.mode host_confirmed"),
+            "a check the user has not allowed must name the command that allows it: {}",
+            finding.next_step
+        );
     }
 
     #[test]

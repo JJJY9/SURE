@@ -191,7 +191,7 @@ pub enum Command {
         action: HookAction,
     },
 
-    /// Explain one recorded result in plain language.
+    /// Explain one recorded result in plain language (not implemented in this build).
     Explain {
         /// The result to explain.
         id: Option<String>,
@@ -282,7 +282,7 @@ pub enum HistoryAction {
         #[arg(long, value_name = "PROJECT_ROOT")]
         project: Option<String>,
     },
-    /// Write the history out as JSON.
+    /// Write the history out as JSON (not implemented in this build).
     Export,
 }
 
@@ -291,7 +291,7 @@ pub enum HistoryAction {
 pub enum ConfigAction {
     /// Show where SURE keeps its files on this machine.
     Paths,
-    /// Show the settings in effect and which layer each came from.
+    /// Show the settings in effect and which layer each came from (not implemented in this build).
     Show,
     /// Report problems in the configuration without checking the project.
     Validate,

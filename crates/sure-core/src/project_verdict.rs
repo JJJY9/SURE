@@ -64,6 +64,19 @@ pub fn build_verdict(
 /// regardless of what [`ProjectVerdict::is_ready_for_hand_off`] claims.
 #[must_use]
 pub fn render_summary(verdict: &ProjectVerdict) -> String {
+    render_summary_with_completeness(verdict, true)
+}
+
+/// The same summary, with the run's own answer about whether every stage ran.
+///
+/// [`render_summary`] is for a verdict read on its own, where the stages are not
+/// available. A caller that holds a [`PipelineOutcome`](crate::pipeline::PipelineOutcome)
+/// passes [`PipelineOutcome::every_stage_ran`](crate::pipeline::PipelineOutcome::every_stage_ran)
+/// here: a green aggregate with a stage that did not run is not a clean result,
+/// and the summary must not call it ready to hand off while the run's own exit
+/// status says it is not.
+#[must_use]
+pub fn render_summary_with_completeness(verdict: &ProjectVerdict, every_stage_ran: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     // Aggregate headline — this is SURE's own frozen text, so it is safe.
@@ -76,8 +89,14 @@ pub fn render_summary(verdict: &ProjectVerdict) -> String {
         .any(|f| f.status.needs_attention() && f.severity.blocks_hand_off());
     let aggregate_is_green = verdict.aggregate.is_green();
 
-    if aggregate_is_green && !blocked_by_finding {
+    if aggregate_is_green && !blocked_by_finding && every_stage_ran {
         parts.push("This project looks ready to hand off.".to_owned());
+    } else if aggregate_is_green && !blocked_by_finding {
+        parts.push(
+            "No blocking problem was found in what ran, but this run did not check everything, \
+             so it is not a clean result."
+                .to_owned(),
+        );
     } else {
         parts.push("This project is not ready to hand off.".to_owned());
     }

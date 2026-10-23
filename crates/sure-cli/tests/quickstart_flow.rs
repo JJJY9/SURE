@@ -1536,7 +1536,7 @@ const BREAKS: &[Break] = &[
     Break {
         what: "the install command stops being named",
         file: QUICKSTART,
-        from: "& .\\scripts\\Install-Sure.ps1 -Archive .\\target\\tmp\\release\\sure-0.1.2-x86_64-pc-windows-msvc.zip",
+        from: "& .\\scripts\\Install-Sure.ps1 -Archive .\\target\\tmp\\release\\sure-0.1.3-x86_64-pc-windows-msvc.zip",
         to: "Run the installer, naming the archive.",
         wanted: "Install-Sure.ps1 -Archive",
     },

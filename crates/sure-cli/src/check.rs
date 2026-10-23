@@ -634,6 +634,7 @@ fn finished(
             color: false,
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
+            every_stage_ran: outcome.every_stage_ran(),
         },
         out,
     )?;
