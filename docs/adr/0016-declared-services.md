@@ -296,3 +296,15 @@ platform it claims — the program SURE would run, the files the declaration has
 name, and the evidence that it works on every platform SURE claims. Or when a project
 needs a service topology SURE did not start, which is a question about admission
 rather than about this format, and belongs in its own record.
+
+## Amendment — 2026-10-22
+
+The package-manager launcher added for **command checks** on 2026-10-22
+(`crates/sure-core/src/package_launcher.rs`; ADR 0014's amendment) is not on the service
+path. `StartSmoke` starts what the service declaration names and does not hold a
+`ProcessRunner`, so a package-manager service launcher remains rejected for the reason
+above: on Windows the program behind `npm run start` is still a batch file the service
+supervisor would name. A service launched by a package-manager script is a different
+capability with its own admission question, not a consequence of the command-check
+launcher.
+

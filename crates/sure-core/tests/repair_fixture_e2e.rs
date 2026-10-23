@@ -894,12 +894,22 @@ fn a_careless_repair_that_breaks_the_other_member_cannot_close_the_finding() {
          the regression rule has to find"
     );
 
+    // The checks this run planned, as this fixture can state it: the ones whose
+    // results it holds. None is candidate-driven, so nothing below turns on the
+    // plan-versus-missing distinction `planned` exists for (`c4fd952`), and the
+    // failing regression check must keep the finding open by the plain rule.
+    let planned: Vec<CheckId> = after
+        .results
+        .iter()
+        .map(|result| result.id.clone())
+        .collect();
     let update = reconcile(
         LifecycleInputs {
             previous_open: std::slice::from_ref(&finding),
             current_findings: &[],
             check_results: &after.results,
             rechecks: &[(finding.id.clone(), selected)],
+            planned: &planned,
             case: CaseSensitivity::Sensitive,
         },
         after.state.clone(),
@@ -1001,12 +1011,20 @@ fn a_complete_repair_closes_the_finding_on_new_passing_evidence() {
         );
     }
 
+    // Same reading of `planned` as the regression half above: the fixture's own
+    // results are what it can name, and no candidate-driven check is among them.
+    let planned: Vec<CheckId> = after
+        .results
+        .iter()
+        .map(|result| result.id.clone())
+        .collect();
     let update = reconcile(
         LifecycleInputs {
             previous_open: std::slice::from_ref(&finding),
             current_findings: &[],
             check_results: &after.results,
             rechecks: &[(finding.id.clone(), selected)],
+            planned: &planned,
             case: CaseSensitivity::Sensitive,
         },
         after.state.clone(),

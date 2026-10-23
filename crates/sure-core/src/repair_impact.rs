@@ -37,6 +37,40 @@ use sure_domain::vocabulary::RepairContract;
 
 use crate::schedule::{CheckSchedule, ScheduledCheck};
 
+/// The checks a finding names as able to observe whether it is fixed, without
+/// asking any schedule.
+///
+/// This is [`seed_rechecks`] before its filter: every evidence anchor on the
+/// finding whose `subject_id` is a check, in the order the anchors appear, with
+/// no regard for whether the current run plans them.
+///
+/// # Why a caller would want this rather than [`seed_rechecks`]
+///
+/// A **re-check** reads this list to reconstruct the contract an earlier repair
+/// run wrote for a finding this run no longer produces. The earlier contract's
+/// checks may have left the schedule — for a candidate-driven check that is
+/// exactly what the subject's disappearance means, and it is the one absence
+/// that resolves a finding rather than keeping it open. [`seed_rechecks`]'s
+/// filter exists for the *other* direction: a seed is about to be handed to
+/// `RepairContract::from_finding` for a contract written from this very run, and
+/// naming a check this run did not plan would make an acceptance test nobody can
+/// run. The reconstruction is not writing a new acceptance test; it is re-asking
+/// an earlier one, and the selector widens it against the current plan the same
+/// way it widens every contract's.
+#[must_use]
+pub fn named_checks(finding: &Finding) -> Vec<CheckId> {
+    let mut named: Vec<CheckId> = Vec::new();
+    for evidence in &finding.evidence {
+        let Some(id) = check_id_in(&evidence.anchor) else {
+            continue;
+        };
+        if !named.contains(&id) {
+            named.push(id);
+        }
+    }
+    named
+}
+
 /// The checks a finding names as able to observe whether it is fixed.
 ///
 /// # What it reads
@@ -73,19 +107,10 @@ use crate::schedule::{CheckSchedule, ScheduledCheck};
 /// not plan is a check this run cannot re-check.
 #[must_use]
 pub fn seed_rechecks(finding: &Finding, schedule: &CheckSchedule) -> Vec<CheckId> {
-    let mut seed: Vec<CheckId> = Vec::new();
-    for evidence in &finding.evidence {
-        let Some(id) = check_id_in(&evidence.anchor) else {
-            continue;
-        };
-        if schedule.get(&id).is_none() {
-            continue;
-        }
-        if !seed.contains(&id) {
-            seed.push(id);
-        }
-    }
-    seed
+    named_checks(finding)
+        .into_iter()
+        .filter(|id| schedule.get(id).is_some())
+        .collect()
 }
 
 /// The check an anchor points at, when it points at one.

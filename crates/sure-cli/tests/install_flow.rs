@@ -1527,6 +1527,72 @@ fn the_install_flow_behaves_the_same_on_every_powershell_host() {
     }
 }
 
+/// The manifest has to be readable by the scripts that wrote it when the
+/// install root holds a non-ASCII component right before a separator — which
+/// is the shape of `C:\Users\<name>\...` on every Windows machine whose user
+/// name is not ASCII, this one included.
+///
+/// The other tests' scratch directory holds non-ASCII too, but never
+/// immediately before a separator, so they stayed green through this. Measured
+/// 2026-10-13 on Windows 11 with a Chinese user name and no PowerShell 7
+/// installed: a second install of an archive the first had written stopped
+/// with "not readable as this install's manifest" against that manifest, and
+/// the uninstaller would have answered "no manifest" about one its own
+/// install had written. `Read-PreviousManifest`'s and the uninstaller's
+/// `-Encoding UTF8` carry the account; this is the case that reddens without
+/// them.
+#[test]
+fn the_manifest_round_trips_under_a_non_ascii_user_name() {
+    for (label, host) in hosts() {
+        let scratch = a_directory_of_our_own("non-ascii-root");
+        let (archive, _) = a_release_archive(&host, &scratch);
+        // The component sits immediately before the leaf, so the path as the
+        // manifest records it holds a non-ASCII run right before `\\SURE`.
+        let root = scratch.join("董加钧").join("SURE");
+
+        let first = install(&host, &archive, &root, &[]);
+        assert_eq!(
+            first.status,
+            0,
+            "{label}: the first install failed:\n{}",
+            first.everything()
+        );
+
+        // Every destination now holds the first install's own file, so the
+        // second install has to read the manifest and replace what it claims —
+        // not refuse it.
+        let second = install(&host, &archive, &root, &[]);
+        assert_eq!(
+            second.status,
+            0,
+            "{label}: a second install refused the manifest the first wrote:\n{}",
+            second.everything()
+        );
+        assert!(
+            second.stdout.contains("earlier install of this version"),
+            "{label}: the second run did not recognise its own previous files:\n{}",
+            second.everything()
+        );
+
+        let removed = uninstall(&host, &root, &[]);
+        assert_eq!(
+            removed.status,
+            0,
+            "{label}: the uninstall failed:\n{}",
+            removed.everything()
+        );
+        assert!(
+            !root.join("bin").join("sure.exe").is_file(),
+            "{label}: the uninstall did not remove what its own manifest recorded:\n{}",
+            removed.everything()
+        );
+        assert!(
+            !root.join("install-manifest.json").is_file(),
+            "{label}: the manifest survived a clean uninstall"
+        );
+    }
+}
+
 /// One of `scripts/*.ps1`, with its line endings normalized to LF.
 ///
 /// `.gitattributes` declares `*.ps1 text eol=crlf`, so the working copy of these

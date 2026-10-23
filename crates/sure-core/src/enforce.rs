@@ -2,20 +2,13 @@
 //!
 //! # Why this module exists
 //!
-//! `inspect_only` has been true of SURE so far for a reason that will not last:
-//! **nothing in this repository launches a project process.** The census in
-//! `tests/spawn_sites.rs` counts four places that build a
-//! [`Command`](std::process::Command) — the runner's own machinery, `taskkill`,
-//! and the browser launcher — and `support::CEILING` is justified by *no project
-//! code running*. That is a fact about this build, not a property of the mode —
-//! and the day the first check is wired to the runner the fact stops being true.
-//! The census test says in its own documentation that it is written to fail on
-//! that day.
-//!
-//! This module is what has to be in place before that day. It turns "nothing
-//! runs, because there is nothing to run it" into **"nothing runs, because the
-//! plan says so"** — a value that a runner has to consult rather than an absence
-//! it happens to fall into.
+//! `inspect_only` is the default mode, and since `P18-T007` it is a promise about
+//! what SURE will start rather than an absence of a runner: the product does run
+//! a project's checks when the user's own settings allow it, and this module is
+//! what keeps the default from starting anything. It turns "nothing runs, because
+//! there is nothing to run it" into **"nothing runs, because the plan says so"** —
+//! a value that a runner has to consult rather than an absence it happens to fall
+//! into.
 //!
 //! # What it decides
 //!
@@ -74,9 +67,8 @@
 //! `crate::service` may name a `Supervisor`. **`crate::pipeline` is where a check
 //! drives on that road** — it builds the plan, calls [`Enforcement::of`] and hands
 //! the admitted commands to the runner — so the road is in use, and
-//! `support::CEILING` did not move with it: level B is a claim about every
-//! platform SURE runs on, and `support`'s module comment says why that reading has
-//! not been taken (ADR 0014; the measurements are `P18-T012`'s).
+//! `support::CEILING` is B since ADR 0017; this module's admission property is
+//! what keeps the default mode from starting anything.
 //!
 //! **It says nothing about what a command does when it runs.** The classification
 //! is `safety::classify`'s, and its own caveat — SURE reads command lines, not
@@ -280,10 +272,10 @@ impl Enforcement {
     /// The predicate is [`consent::runs_project_code`]'s and not a second copy of
     /// it: the mode rule that decides a command needs asking and the rule that
     /// decides a check is dynamic have to be about the same set of categories, and
-    /// a copy here is where they would drift. **This is the property
-    /// `support::CEILING` will be able to rest on** once a runner exists — a value
-    /// saying that nothing admitted runs project code, rather than the absence of
-    /// a runner saying it.
+    /// a copy here is where they would drift. **This is the property the default
+    /// mode rests on** — a value saying that nothing admitted runs project code —
+    /// now that the runner exists and the support ceiling no longer rests on its
+    /// absence (ADR 0017).
     #[must_use]
     pub fn runs_project_code(&self) -> bool {
         self.admitted()

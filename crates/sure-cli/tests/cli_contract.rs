@@ -3009,6 +3009,89 @@ fn a_repair_contract_is_carried_to_the_next_run_and_that_run_says_what_it_left_o
 }
 
 #[test]
+fn a_recheck_closes_a_finding_whose_todo_the_repair_removed() {
+    // The closing half of the repair loop, observed by running the commands: a
+    // repair run records a finding about a TODO candidate, the fix removes the
+    // marker, and the re-check closes the finding rather than carrying it open
+    // forever. Measured red before this test's fix: stage 12 only ever held the
+    // *current* run's contracts, and a fixed project has no current finding to
+    // write one from — so `closed` was empty and a genuinely fixed project read
+    // as still broken (the MiQi full-repair E2E hit exactly this).
+    //
+    // No candidate row is planted in the store by hand: the scanner really
+    // proposes `chk_candidatetodo<…>` from the file, the repair run's contract
+    // really names it, and the fix is a real rewrite of the file. This test's
+    // environment carries no analysis key, so the model-assessment stage does
+    // not run and the one finding here is the deterministic one — which is why
+    // `still_open` can be asserted empty rather than filtered.
+    let project = a_directory_of_our_own("todo-project");
+    std::fs::write(project.join("README.md"), "# a small project\n")
+        .unwrap_or_else(|error| panic!("cannot write into {}: {error}", project.display()));
+    let todo = project.join("pay.py");
+    std::fs::write(
+        &todo,
+        "# TODO: implement the payment flow, not finished yet\nraise NotImplementedError(\"payment\")\n",
+    )
+    .unwrap_or_else(|error| panic!("cannot write {}: {error}", todo.display()));
+    let store = a_store_of_our_own();
+    let path = project
+        .to_str()
+        .expect("this test's own directory is a UTF-8 path");
+    let frame = |run: &Run| -> serde_json::Value {
+        serde_json::from_str(run.stdout.trim())
+            .unwrap_or_else(|error| panic!("`sure` printed no frame: {error}\n{}", run.stdout))
+    };
+
+    // The repair run writes the finding a later re-check has to find.
+    let repaired = run_in_a_store(&store, &["--format", "json", "repair", path]);
+    assert_eq!(
+        repaired.status, 1,
+        "`sure repair` returned {}:\n{}",
+        repaired.status, repaired.stderr
+    );
+    let repaired = frame(&repaired);
+    let repairs = repaired["details"]["repairs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`sure repair` answered with no repairs array: {repaired}"));
+    assert!(
+        !repairs.is_empty(),
+        "`sure repair` answered with no contract for a project whose TODO check failed: \
+         {repaired}"
+    );
+
+    // The repair a coding agent would have made: the marker is gone.
+    std::fs::write(
+        &todo,
+        "def pay():\n    \"\"\"Implements the payment flow.\"\"\"\n    return {\"status\": \"paid\"}\n",
+    )
+    .unwrap_or_else(|error| panic!("cannot rewrite {}: {error}", todo.display()));
+
+    let rechecked = run_in_a_store(&store, &["--format", "json", "recheck", path]);
+    let rechecked = frame(&rechecked);
+    let closed = rechecked["details"]["lifecycle"]["closed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`sure recheck` reported no comparison: {rechecked}"));
+    assert_eq!(
+        closed.len(),
+        1,
+        "the fix removed the marker and the re-check closed {} finding(s): {rechecked}",
+        closed.len()
+    );
+    assert!(
+        closed[0]["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("TODO")),
+        "the closed finding is not the one the fix was about: {rechecked}"
+    );
+    assert!(
+        rechecked["details"]["lifecycle"]["still_open"]
+            .as_array()
+            .is_some_and(|rows| rows.is_empty()),
+        "a fixed project still reports something open: {rechecked}"
+    );
+}
+
+#[test]
 fn a_recheck_with_nothing_to_compare_does_not_report_a_comparison() {
     // A first re-check has no earlier run behind it, and the report used to say
     // otherwise. The `Some(empty)` stage-12 return made the human form print

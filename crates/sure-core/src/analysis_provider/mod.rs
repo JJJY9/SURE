@@ -387,16 +387,25 @@ impl OpenAiCompatibleAnalyzer {
 impl Analyzer for OpenAiCompatibleAnalyzer {
     fn analyze(&self, request: AnalysisRequest<'_>) -> Result<AnalysisResponse, AnalysisError> {
         if self.endpoint.is_empty() {
-            return Err(openai_failed("endpoint is not configured"));
+            return Err(openai_failed(
+                "endpoint is not configured; set `analysis.endpoint` in your SURE settings file",
+            ));
         }
         let Some(model) = self.model.as_ref() else {
-            return Err(openai_failed("model is not configured"));
+            return Err(openai_failed(
+                "model is not configured; set `analysis.model` in your SURE settings file",
+            ));
         };
         let api_key = self
             .api_key
             .clone()
             .or_else(|| std::env::var(OPENAI_API_KEY_VAR).ok())
-            .ok_or_else(|| openai_failed("API key is not configured"))?;
+            .ok_or_else(|| {
+                openai_failed(
+                    "API key is not configured; set SURE_OPENAI_API_KEY in the environment that \
+                     starts SURE",
+                )
+            })?;
         let prompt = prepare_prompt(request.prompt);
 
         let (status, body) = self

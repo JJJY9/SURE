@@ -208,12 +208,18 @@ fn a_repair_with_failing_regression_check_cannot_turn_green() {
         ),
     ];
 
+    // The checks this run planned, as these fixtures can state it: the ones whose
+    // results they hold. None is candidate-driven — the generated ids are not
+    // `chk_candidate*` — so the plan-versus-missing distinction `planned` serves
+    // (`c4fd952`) is out of these cases, and the plain rule decides alone.
+    let planned: Vec<CheckId> = results.iter().map(|result| result.id.clone()).collect();
     let update = reconcile(
         LifecycleInputs {
             previous_open: std::slice::from_ref(&previous),
             current_findings: &[],
             check_results: &results,
             rechecks: &[(previous.id.clone(), selected.clone())],
+            planned: &planned,
             case: CaseSensitivity::Sensitive,
         },
         next_fingerprint(),
@@ -279,12 +285,16 @@ fn a_repair_with_all_selected_checks_passing_can_resolve() {
         ),
     ];
 
+    // Same reading of `planned` as the regression case above: the fixture's own
+    // results are what it can name.
+    let planned: Vec<CheckId> = results.iter().map(|result| result.id.clone()).collect();
     let update = reconcile(
         LifecycleInputs {
             previous_open: std::slice::from_ref(&previous),
             current_findings: &[],
             check_results: &results,
             rechecks: &[(previous.id.clone(), selected)],
+            planned: &planned,
             case: CaseSensitivity::Sensitive,
         },
         next_fingerprint(),

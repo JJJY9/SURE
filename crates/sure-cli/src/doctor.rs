@@ -1073,8 +1073,9 @@ mod tests {
         // instead."* — and neither is true of this build: a missing runtime is
         // not a fallback, and since `P18-T007` what decides whether a check runs
         // here is `Authority::execution_mode`, which answers the **user's own**
-        // settings file (`support::CEILING` is `InspectOnly` for a different
-        // reason — a level B claim is about every platform SURE runs on). The
+        // settings file (`support::CEILING` is `Generic` since ADR 0017; the
+        // level is a capability claim, not a statement that a check runs here).
+        // The
         // guard over the module's sentence asked whether it contained a phrase,
         // so it stayed green while the sentence was false.
         //

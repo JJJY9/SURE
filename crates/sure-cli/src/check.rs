@@ -333,12 +333,18 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
     // one invocation was authorised to do — and a door that is only opened on the
     // runs that need it is a door nobody has tested on the runs that do.
     let runner = ProcessRunner::new(Cancellation::new())
-        .with_page_driver(Box::new(sure_core::browser_driver::Browser::system()));
+        .with_page_driver(Box::new(sure_core::browser_driver::Browser::system()))
+        // Windows installs npm/pnpm/yarn as batch shims, which SURE refuses to
+        // start. The launcher starts what npm's shim itself runs — `node` and
+        // npm's shipped JavaScript entry — for the names it can prove; every
+        // other program is left exactly as the plan holds it.
+        .with_package_launchers(sure_core::package_launcher::PackageLaunchers::of_this_machine());
     let run = Pipeline {
         project,
         purpose,
         config: &loaded.config,
         execution: authority.execution(),
+        analysis: authority.analysis().value,
         store: store.as_ref(),
         goal: goal_as_recorded,
         runner: &runner,
@@ -628,6 +634,7 @@ fn finished(
             color: false,
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
+            every_stage_ran: outcome.every_stage_ran(),
         },
         out,
     )?;

@@ -106,8 +106,13 @@
 
 use std::path::Path;
 
-use sure_domain::evidence::{ClaimAssessment, EvidenceClass, StalenessReason};
+use sure_domain::evidence::{
+    ClaimAssessment, Evidence, EvidenceAnchor, EvidenceClass, StalenessReason,
+};
 use sure_domain::execution::{ExecutionMode, ExecutionPermissions};
+use sure_domain::finding::{
+    AssessmentSource, Finding, FindingBuilder, FindingStatus, SeverityRationale,
+};
 use sure_domain::ids::{CheckId, ClaimId, FingerprintId};
 use sure_domain::intent::{IntentSource, ProjectIntent};
 use sure_domain::severity::Severity;
@@ -121,6 +126,7 @@ use crate::capability_report;
 use crate::checks::{self, check_id};
 use crate::claim_checker::{self, CheckedClaim};
 use crate::components::ComponentGraph;
+use crate::config::AnalysisConfig;
 use crate::config::AnalysisProvider;
 use crate::config::Config;
 use crate::config::ExecutionSettings;
@@ -656,6 +662,15 @@ pub struct Pipeline<'a> {
     /// nothing else — values only an [`Enforcement`] can produce — so this field
     /// cannot be used to start something the mode did not admit.
     pub runner: &'a dyn CheckRunner,
+    /// The analysis settings in force, **already arbitrated between the two
+    /// files**.
+    ///
+    /// Not read from [`Self::config`] here, for the same reason
+    /// [`Self::execution`] is not: the project's own file holds a *request*,
+    /// and a stage that read it directly would consult a provider the
+    /// arbitration had not put in force. When the project names no provider,
+    /// the user's own file decides (`Authority::analysis`).
+    pub analysis: AnalysisConfig,
 }
 
 /// A stage that stopped the run.
@@ -965,7 +980,8 @@ impl Pipeline<'_> {
         );
 
         // ---- 8. Grounded model assessment ------------------------------------
-        let (model_outcome, model_results) = self.model_assessment(&fingerprint);
+        let (model_outcome, model_results, model_findings) =
+            self.model_assessment(&fingerprint, &candidates);
         results.extend(model_results);
         stages.push(Stage::ModelAssessment, model_outcome);
 
@@ -1057,7 +1073,8 @@ impl Pipeline<'_> {
         // Read from `report.results()` and not from `not_checked` below, although
         // the two overlap: `not_checked` is the subset with no result, and a check
         // that ran and failed is a finding with no entry in it.
-        let findings = findings_from_checks(report.results(), &schedule);
+        let mut findings = findings_from_checks(report.results(), &schedule);
+        findings.extend(model_findings);
         let verdict = build_verdict(
             fingerprint,
             report.aggregate().clone(),
@@ -1246,8 +1263,12 @@ impl Pipeline<'_> {
     /// own word for it, and [`crate::project_verdict`] already has a sentence for
     /// what that costs. The run is then `needs_attention` rather than green, and it
     /// is never reported as having passed something it did not do.
-    fn model_assessment(&self, fingerprint: &FingerprintId) -> (StageOutcome, Vec<CheckResult>) {
-        let analysis = &self.config.analysis;
+    fn model_assessment(
+        &self,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
+        let analysis = &self.analysis;
         let not_checked = |reason: NotCheckedReason, detail: &str| {
             CheckResult::not_run(
                 Stage::ModelAssessment.id(),
@@ -1273,23 +1294,16 @@ impl Pipeline<'_> {
                     NotCheckedReason::AnalysisProviderDisabled,
                     detail,
                 )],
+                Vec::new(),
             );
         }
 
         match analysis_provider::build(analysis, self.project) {
-            // A provider is configured. No check in this build asks for
-            // model-backed analysis, so the stage has nothing to do — a different
-            // statement from "it could not run", and recorded as one.
-            Ok(_analyzer) => (
-                StageOutcome::NotPartOfWork {
-                    detail: format!(
-                        "the {} provider is configured, and no planned check asks for \
-                         model-backed analysis in this build.",
-                        analysis.provider.as_str()
-                    ),
-                },
-                Vec::new(),
-            ),
+            // 模型评估接入(最小版):把阶段 7 找到的候选(material)交给配置好
+            // 的分析器做 grounded 评估——每条候选要么被确认(成为一条
+            // model_assessment 证据类的 finding),要么被判为噪音(不加 finding,
+            // 但原样保留在阶段明细里)。没有候选时如实记录"没有可评估的东西"。
+            Ok(analyzer) => self.assess_candidates(analyzer.as_ref(), fingerprint, candidates),
             // The project asked for a provider SURE cannot build — a local-command
             // provider with no command, say. That is a configuration fault rather
             // than a scope limit, it is visible as one, and it is not a crash.
@@ -1304,9 +1318,119 @@ impl Pipeline<'_> {
                         NotCheckedReason::AnalysisProviderDisabled,
                         &detail,
                     )],
+                    Vec::new(),
                 )
             }
         }
+    }
+
+    /// 阶段 8 的接入面(最小版):把阶段 7 的候选交给分析器逐条评估。
+    ///
+    /// 每条被确认的候选产出一 LinkFinding:证据类如实标
+    /// [`EvidenceClass::ModelAssessment`],锚为 `model_only`(模型意见没有
+    /// 具体项目位置可指,不可核——`is_model_only` 判据据此命中),严重度按
+    /// `docs/adr/0005-evidence-hierarchy.md` 以 ShouldFixFirst 为上限
+    /// (模型独证不能支撑 must_fix),rationale 与之自动配对(builder 校验)。
+    /// 上游预留的 planned-check 管道(`disabled_result`/模型检查提案)接线
+    /// 后,这里迁回检查结果通道。
+    fn assess_candidates(
+        &self,
+        analyzer: &dyn analysis_provider::Analyzer,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
+        if candidates.material.is_empty() {
+            return (
+                StageOutcome::NotPartOfWork {
+                    detail: "the analysis provider is configured, and the completeness \
+                             analysis found no candidate for a model to assess."
+                        .to_owned(),
+                },
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        let prompt = assessment_prompt(self.project, candidates);
+        let response = match analyzer
+            .analyze(analysis_provider::AnalysisRequest { prompt: &prompt })
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let detail =
+                    format!("the configured model provider could not assess the project: {error}");
+                return (
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::AnalysisProviderDisabled),
+                        detail: detail.clone(),
+                    },
+                    vec![
+                        CheckResult::not_run(
+                            Stage::ModelAssessment.id(),
+                            Stage::ModelAssessment.title(),
+                            Severity::Note,
+                            false,
+                            NotCheckedReason::AnalysisProviderDisabled,
+                            fingerprint.clone(),
+                        )
+                        .with_reason(detail),
+                    ],
+                    Vec::new(),
+                );
+            }
+        };
+        let verdicts = parse_assessment(&response.text, candidates);
+        let flagged = verdicts.iter().filter(|verdict| verdict.is_problem).count();
+        let mut findings = Vec::new();
+        for verdict in verdicts.iter().filter(|verdict| verdict.is_problem) {
+            let Some(candidate) = candidates
+                .material
+                .iter()
+                .find(|candidate| candidate.id == verdict.candidate_id)
+            else {
+                continue;
+            };
+            // 第一版直接以 Finding 进入报告(见函数 doc 的迁移说明)。
+            let severity = model_supported_severity(candidate.severity);
+            if let Ok(finding) = FindingBuilder::new(
+                AssessmentSource::ModelAssessment,
+                SeverityRationale::for_severity(severity)
+                    .unwrap_or(SeverityRationale::Informational),
+            )
+            .title(format!("Model assessment: {}", candidate.title))
+            .severity(severity)
+            .status(FindingStatus::Open)
+            .explanation(verdict.reason.clone())
+            .user_impact(
+                "A model's assessment of what SURE observed. Model opinion is evidence and \
+                 not proof: it may be wrong, and what to do about it stays your call."
+                    .to_owned(),
+            )
+            .next_step("Review the flagged candidate, decide what to do, and re-check.".to_owned())
+            .evidence([Evidence::new(
+                EvidenceClass::ModelAssessment,
+                candidate.because.clone(),
+                EvidenceAnchor::model_only(format!("{} ({})", candidate.title, candidate.id)),
+                Some(fingerprint.clone()),
+                severity,
+            )])
+            .fingerprint(fingerprint.clone())
+            .build()
+            {
+                findings.push(finding);
+            }
+        }
+        (
+            StageOutcome::Ran {
+                detail: format!(
+                    "the configured model provider assessed {} completeness candidate(s): \
+                     {flagged} flagged as problems, {} judged style noise.",
+                    candidates.material.len(),
+                    verdicts.len() - flagged,
+                ),
+            },
+            Vec::new(),
+            findings,
+        )
     }
 
     /// Stage 9: what the project's agent claimed, against what was recorded.
@@ -1348,7 +1472,10 @@ impl Pipeline<'_> {
             );
         };
 
-        match claim_checker::check_claims_in_store(store, fingerprint) {
+        // 2026-10-20: claims are matched to the project by root, not by this
+        // run's minted fingerprint id — see the function's own doc comment.
+        let project_root = self.project.to_string_lossy();
+        match claim_checker::check_claims_in_store(store, &project_root, fingerprint) {
             Ok(checked) => {
                 let detail = if checked.is_empty() {
                     "the history holds no claims about this project.".to_owned()
@@ -1469,15 +1596,33 @@ impl Pipeline<'_> {
         }
 
         // Which checks have to pass before an earlier finding may close. The list
-        // is `repair_impact::select_impacted_checks`'s answer, asked of each
-        // contract stage 11 wrote — the module that owns the rule, not a second
-        // rule written here. It is asked rather than stored because a copy of it
-        // on the run would be a second list that could disagree with the contract
-        // it was copied from, and the function is pure.
+        // is `repair_impact::select_impacted_checks`'s answer — the module that
+        // owns the rule, not a second rule written here — asked of the contract
+        // that governs each finding. It is asked rather than stored because a
+        // copy of it on the run would be a second list that could disagree with
+        // the contract it was copied from, and the function is pure.
         //
-        // A finding with no entry here is one `recheck_lifecycle` keeps open, and
-        // that is the right reading for a run that produced no contract for it.
-        let rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
+        // **Two sources of contracts, and the second is what makes closing
+        // reachable at all.** A finding the current run still produces has the
+        // contract stage 11 just wrote for it. A finding the current run no
+        // longer produces — the fix removed what it was about, the very case
+        // this stage exists to resolve — has no contract here, and its contract
+        // is the earlier repair run's; that one is reconstructed the way the
+        // repository answers every *which checks can observe a fix* question:
+        // from the finding itself ([`repair_impact::named_checks`]), through the
+        // same `RepairContract::from_finding` + `select_impacted_checks` pair the
+        // writing path uses, widened against this run's plan. Without the
+        // reconstruction, stage 12 could not tell "the marker the candidate
+        // check was built from is gone" — the one absence `recheck_lifecycle`
+        // resolves — from "nothing observed the fix", which stays open; a fix
+        // that worked would carry its finding open forever (measured 2026-10-14,
+        // the MiQi full-repair E2E: subagent fixed the TODO, re-check reported
+        // both findings still open).
+        //
+        // A finding with no contract from either source — one whose anchors name
+        // no check, so nothing could ever observe a fix — gets no entry, and
+        // `recheck_lifecycle` keeps it open. That is the right reading.
+        let mut rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
             .repairs
             .iter()
             .map(|contract| {
@@ -1487,19 +1632,43 @@ impl Pipeline<'_> {
                 )
             })
             .collect();
+        for earlier in &previous {
+            let named = crate::repair_impact::named_checks(earlier);
+            let Ok(reconstructed) =
+                sure_domain::vocabulary::RepairContract::from_finding(earlier, named)
+            else {
+                continue;
+            };
+            rechecks.push((
+                earlier.id.clone(),
+                select_impacted_checks(&reconstructed, &run.schedule),
+            ));
+        }
+        // Which checks this run planned, whatever their results — the
+        // comparison needs the distinction between "planned and unobserved"
+        // and "a candidate check the scanner no longer proposes" (its subject
+        // is gone), which is the one absence that resolves a finding.
+        let planned: Vec<CheckId> = run
+            .schedule
+            .checks()
+            .iter()
+            .map(|scheduled| scheduled.proposal().id().clone())
+            .collect();
         let update = recheck_lifecycle::reconcile(
             LifecycleInputs {
                 previous_open: &previous,
                 current_findings: &run.verdict.findings,
                 check_results: run.report.results(),
                 rechecks: &rechecks,
+                planned: &planned,
                 case,
             },
             run.project_state.id.clone(),
         );
         let detail = format!(
-            "{} earlier finding(s) stayed open, {} resolved. A finding closes only when every \
-             check its repair contract named has passed in this run.",
+            "{} earlier finding(s) stayed open, {} resolved. A finding closes when every check \
+             its repair contract named has passed in this run — or, for a candidate-driven check, \
+             when this run no longer plans it because the marker it was built from is gone.",
             update.kept_open.len(),
             update.resolved.len(),
         );
@@ -1533,6 +1702,12 @@ impl Pipeline<'_> {
 ///
 /// # When it cannot write one
 ///
+/// A finding whose evidence cannot carry its severity — a `must_fix` candidate
+/// the scanner inferred from source text, or a model-only finding — gets no
+/// contract: there is no check that can settle it, and asking an agent to
+/// "fix" evidence SURE never established is the false task this rule exists to
+/// prevent. It stays in the report as `cannot_confirm` with a manual next step.
+///
 /// A finding whose evidence names no check this run planned gets an empty seed,
 /// and `from_finding` refuses it — correctly, because a contract naming a check
 /// nobody can run is worse than no contract. The refusal is not swallowed: the
@@ -1542,6 +1717,46 @@ impl Pipeline<'_> {
 ///
 /// [`RepairContract::from_finding`]: sure_domain::vocabulary::RepairContract::from_finding
 /// [`seed_rechecks`]: crate::repair_impact::seed_rechecks
+/// The contracts the findings justify, and the ones they do not.
+///
+/// Split out from [`repair_contracts`] so the rule can be tested without a whole
+/// run: a finding whose evidence cannot carry its severity is a candidate (or a
+/// model opinion), not a settled defect, and no check can settle it. It stays in
+/// the report with a manual next step; it does not become a repair task.
+fn contracts_for(
+    findings: &[sure_domain::finding::Finding],
+    schedule: &crate::schedule::CheckSchedule,
+) -> (Vec<sure_domain::vocabulary::RepairContract>, Vec<String>) {
+    let mut contracts = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for finding in findings {
+        // A contract is an instruction to change the project and a check that
+        // can observe the change. A finding whose own evidence cannot carry its
+        // severity — a `must_fix` candidate the scanner inferred from source
+        // text, or a model-only finding — has no such check: the candidate
+        // scanner's question is not settled by a command, and writing a repair
+        // contract for it asks an agent to "fix" evidence SURE never
+        // established. The finding stays in the report as `cannot_confirm` with
+        // a manual next step (see `findings_from_checks`); it does not become a
+        // repair task.
+        if !finding.is_grounded() {
+            refused.push(format!(
+                "{} (candidate evidence: no check can settle it)",
+                finding.title
+            ));
+            continue;
+        }
+        // The seed comes from the finding and is filtered to checks this run
+        // planned, so it can never name a check nobody can re-run.
+        let seed = seed_rechecks(finding, schedule);
+        match sure_domain::vocabulary::RepairContract::from_finding(finding, seed) {
+            Ok(contract) => contracts.push(contract),
+            Err(error) => refused.push(format!("{} ({error})", finding.title)),
+        }
+    }
+    (contracts, refused)
+}
+
 fn repair_contracts(
     run: &RunOutcome,
 ) -> (Vec<sure_domain::vocabulary::RepairContract>, StageOutcome) {
@@ -1556,17 +1771,7 @@ fn repair_contracts(
         );
     }
 
-    let mut contracts = Vec::new();
-    let mut refused: Vec<String> = Vec::new();
-    for finding in &run.verdict.findings {
-        // The seed comes from the finding and is filtered to checks this run
-        // planned, so it can never name a check nobody can re-run.
-        let seed = seed_rechecks(finding, &run.schedule);
-        match sure_domain::vocabulary::RepairContract::from_finding(finding, seed) {
-            Ok(contract) => contracts.push(contract),
-            Err(error) => refused.push(format!("{} ({error})", finding.title)),
-        }
-    }
+    let (contracts, refused) = contracts_for(&run.verdict.findings, &run.schedule);
 
     let findings = run.verdict.findings.len();
     if contracts.is_empty() {
@@ -1575,8 +1780,9 @@ fn repair_contracts(
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{findings} finding(s) need instructions and none of them names a check this \
-                     run planned, so SURE has no acceptance test it is willing to write: {}",
+                    "{findings} finding(s) need instructions and none of them is grounded in \
+                     evidence a check can settle, so SURE has no acceptance test it is willing to \
+                     write: {}",
                     refused.join("; ")
                 ),
             },
@@ -1589,8 +1795,9 @@ fn repair_contracts(
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{written} of {findings} finding(s) have instructions; the rest name no check \
-                     this run planned and SURE will not invent an acceptance test for them: {}",
+                    "{written} of {findings} finding(s) have instructions; the rest are not \
+                     grounded in evidence a check can settle, and SURE will not invent an \
+                     acceptance test for them: {}",
                     refused.join("; ")
                 ),
             },
@@ -1700,6 +1907,93 @@ fn reading_observation(proposal: &CheckProposal) -> CheckOperation {
 }
 
 /// Stage 7: the completeness scanners, and the aggregator that orders them.
+/// 阶段 8 发给模型的评估请求(纯函数,可测)。
+///
+/// grounded:只给阶段 7 已经观察到的候选(各自的 id、标题、严重度与判据理由),
+/// 要求模型逐条回答"problem/noise + 一句理由",并明确禁止发明候选之外的
+/// 内容。行格式供 [`parse_assessment`] 解析;无法解析的整段文本不进 finding。
+fn assessment_prompt(project: &Path, candidates: &Candidates) -> String {
+    let mut prompt =
+        String::from("You are assessing completeness candidates SURE observed in the project at ");
+    prompt.push_str(&project.display().to_string());
+    prompt.push_str(
+        ".\nFor EACH candidate below answer with exactly one line:\n\
+         <candidate id>: problem — <one short sentence: why the evidence supports this is a \
+         real problem for hand-off>\n\
+         or\n\
+         <candidate id>: noise — <one short sentence: why this is style noise>\n\
+         Assess only the candidates listed. Do not invent candidates.\n\nCandidates:\n",
+    );
+    for candidate in &candidates.material {
+        prompt.push_str(&format!(
+            "- {}: {} (severity: {}; because: {})\n",
+            candidate.id,
+            candidate.title,
+            candidate.severity.as_str(),
+            candidate.because
+        ));
+    }
+    prompt
+}
+
+/// 一条候选的模型判定。
+#[derive(Debug)]
+struct ModelVerdict {
+    candidate_id: String,
+    is_problem: bool,
+    reason: String,
+}
+
+/// 解析模型回复里的 `id: problem|noise — reason` 行(纯函数,可测)。
+///
+/// 宽容但绝不猜测:大小写不敏感;只认 [`Candidates::material`] 里出现过的
+/// id;分隔符接受 em dash 或 " - ";无法识别的行一律忽略——finding 只从
+/// 被理解的行里来。
+fn parse_assessment(text: &str, candidates: &Candidates) -> Vec<ModelVerdict> {
+    let mut verdicts: Vec<ModelVerdict> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*']).trim_start();
+        let Some((id_part, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let id = id_part.trim();
+        if !candidates
+            .material
+            .iter()
+            .any(|candidate| candidate.id == id)
+        {
+            continue;
+        }
+        let rest = rest.trim();
+        let (word, reason) = rest
+            .split_once('—')
+            .or_else(|| rest.split_once(" - "))
+            .unwrap_or((rest, ""));
+        let word = word.trim().to_ascii_lowercase();
+        if word != "problem" && word != "noise" {
+            continue;
+        }
+        if verdicts.iter().any(|verdict| verdict.candidate_id == id) {
+            continue; // 同一候选出现多行:只认第一行,后面的不覆盖也不叠加
+        }
+        verdicts.push(ModelVerdict {
+            candidate_id: id.to_owned(),
+            is_problem: word == "problem",
+            reason: reason.trim().to_owned(),
+        });
+    }
+    verdicts
+}
+
+/// ADR 0005 的执行点:模型评估证据不能单独支撑 must_fix,确认项的严重度
+/// 因此以 ShouldFixFirst 为上限,其余原样(只执行既有规则,不发明新档)。
+fn model_supported_severity(severity: Severity) -> Severity {
+    match severity {
+        Severity::MustFix => Severity::ShouldFixFirst,
+        other => other,
+    }
+}
+
 fn completeness(discovery: &Discovery, intent: &ProjectIntent) -> Candidates {
     let aggregated =
         false_completion_aggregator::aggregate(completeness_proposals(discovery, intent));
@@ -2310,6 +2604,7 @@ mod tests {
                 execution: ExecutionSettings::inspect_only(),
                 store: Some(store),
                 goal: None,
+                analysis: Default::default(),
                 runner: &runner,
             }
             .run()
@@ -2436,6 +2731,174 @@ mod tests {
         );
     }
 
+    // --- the repair loop's closing half ----------------------------------
+
+    /// A stored finding whose anchor names the check that produced it.
+    ///
+    /// The shape the store really holds for a finding a check produced, measured
+    /// off the TODO candidate's stored row: `subject_id` is the check id
+    /// (`chk_candidatetodo<…>`), which is what a re-check reads to answer *which
+    /// checks can observe a fix for this finding*. [`a_stored_finding`] anchors at
+    /// a file and names no check — right for a test about the history read and
+    /// nothing for a test about closing.
+    fn a_stored_finding_about_a_check(
+        title: &str,
+        location: &str,
+        check: &str,
+    ) -> sure_domain::finding::Finding {
+        use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceClass};
+        use sure_domain::finding::{
+            AssessmentSource, FindingBuilder, FindingStatus, SeverityRationale,
+        };
+        use sure_domain::ids::{CheckId, FindingId};
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let check = CheckId::parse(check).expect("a fixture check id");
+        FindingBuilder::new(
+            AssessmentSource::DeterministicCheck,
+            SeverityRationale::BlocksHandOff,
+        )
+        .id(FindingId::generate())
+        .title(title)
+        .severity(Severity::MustFix)
+        .status(FindingStatus::Open)
+        .explanation("the marker the check was built from")
+        .user_impact("the work is unfinished")
+        .next_step("remove the marker")
+        .fingerprint(fingerprint.clone())
+        .evidence(vec![Evidence::new(
+            EvidenceClass::DeterministicCheck,
+            "the check did not pass",
+            EvidenceAnchor::new(
+                AnchorSubject::LineRange,
+                location,
+                "the candidate on line 1",
+            )
+            .with_subject_id(check),
+            Some(fingerprint),
+            Severity::MustFix,
+        )])
+        .build()
+        .expect("the fixture finding is valid")
+    }
+
+    /// A fix that removed its marker closes the stored finding on the next
+    /// re-check — while a check the run never observed keeps its finding open.
+    ///
+    /// **This is the wiring the full-repair loop needed, observed through the
+    /// stage rather than through `recheck_lifecycle`.** `c4fd952` taught
+    /// `recheck_passed` that *a candidate check this run did not plan* is the
+    /// scanner saying the marker it was built from is gone — a resolution — but
+    /// stage 12 only ever handed it the contracts of the *current* run's findings,
+    /// and a fix that worked leaves the current run with no finding to write one
+    /// from. An earlier finding's contract is answered here the way
+    /// `repair_impact`'s own doctrine answers it: **asked**, of the finding (the
+    /// checks its anchors name, [`crate::repair_impact::named_checks`]), widened
+    /// against this run's plan — never stored a second time, so the store stays
+    /// the only copy and this stage stays a reading rather than a cache.
+    ///
+    /// The control is the second stored finding, anchored at a check that is also
+    /// not planned and is *not* candidate-driven: its absence is an absence of
+    /// observation and it must stay open. Without it, a stage that closed every
+    /// earlier finding would satisfy the first assertion.
+    #[test]
+    fn a_recheck_closes_a_stored_finding_whose_candidate_check_is_no_longer_planned() {
+        let root = crate::store::scratch_root().join(format!(
+            "pipeline-recheck-candidate-gone-{}",
+            std::process::id()
+        ));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot clear {}: {error}", root.display()),
+        }
+        let project = root.join("project");
+        let store_dir = root.join("store");
+        std::fs::create_dir_all(&project).expect("a scratch project");
+        std::fs::create_dir_all(&store_dir).expect("a scratch store directory");
+        std::fs::write(
+            project.join("README.md"),
+            "# A project SURE was pointed at\n\nThe marker the stored finding was about is \
+             gone, and this run's own plan is where that shows.\n",
+        )
+        .expect("a project file");
+
+        let store = Store::open_at(&store_dir.join("sure.db")).expect("the store opens");
+        let config = Config::default();
+        let runner = nothing_starts();
+        let run_recheck = |store: &Store| {
+            Pipeline {
+                project: &project,
+                purpose: Purpose::Recheck,
+                config: &config,
+                execution: ExecutionSettings::inspect_only(),
+                store: Some(store),
+                goal: None,
+                analysis: Default::default(),
+                runner: &runner,
+            }
+            .run()
+        };
+
+        // The first run answers what text the pipeline uses as this project's
+        // root; the stored rows must carry exactly it to be read back.
+        let first = run_recheck(&store);
+        let first_run = first
+            .run
+            .as_ref()
+            .expect("a run over a readable scratch project reaches its verdict");
+        let project_root = first_run.project_root.clone();
+
+        let removed_marker = a_stored_finding_about_a_check(
+            "project contains TODO or FIXME comments in production code",
+            "pay.py",
+            "chk_candidatetodo9a707a1f764658ab",
+        );
+        let never_observed = a_stored_finding_about_a_check(
+            "a declared command did not run",
+            "package.json",
+            "chk_nodetest",
+        );
+        crate::recheck_lifecycle::store_run(
+            &store,
+            &project_root,
+            &first_run.project_state.id,
+            &[removed_marker.clone(), never_observed.clone()],
+            &[],
+        )
+        .expect("the earlier run's findings are stored");
+
+        let second = run_recheck(&store);
+        let run = second.run.as_ref().expect("the run finishes");
+        let lifecycle = run
+            .lifecycle
+            .as_ref()
+            .expect("a readable history is compared against");
+        assert_eq!(
+            lifecycle.resolved.len(),
+            1,
+            "the finding whose marker the fix removed did not close; kept open: {:?}",
+            lifecycle
+                .kept_open
+                .iter()
+                .map(|finding| finding.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(lifecycle.resolved[0].title, removed_marker.title);
+        assert_eq!(
+            lifecycle.resolved[0].status,
+            sure_domain::finding::FindingStatus::Resolved
+        );
+        assert_eq!(
+            lifecycle.kept_open.len(),
+            1,
+            "a check the run did not plan and never observed lost its finding, or the fixed \
+             finding was not the only one that closed"
+        );
+        assert_eq!(lifecycle.kept_open[0].title, never_observed.title);
+    }
+
     // --- what a run may start, read rather than argued --------------------
 
     /// A runner that starts nothing, because a stop has already been asked for.
@@ -2449,6 +2912,153 @@ mod tests {
     /// agree with this one on everything except the thing being measured.
     ///
     /// [`Termination::CancelledBeforeStart`]: crate::process::Termination::CancelledBeforeStart
+    /// 阶段 8 接入(最小版)的测试用分析器:回放一段固定文本。
+    struct ScriptedAnalyzer(String);
+
+    impl crate::analysis_provider::Analyzer for ScriptedAnalyzer {
+        fn analyze(
+            &self,
+            _request: crate::analysis_provider::AnalysisRequest<'_>,
+        ) -> Result<
+            crate::analysis_provider::AnalysisResponse,
+            crate::analysis_provider::AnalysisError,
+        > {
+            Ok(crate::analysis_provider::AnalysisResponse::new(
+                self.0.clone(),
+            ))
+        }
+    }
+
+    fn one_candidate() -> Candidates {
+        Candidates {
+            material: vec![CandidateSummary {
+                id: "cand_todo".to_owned(),
+                title: "TODO comment in production code".to_owned(),
+                severity: Severity::MustFix,
+                critical: true,
+                because: "a TODO comment was found in a source file".to_owned(),
+            }],
+            style_noise: Vec::new(),
+            duplicates_dropped: 0,
+        }
+    }
+
+    fn assessment_probe<'a>(
+        project: &'a Path,
+        config: &'a Config,
+        runner: &'a dyn CheckRunner,
+    ) -> Pipeline<'a> {
+        Pipeline {
+            project,
+            purpose: Purpose::Recheck,
+            config,
+            execution: ExecutionSettings::inspect_only(),
+            store: None,
+            goal: None,
+            analysis: Default::default(),
+            runner,
+        }
+    }
+
+    #[test]
+    fn a_model_flagged_candidate_becomes_a_model_only_result() {
+        // 接线:模型确认的候选成为一条 fail 结果,证据类 ModelAssessment,
+        // 且按 ADR 0005 钳制严重度与 critical——模型独证不判"不可交付"。
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        assert!(results.is_empty(), "{results:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].status, FindingStatus::Open);
+        assert_eq!(
+            findings[0].assessment_source,
+            AssessmentSource::ModelAssessment
+        );
+        assert_eq!(findings[0].severity, Severity::ShouldFixFirst);
+        assert!(findings[0].explanation.contains("unfinished work"));
+        assert!(findings[0].title.starts_with("Model assessment:"));
+        assert_eq!(findings[0].evidence.len(), 1);
+        assert_eq!(
+            findings[0].evidence[0].class,
+            EvidenceClass::ModelAssessment
+        );
+        assert_eq!(
+            findings[0].evidence[0].anchor.subject,
+            sure_domain::evidence::AnchorSubject::Model
+        );
+    }
+
+    #[test]
+    fn a_noise_verdict_produces_no_result() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: noise — style only\n".to_owned());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        assert!(results.is_empty(), "{results:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn no_candidates_keeps_stage_8_out_of_the_work() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer(String::new());
+
+        let (outcome, results, findings) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &Candidates::default());
+
+        assert!(
+            matches!(outcome, StageOutcome::NotPartOfWork { .. }),
+            "{outcome:?}"
+        );
+        assert!(results.is_empty());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn the_assessment_prompt_lists_candidates_and_the_line_format() {
+        let prompt = assessment_prompt(Path::new("/tmp/project"), &one_candidate());
+        assert!(prompt.contains("cand_todo"), "{prompt}");
+        assert!(prompt.contains("problem — "), "{prompt}");
+        assert!(prompt.contains("Do not invent candidates."), "{prompt}");
+    }
+
+    #[test]
+    fn parse_assessment_reads_verdict_lines_and_ignores_the_rest() {
+        let candidates = one_candidate();
+        let verdicts = parse_assessment(
+            "Sure!\ncand_todo: PROBLEM — real issue\ncand_unknown: problem — not listed\n\
+             cand_todo: noise — duplicate line\nunparseable line\n",
+            &candidates,
+        );
+        assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+        assert!(verdicts[0].is_problem);
+        assert_eq!(verdicts[0].reason, "real issue");
+        // " - " 分隔也认;noise 判定如实
+        let alt = parse_assessment("cand_todo: noise - just style\n", &candidates);
+        assert_eq!(alt.len(), 1);
+        assert!(!alt[0].is_problem);
+        assert_eq!(alt[0].reason, "just style");
+    }
+
     fn nothing_starts() -> ProcessRunner {
         let stop = Cancellation::new();
         stop.cancel();
@@ -2634,6 +3244,7 @@ mod tests {
             execution: ExecutionSettings::inspect_only(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -2691,6 +3302,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -2765,6 +3377,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -3113,6 +3726,7 @@ mod tests {
                 execution: authority.execution(),
                 store: None,
                 goal: None,
+                analysis: Default::default(),
                 runner: &runner,
             }
             .run();
@@ -3368,6 +3982,7 @@ mod tests {
             execution: authority.execution(),
             store: None,
             goal: None,
+            analysis: Default::default(),
             runner: &runner,
         }
         .run();
@@ -3426,6 +4041,78 @@ mod tests {
             line.contains(&now.digest),
             "the line does not name the state the project is actually in, so a reader cannot tell \
              what this run's results are stale against: {line}"
+        );
+    }
+
+    #[test]
+    fn a_candidate_must_fix_is_not_offered_as_a_repair_contract() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::finding::FindingStatus;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "UI action: click handler on element",
+            Severity::MustFix,
+            true,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        assert_eq!(findings[0].status, FindingStatus::CannotConfirm);
+        let (contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            contracts.is_empty(),
+            "a candidate was offered as a repair contract: {contracts:?}"
+        );
+        assert!(
+            refused
+                .iter()
+                .any(|reason| reason.contains("candidate evidence")),
+            "the refusal does not say the finding is candidate evidence: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_todo_candidate_is_not_excluded_by_the_candidate_rule() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "project contains TODO comments",
+            Severity::CanFixLater,
+            false,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        let (_contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            refused
+                .iter()
+                .all(|reason| !reason.contains("candidate evidence")),
+            "a non-blocking TODO candidate was excluded by the candidate rule: {refused:?}"
         );
     }
 }

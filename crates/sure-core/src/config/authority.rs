@@ -59,8 +59,8 @@ use std::path::Path;
 use sure_domain::execution::{ConsentGrantor, ExecutionMode, ExecutionPermissions};
 use sure_domain::variants::variants;
 
-use super::values::{PrivacyMode, ProjectRequest, ProtectionMode};
-use super::{Config, ConfigError, LoadedConfig};
+use super::values::{AnalysisProvider, PrivacyMode, ProjectRequest, ProtectionMode};
+use super::{AnalysisConfig, Config, ConfigError, LoadedConfig};
 use crate::full_recording::DEFAULT_FULL_RECORDING_RETENTION_DAYS;
 
 /// One layer of configuration.
@@ -596,6 +596,50 @@ impl Authority {
         )
     }
 
+    /// The analysis settings in force, arbitrated between the two files.
+    ///
+    /// # The rule
+    ///
+    /// A provider the project's own file names is the one in force — it is the
+    /// project's request, and whether that request can act is what
+    /// [`ProjectRequest::ExternalAnalysis`] and the user's grant settle.
+    /// When the project names none — the ordinary case for a project that
+    /// never wrote a `sure.yaml` — the user's own file may name one, and what
+    /// it names is in force. This is the one analysis question the user's file
+    /// *decides* rather than merely allows, and the layer order says why:
+    /// [`Layer::User`] is the most trusted layer, and it is the layer
+    /// [`Layer::can_grant`] says may hand a behaviour to a run at all.
+    ///
+    /// A project file cannot *veto* the user's own provider by naming
+    /// `disabled`: disabling is the absence of a request rather than a
+    /// request, and a layer that can grant nothing elsewhere in this module
+    /// cannot take anything away here either.
+    #[must_use]
+    pub fn analysis(&self) -> Resolved<AnalysisConfig> {
+        let names_analysis = |config: &Config| {
+            config.analysis.provider != AnalysisProvider::Disabled
+                || config.analysis.endpoint.is_some()
+                || config.analysis.model.is_some()
+                || config.analysis.command.is_some()
+        };
+        if names_analysis(&self.project.config) {
+            return Resolved {
+                value: self.project.config.analysis.clone(),
+                by: Some(Layer::Project),
+            };
+        }
+        match self.user() {
+            Some(user) if names_analysis(user) => Resolved {
+                value: user.analysis.clone(),
+                by: Some(Layer::User),
+            },
+            _ => Resolved {
+                value: AnalysisConfig::default(),
+                by: None,
+            },
+        }
+    }
+
     /// The privacy mode in effect: the stricter of the two layers.
     ///
     /// `fully_local` wins over `local_first` whichever layer wrote it, because
@@ -734,6 +778,57 @@ privacy:
 analysis:
   provider: claude_cli
 ";
+
+    #[test]
+    fn the_users_own_analysis_provider_is_in_force_when_the_project_names_none() {
+        // 常规项目没有 sure.yaml:用户在自己文件里指定分析通道后,检查必须
+        // 真的用它——这是"用户直接指定"通道存在的原因(MiQi 面板场景)。
+        let authority = both(
+            "analysis:\n  provider: local_command\n  command: [\"echo\", \"x\"]\n",
+            "",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::LocalCommand);
+        assert_eq!(analysis.by, Some(Layer::User));
+    }
+
+    #[test]
+    fn a_projects_own_analysis_provider_wins_over_the_users() {
+        // 项目自己也指定时,项目值在效(用户层不静默改写项目所请求的通道;
+        // 请求能否行动另由 ExternalAnalysis 的授予决定)。
+        let authority = both(
+            "analysis:\n  provider: local_command\n",
+            "analysis:\n  provider: claude_cli\n",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::ClaudeCli);
+        assert_eq!(analysis.by, Some(Layer::Project));
+    }
+
+    #[test]
+    fn a_project_cannot_veto_the_users_analysis_by_naming_disabled() {
+        // disabled 是"没有请求"而不是请求;项目层在本模块里什么都授予不了,
+        // 自然也收不走用户赋予自己的东西。
+        let authority = both(
+            "analysis:\n  provider: local_command\n",
+            "analysis:\n  provider: disabled\n",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::LocalCommand);
+        assert_eq!(analysis.by, Some(Layer::User));
+    }
+
+    #[test]
+    fn no_file_naming_analysis_keeps_the_default() {
+        let authority = both("", "");
+        assert_eq!(
+            authority.analysis().value.provider,
+            AnalysisProvider::Disabled
+        );
+        assert_eq!(authority.analysis().by, None);
+        let alone = project_only("");
+        assert_eq!(alone.analysis().by, None);
+    }
 
     #[test]
     fn a_project_file_cannot_grant_itself_anything() {

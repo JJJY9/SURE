@@ -9,9 +9,21 @@
 //! | the check | is it a finding | why |
 //! |---|---|---|
 //! | [`CheckStatus::Pass`] | no | the only status that settles its own question |
-//! | [`CheckStatus::Fail`] / [`CheckStatus::Warning`] | **yes**, [`FindingStatus::Open`] | the check ran, spoke, and was not satisfied |
+//! | [`CheckStatus::Fail`] / [`CheckStatus::Warning`], evidence can carry the severity | **yes**, [`FindingStatus::Open`] | the check ran, spoke, and was not satisfied |
+//! | [`CheckStatus::Fail`] / [`CheckStatus::Warning`], blocking severity but `Inference` / `ModelAssessment` / `Unknown` evidence | **yes**, [`FindingStatus::CannotConfirm`] | the check found a candidate, not a settled defect |
 //! | no result, scope limit | no | `NotApplicable`, `UnsupportedStack` and `DisabledByConfiguration` are the vocabulary's own words for *this was never SURE's question about this project* |
 //! | no result, any other reason | **yes**, [`FindingStatus::CannotConfirm`] | SURE planned the check and did not run it — a gap it must report rather than round to a pass |
+//!
+//! # A candidate is not a settled defect
+//!
+//! A candidate check can carry `must_fix` while its evidence is still
+//! `Inference` (`finding_gravity` decides severity from what the gap would mean
+//! if true, not from whether SURE established it). That finding is real and stays
+//! visible, but it is not a defect SURE has settled: it becomes
+//! [`FindingStatus::CannotConfirm`] with a manual next step, and the repair stage
+//! does not write a contract for it (ADR 0018). A non-blocking candidate — a TODO
+//! marker — stays [`FindingStatus::Open`] and remains repair-eligible, because
+//! removing the marker is an action a check can observe.
 //!
 //! # Why a check result, and not some other source
 //!
@@ -136,6 +148,14 @@ fn finding_for(result: &CheckResult, schedule: &CheckSchedule) -> Option<Finding
     } else {
         (EvidenceClass::ObservedFact, AssessmentSource::ObservedFact)
     };
+    // Whether the result's evidence can carry the severity it was given. A
+    // candidate check can be `must_fix` (finding_gravity) while its evidence is
+    // still `Inference`; that finding is a candidate, not a settled defect, and
+    // the report and the repair stage must say so. Non-blocking severities are
+    // settled by the check having run: a TODO can be fixed whether or not the
+    // scanner's reading was an inference.
+    let settled =
+        result.evidence_class.can_alone_support_must_fix() || !result.severity.blocks_hand_off();
     let anchor = anchor_for(result, schedule);
     let statement = if spoke {
         format!(
@@ -161,70 +181,93 @@ fn finding_for(result: &CheckResult, schedule: &CheckSchedule) -> Option<Finding
     let builder = FindingBuilder::new(source, SeverityRationale::for_severity(result.severity)?)
         .title(result.title.clone())
         .severity(result.severity)
-        .status(status_for(result, spoke))
-        .explanation(explanation_for(result, spoke))
-        .user_impact(impact_for(spoke))
-        .next_step(next_step_for(&anchor, spoke))
+        .status(status_for(result, spoke, settled))
+        .explanation(explanation_for(result, spoke, settled))
+        .user_impact(impact_for(spoke, settled))
+        .next_step(next_step_for(&anchor, spoke, settled))
         .evidence([evidence])
         .fingerprint(result.project_fingerprint.clone());
 
     builder.build().ok()
 }
 
-/// `Open` when the check spoke, `CannotConfirm` when it did not.
+/// `Open` when the check spoke and its evidence can carry the severity,
+/// `CannotConfirm` when SURE did not settle it.
 ///
 /// The two are not the same finding with a different label: `Open` says *this is
 /// wrong*, `CannotConfirm` says *SURE could not settle this*. A single status
 /// covering both would make the report unable to tell a failed test from a test
-/// nobody ran, which is the distinction this product exists to keep.
-fn status_for(result: &CheckResult, spoke: bool) -> FindingStatus {
-    if spoke {
-        return FindingStatus::Open;
+/// nobody ran, or a deterministic failure from a candidate the scanner inferred
+/// from source text, which is the distinction this product exists to keep.
+fn status_for(result: &CheckResult, spoke: bool, settled: bool) -> FindingStatus {
+    if !spoke {
+        debug_assert!(
+            result.is_not_checked(),
+            "a check that produced no result is not-checked by definition"
+        );
+        return FindingStatus::CannotConfirm;
     }
-    debug_assert!(
-        result.is_not_checked(),
-        "a check that produced no result is not-checked by definition"
-    );
-    FindingStatus::CannotConfirm
+    if !settled {
+        return FindingStatus::CannotConfirm;
+    }
+    FindingStatus::Open
 }
 
-fn explanation_for(result: &CheckResult, spoke: bool) -> String {
-    if spoke {
+fn explanation_for(result: &CheckResult, spoke: bool, settled: bool) -> String {
+    if !spoke {
         return format!(
-            "SURE ran this check against the project and it was not satisfied. {}",
+            "SURE planned this check and did not run it, so it has no answer for it. {}",
+            sentence(&result.reason)
+        );
+    }
+    if !settled {
+        return format!(
+            "SURE ran this check and found a candidate rather than a settled defect: the evidence \
+             is an inference, and no command has settled it. {}",
             sentence(&result.reason)
         );
     }
     format!(
-        "SURE planned this check and did not run it, so it has no answer for it. {}",
+        "SURE ran this check against the project and it was not satisfied. {}",
         sentence(&result.reason)
     )
 }
 
-fn impact_for(spoke: bool) -> String {
-    if spoke {
-        return "SURE ran this check itself, so this is a result rather than an opinion. It was \
-                not satisfied."
+fn impact_for(spoke: bool, settled: bool) -> String {
+    if !spoke {
+        return "Nothing here is known to be broken, and nothing here is confirmed to work either. \
+                Until this check runs and passes, SURE cannot confirm this part of the project."
             .to_owned();
     }
-    "Nothing here is known to be broken, and nothing here is confirmed to work either. Until \
-     this check runs and passes, SURE cannot confirm this part of the project."
+    if !settled {
+        return "Treat this as something to check by hand, not as a confirmed defect. SURE cannot \
+                settle it with a check, so it is not a repair task."
+            .to_owned();
+    }
+    "SURE ran this check itself, so this is a result rather than an opinion. It was not \
+     satisfied."
         .to_owned()
 }
 
-fn next_step_for(anchor: &EvidenceAnchor, spoke: bool) -> String {
-    if spoke {
-        return "Fix what this check found, then run the check again so SURE can observe the \
-                result."
+fn next_step_for(anchor: &EvidenceAnchor, spoke: bool, settled: bool) -> String {
+    if !spoke {
+        if anchor.subject == AnchorSubject::Command && !anchor.locator.trim().is_empty() {
+            return format!(
+                "Run `{}` and let SURE re-check it, or allow SURE to run it with `sure config \
+                 set execution.mode host_confirmed`.",
+                anchor.locator.trim()
+            );
+        }
+        return "Allow SURE to run this check with `sure config set execution.mode \
+                host_confirmed`, then re-check."
             .to_owned();
     }
-    if anchor.subject == AnchorSubject::Command && !anchor.locator.trim().is_empty() {
-        return format!(
-            "Run `{}` and let SURE re-check it, or allow SURE to run it.",
-            anchor.locator.trim()
-        );
+    if !settled {
+        return "Check this by hand in the project and decide whether a change is needed; do not \
+                change code just to make the candidate disappear."
+            .to_owned();
     }
-    "Allow SURE to run this check, then re-check.".to_owned()
+    "Fix what this check found, then run the check again so SURE can observe the result.".to_owned()
 }
 
 /// Where a reader goes to check this finding for themselves.
@@ -412,6 +455,83 @@ mod tests {
              reaches the report and cannot become a repair"
         );
         assert_eq!(finding.evidence[0].class, EvidenceClass::ObservedFact);
+        assert!(
+            finding
+                .next_step
+                .contains("sure config set execution.mode host_confirmed"),
+            "a check the user has not allowed must name the command that allows it: {}",
+            finding.next_step
+        );
+    }
+
+    #[test]
+    fn a_candidate_must_fix_is_cannot_confirm_and_not_repairable() {
+        // The real shape from 2026-10-23: a UI-action candidate is `must_fix`
+        // because of what it would mean if true, while its evidence is an
+        // inference. It is a candidate, not a settled defect, and a repair
+        // contract for it asks an agent to fix evidence SURE never established.
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "UI action: click handler on element",
+            Severity::MustFix,
+            true,
+            EvidenceClass::Inference,
+            fingerprint(),
+        );
+        let finding = &findings_from_checks(std::slice::from_ref(&result), &empty_schedule())[0];
+
+        assert_eq!(finding.status, FindingStatus::CannotConfirm);
+        assert!(!finding.is_grounded(), "{finding:?}");
+        assert!(
+            finding.next_step.contains("by hand"),
+            "a candidate was given an actionable repair step: {}",
+            finding.next_step
+        );
+        assert!(
+            finding.user_impact.contains("not as a confirmed defect"),
+            "a candidate was described as a confirmed defect: {}",
+            finding.user_impact
+        );
+    }
+
+    #[test]
+    fn a_candidate_non_blocking_finding_is_still_open_and_repairable() {
+        // A TODO candidate is a different case: a non-blocking finding can be
+        // fixed by removing the marker even though the scanner's reading is an
+        // inference, and the full-repair E2E depends on that contract existing.
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "project contains TODO comments",
+            Severity::CanFixLater,
+            false,
+            EvidenceClass::Inference,
+            fingerprint(),
+        );
+        let finding = &findings_from_checks(std::slice::from_ref(&result), &empty_schedule())[0];
+
+        assert_eq!(finding.status, FindingStatus::Open);
+        assert!(finding.is_grounded(), "{finding:?}");
+        assert!(
+            finding.next_step.contains("Fix what this check found"),
+            "{}",
+            finding.next_step
+        );
+    }
+
+    #[test]
+    fn a_deterministic_must_fix_stays_open_and_grounded() {
+        let result = CheckResult::fail(
+            CheckId::generate(),
+            "run the tests",
+            Severity::MustFix,
+            true,
+            EvidenceClass::DeterministicCheck,
+            fingerprint(),
+        );
+        let finding = &findings_from_checks(&[result], &empty_schedule())[0];
+
+        assert_eq!(finding.status, FindingStatus::Open);
+        assert!(finding.is_grounded(), "{finding:?}");
     }
 
     #[test]

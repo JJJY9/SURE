@@ -586,6 +586,10 @@ pub fn human(report: &HistoryReport, out: &mut impl Write) -> io::Result<()> {
         }
         HistoryOutcome::NoSessions => {
             writeln!(out, "SURE has recorded no sessions on this machine.")?;
+            writeln!(
+                out,
+                "`sure check` does not record a session; `sure repair` and `sure recheck` do."
+            )?;
             writeln!(out)?;
             row(out, "store", &clean(&report.store))?;
             writeln!(out)?;

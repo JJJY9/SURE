@@ -233,6 +233,7 @@ fn check(root: &Path) -> RunOutcome {
         execution: ExecutionSettings::inspect_only(),
         store: None,
         goal: None,
+        analysis: Default::default(),
         runner: &runner,
     }
     .run()

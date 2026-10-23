@@ -204,6 +204,10 @@ const INTEGRATIONS: &[(&str, &str)] = &[
         "codex",
         "hooks, skills and SURE's tools, added to the harness's own config",
     ),
+    (
+        "miqi",
+        "hooks that record what an agent did, wired into the harness's own plugin layer",
+    ),
 ];
 
 /// The questions this report does not answer, and why not.
