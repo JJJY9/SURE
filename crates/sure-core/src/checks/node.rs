@@ -102,12 +102,15 @@
 //!
 //! **The manager's name is not rewritten for the platform.** On Windows a bare
 //! `npm` is a name Windows completes with `.exe` and nothing else, so a project
-//! whose only manager is `npm.cmd` plans a command this build will not start.
-//! Whether a name is startable is
-//! [`ProgramPath`](crate::planned_work::ProgramPath)'s answer and the runner's to
-//! act on; a builder that appended `.cmd` — or wrapped the name in `cmd.exe /c`,
-//! which is what the operating system would do — would be constructing the
-//! interpreter ADR 0014 says SURE must not build.
+//! whose only manager is `npm.cmd` plans the name as written; appending `.cmd`
+//! — or wrapping the name in `cmd.exe /c`, which is what the operating system
+//! would do — would be constructing the interpreter ADR 0014 says SURE must not
+//! build. What the runner does with that name is
+//! [`crate::package_launcher`]'s question: on the product path a known manager
+//! shim, with `node` and the manager's own shipped JavaScript entry present, is
+//! started as `node <entry> <the plan's arguments>`, so the check runs without
+//! ever naming the batch file. Every other shape keeps the honest
+//! not-startable result.
 //!
 //! # What it does not do
 //!

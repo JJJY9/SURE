@@ -74,6 +74,12 @@
 //! documentation said "no shell" would be the false green this repository treats
 //! as the worst outcome there is.
 //!
+//! **A caller may avoid naming the batch file.** Since 2026-10-22 the product
+//! runner translates a known package-manager shim into `node` and the
+//! JavaScript entry the shim itself runs (`crate::package_launcher`), so a Node
+//! check can run without this module ever naming a `.cmd`. The rules above are
+//! unchanged for every other name.
+//!
 //! **Nothing here confines a process.** A deadline and an output bound are
 //! bounds on SURE's *patience and memory*, not a boundary around the program.
 //! A child started with [`Environment::Only`] and an empty list can still read
