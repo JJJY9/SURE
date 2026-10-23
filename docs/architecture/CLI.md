@@ -624,7 +624,7 @@ that it will not write *this*.
 ### What it will write
 
 Exactly the settings a **run** reads from that file, and it proves each one while
-it works. There are eight, and every one of them is read from the user's own
+it works. There are nine, and every one of them is read from the user's own
 layer by `Authority`:
 
 | Setting | Values |
@@ -636,6 +636,7 @@ layer by `Authority`:
 | `privacy.full_recording` | `true`, `false` |
 | `privacy.full_recording_retention_days` | `0` or more |
 | `privacy.mode` | the privacy modes this build knows, from `PrivacyMode::ALL` |
+| `analysis.provider` | the analysis providers this build knows, from `AnalysisProvider::ALL`; `analysis.endpoint`, `analysis.model` and `analysis.command` are edited in the file, not by this command |
 | `protection.mode` | the protection modes this build knows, from `ProtectionMode::ALL` |
 
 The value lists are the product's own — read out of those `ALL` lists rather than

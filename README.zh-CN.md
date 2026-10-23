@@ -20,6 +20,9 @@ SURE 不取代你正在用的工具。用 Claude Code 的继续用 Claude Code�
 
 ## 在 Windows 上安装
 
+**目前还没有可下载的发布包。** SURE 目前是开发者预览版，安装包要从本仓库自行构建。
+如果机器上没有下面的工具链，这就是原因，不是你做错了什么。
+
 构建的机器上需要两样东西：
 
 - **Rust**——装 [rustup](https://rustup.rs) 即可；仓库里的 `rust-toolchain.toml` 固定了版本，rustup 会自动装对。
@@ -35,7 +38,7 @@ cargo test -p sure-core --test acceptance_report_runner
 & .\scripts\Build-Release.ps1 -Phase All
 
 # 3. 安装到当前用户。不需要管理员，不改 PATH
-& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.2-x86_64-pc-windows-msvc.zip
+& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.3-x86_64-pc-windows-msvc.zip
 
 # 4. 验证装好了
 & "$env:LOCALAPPDATA\SURE\bin\sure.exe" version
@@ -71,7 +74,7 @@ Unix 的启动脚本默认就在这个位置找它。Rust 核心是可移植的�
 
 ### 一次运行长什么样
 
-下面是一次真实的 `sure check` 运行，被检查的项目只有一个 `package.json` 和一个 JavaScript 文件——这是 SURE 0.1.2 的输出，按小节裁剪过。项目路径替换成了 `C:\demo\hello`，标 `...` 的行是省略的地方：
+下面是一次真实的 `sure check` 运行，被检查的项目只有一个 `package.json` 和一个 JavaScript 文件——这是 SURE 0.1.3 的输出，按小节裁剪过。项目路径替换成了 `C:\demo\hello`，标 `...` 的行是省略的地方：
 
 ```text
 SURE checked C:\demo\hello.
@@ -82,7 +85,7 @@ This project is not ready to hand off.
 No open findings.
 
 What the run did, stage by stage
-  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level C.
+  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level B.
   ...
   8/12. Ask a model to assess the project: No analysis provider is configured, so SURE assessed nothing with a model. ... (NOT CHECKED)
   9/12. Check what was claimed against the evidence: SURE has no recorded history for this machine, so there are no agent claims to check against evidence. (NOT CHECKED)
@@ -109,6 +112,7 @@ project at all.
 
 其他常用命令：
 
+- `sure config set execution.mode host_confirmed`——允许 SURE 运行项目自己的命令（测试、构建），而不只是读文件
 - `sure repair`——把发现的问题变成一份有边界的修复契约，交给 AI 工具去修
 - `sure recheck`——修完后复查，并和上次对比
 - `sure history`——查看（或删除）SURE 在这台机器上的记录

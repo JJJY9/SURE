@@ -87,12 +87,12 @@ That leaves two files in `target\tmp\release\` — the archive and the checksum
 the installer will require beside it:
 
 ```text
-sure-0.1.2-x86_64-pc-windows-msvc.zip
-sure-0.1.2-x86_64-pc-windows-msvc.zip.sha256
+sure-0.1.3-x86_64-pc-windows-msvc.zip
+sure-0.1.3-x86_64-pc-windows-msvc.zip.sha256
 ```
 
 The name is `sure-<version>-x86_64-pc-windows-msvc.zip`, where `<version>` is
-what `sure version` prints — `0.1.2` in this build.
+what `sure version` prints — `0.1.3` in this build.
 `docs/development/RELEASE_PROCESS.md` is the specification for the layout: one
 top-level directory named after the archive, holding `sure.exe`, `LICENSE` and
 `RELEASE.txt`.
@@ -110,7 +110,7 @@ does that itself.
 Still in the root of the checkout, with the archive where section 2 left it:
 
 ```powershell
-& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.2-x86_64-pc-windows-msvc.zip
+& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.3-x86_64-pc-windows-msvc.zip
 ```
 
 That is the whole install. It verifies the archive against the `.sha256` before
@@ -142,7 +142,7 @@ install in section 4 — by its full path:
 ```
 
 ```text
-SURE 0.1.2
+SURE 0.1.3
 ```
 
 Exit status `0` means installed. Status `2` means it stopped, with the reason
@@ -232,7 +232,7 @@ Not enough could be checked to say whether this is ready.
 No open findings.
 
 What the run did, stage by stage
-  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level C.
+  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level B.
   ...
   8/12. Ask a model to assess the project: No analysis provider is configured, so SURE assessed nothing with a model. This is a scope limit and not a failure: the deterministic checks are unaffected. (NOT CHECKED)
   ...
@@ -279,6 +279,9 @@ next are all in `docs/architecture/CLI.md`:
 * `sure doctor` — where SURE keeps its files on this machine, what is at each of
   them, and **what it did not check**. Exits `0` when it found nothing wrong and
   `1` when it did, so `sure doctor || fix it` works.
+* `sure config set execution.mode host_confirmed` — allow SURE to run the
+  project's own commands (tests, build) instead of only reading its files. The
+  default is `inspect_only`.
 * `sure repair` — turns what a check found into a bounded contract an agent can
   act on.
 * `sure recheck` — checks again and says what the earlier run left open. Unlike

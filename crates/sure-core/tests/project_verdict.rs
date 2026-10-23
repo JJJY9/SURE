@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use sure_core::project_verdict::{build_verdict, render_summary};
+use sure_core::project_verdict::{build_verdict, render_summary, render_summary_with_completeness};
 use sure_domain::capability::CapabilityReport;
 use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceClass};
 use sure_domain::finding::{AssessmentSource, FindingBuilder, FindingStatus, SeverityRationale};
@@ -113,6 +113,50 @@ fn green_aggregate_and_no_findings_means_ready() {
     );
     assert!(
         !summary.contains("This project is not ready to hand off."),
+        "summary: {summary}"
+    );
+}
+
+#[test]
+fn green_aggregate_with_unrun_stages_is_not_called_ready() {
+    // A green aggregate says every check that ran passed. It does not say every
+    // stage ran: a first run with no analysis provider and no claim history has
+    // two stages marked not checked, and the CLI exits 1 for that run. The
+    // summary must not tell the reader it is ready to hand off at the same time.
+    let verdict = build_verdict(
+        fingerprint(),
+        green_aggregate(),
+        ProjectIntent::empty(),
+        CapabilityReport::cli(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let summary = render_summary_with_completeness(&verdict, false);
+    assert!(
+        summary.contains("did not check everything"),
+        "summary: {summary}"
+    );
+    assert!(
+        !summary.contains("This project looks ready to hand off."),
+        "summary: {summary}"
+    );
+}
+
+#[test]
+fn green_aggregate_with_every_stage_run_keeps_the_ready_sentence() {
+    let verdict = build_verdict(
+        fingerprint(),
+        green_aggregate(),
+        ProjectIntent::empty(),
+        CapabilityReport::cli(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let summary = render_summary_with_completeness(&verdict, true);
+    assert!(
+        summary.contains("This project looks ready to hand off."),
         "summary: {summary}"
     );
 }
