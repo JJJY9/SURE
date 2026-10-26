@@ -9,10 +9,11 @@ saying what they claim the project is**; it is implemented by
 
 Two ecosystems are implemented, each as a module with one entry point:
 **Node** (`node.rs`, from `package.json` and the lockfiles beside it) and
-**Python** (`python.rs`, from `pyproject.toml`, `Pipfile`, `requirements*.txt`
-and the lockfiles beside them). The rule, the four answers, the bounds and the
-gaps below are the same for both; `Ecosystem::ALL` is the list of what a build
-looks for, and `discover()` calls each module in that order.
+**Python** (`python.rs`, from `pyproject.toml`, `Pipfile`, `requirements*.txt`,
+the lockfiles beside them, and dedicated tool config files such as
+`pytest.ini`, `tox.ini` and `ruff.toml`). The rule, the four answers, the bounds
+and the gaps below are the same for both; `Ecosystem::ALL` is the list of what a
+build looks for, and `discover()` calls each module in that order.
 
 The whole of this document is one requirement:
 
@@ -195,7 +196,11 @@ command is a plan, and running it is a later step with its own authorisation.
 meta-framework, web framework, server framework, test runner, end-to-end test,
 linter, formatter, bundler, monorepo tool, runtime, language. A `Tooling` value
 stores the **table's own `&'static str`**, never the project's spelling, so no
-dependency name a project wrote can reach a sentence SURE prints. A package not
+dependency name a project wrote can reach a sentence SURE prints. It also
+carries the file that declared it when discovery can name one — a dependency
+table, a requirements file, a `[tool.*]` section, or a dedicated config file —
+so a check's `declared_in` points at the evidence rather than at whichever
+manifest SURE read first. A package not
 in the table is not reported at all, which is a deliberate silence: "SURE did not
 recognise this package" is not a finding, and guessing from a name would be. One
 package may appear twice when it is genuinely two things — Biome lints *and*
@@ -227,13 +232,16 @@ thousand paths in a discovery result.
 | `pyproject.toml` | dependencies, optional-dependency groups, entry points, the interpreter, the build backend, and any tool table |
 | `Pipfile` | dependencies and dev-dependencies, for pipenv |
 | `requirements*.txt` | dependencies, when a project declares them in a flat file |
+| `pytest.ini`, `tox.ini`, `noxfile.py`, `ruff.toml`, `mypy.ini`, `pyrightconfig.json`, `pylintrc`, `.flake8` | that the named test/lint/type tool is used, even when it is installed outside the project's dependency tables |
 | `uv.lock`, `poetry.lock`, `Pipfile.lock`, `pdm.lock` | which installer the project used |
 | `.python-version` | the interpreter, as the file's own text, trimmed of surrounding whitespace |
-| `setup.py`, `setup.cfg` | that the project declares itself in a way SURE will not read |
+| `setup.py`, `setup.cfg` | that the project declares itself; `setup.cfg`'s tool sections are read, its packaging metadata is not |
 
-**Seven things make this a Python project**, and every one is a project-level
+**Eight things make this a Python project**, and every one is a project-level
 file: a `pyproject.toml`, a `Pipfile`, a `.python-version`, a `setup.py`, a
-`setup.cfg`, a lockfile, a `requirements*.txt`. As with Node, **source files are
+`setup.cfg`, a lockfile, a `requirements*.txt`, or a dedicated tool config file
+(`pytest.ini`, `tox.ini`, `noxfile.py`, and the linter/type-checker files in
+`CONFIG_TOOLS`). As with Node, **source files are
 not on the list** — a directory containing a `.py` file is a directory containing
 a `.py` file. `looks_like_one` is a disjunction over presence probes taken
 *before* any read or any budget spend, so "is this a Python project?" costs
@@ -553,6 +561,7 @@ has its own, because what counts as "the manifest" differs.
 | a manifest it could not read | `InspectOnly` | it can only look at the project's files |
 | no readable manifest, but a lockfile | `InspectOnly` | it is plainly a Python project and nothing is declared |
 | only a `requirements*.txt` | `InspectOnly` | a requirements file says what to install and not how the project is built |
+| only tool config files, with no readable manifest | `InspectOnly` | SURE can run the configured checks and cannot read how the project is built |
 | only `setup.py`, `setup.cfg` or `.python-version` | `InspectOnly` | nothing SURE will read declares anything |
 
 **Rust:**
@@ -734,16 +743,19 @@ Recorded so they are not forgotten. None is resolved by a task yet.
    manifest read, and `max_workspace_members` — a Node-era limit — does not apply
    to Python at all.
 
-9. **A project that declares its tooling outside the manifest reports none.**
-   `noxfile.py`, `tox.ini` and `.pre-commit-config.yaml` are three real ways to
-   declare a test runner or a linter, and none is on the list of files SURE looks
-   at — so a project that names `ruff` only in `.pre-commit-config.yaml` is
-   reported as having no linter, which is a negative finding about tooling the
-   project does have. This bears directly on P2-T005's "declared test and lint
-   tooling": SURE detects the tooling declared *in the files it reads*, and
-   `.pre-commit-config.yaml` is not one of them. `noxfile.py` is the same shape as
-   `setup.py` — a program — so reading it would need its own decision rather than
-   an entry in a table.
+9. **A project that declares its tooling outside the files SURE reads reports
+   none.** Dedicated tool config files — `pytest.ini`, `tox.ini`, `noxfile.py`,
+   `ruff.toml`, `mypy.ini`, `pyrightconfig.json`, `pylintrc`, `.flake8` — and
+   `[tool.*]` tables in `pyproject.toml` are read as declarations. `setup.cfg`
+   contributes its `[tool:pytest]`, `[flake8]`, `[mypy]` and `[pylint]` section
+   names; its packaging metadata is still not read. What remains unread is
+   `.pre-commit-config.yaml` (a pre-commit configuration that may name a linter
+   without the project otherwise declaring it). A project that names `ruff` only
+   in `.pre-commit-config.yaml` is still reported as having no linter, which is a
+   negative finding about tooling the project does have. `noxfile.py` is a
+   program like `setup.py`; its *existence* is read as evidence, but it is never
+   executed during discovery — the `python -m nox` check is what runs it, under
+   the same authorization as every other project command.
 
 10. **`Installer::Pip` is inferred, never declared.** There is no `[tool.pip]`
     table in any real project, so pip reaches a finding only through a
@@ -832,6 +844,7 @@ Node tests are in `crates/sure-core/tests/discover_node.rs`; Python tests are in
 | Two pieces of manager evidence pointing apart is reported | this document | `a_project_that_names_one_manager_and_locks_another_is_reported_not_resolved`, `two_lockfiles_for_two_managers_are_a_disagreement`, `two_lockfiles_for_two_managers_are_a_disagreement_and_two_for_one_are_not` |
 | The same, for installers | this document, `python.rs` | `two_tool_tables_naming_two_installers_are_a_disagreement`, `a_configured_installer_and_a_lockfile_for_another_are_a_disagreement`, `two_lockfiles_are_reported_as_a_disagreement_rather_than_resolved`, `a_configured_installer_and_another_lockfile_are_a_disagreement` |
 | A requirements file is evidence and never a disagreement | this document | `a_requirements_file_is_the_weakest_evidence_and_never_a_disagreement` |
+| A dedicated config file or `[tool.*]` table declares the tool it configures | this document, gap 9 | `a_dedicated_config_file_declares_a_tool_without_a_dependency`, `tox_ini_and_noxfile_name_their_runners`, `pyproject_tool_sections_declare_tools_without_dependency_entries`, `setup_cfg_tool_sections_declare_tools_without_reading_packaging_metadata` |
 | An `exclude` list is reported beside the member list and never applied to it | this document, gap 12 | `a_member_the_exclude_list_also_names_is_reported_as_both` |
 | A member limit that was reached says so | this document | `members_beyond_the_limit_are_cut_and_the_workspace_says_so` |
 | A virtual manifest's workspace is read from the document | this document, `rust.rs` | `a_workspace_table_is_read_when_there_is_no_package_table`, `a_virtual_manifest_is_a_manifest_and_its_members_are_read`, `an_explicit_workspace_table_with_no_members_is_not_no_workspace_table` |

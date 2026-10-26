@@ -102,9 +102,61 @@ pub const PIPFILE: &str = "Pipfile";
 /// The file that says what interpreter the project asks for.
 const VERSION_FILE: &str = ".python-version";
 
+/// `setup.cfg`, whose packaging metadata SURE does not read but whose tool
+/// sections name tools a project uses.
+const SETUP_CFG: &str = "setup.cfg";
+
 /// The two legacy files that say "this is a Python project" without SURE being
 /// able to read what it declares.
-const LEGACY_FILES: &[&str] = &["setup.py", "setup.cfg"];
+const LEGACY_FILES: &[&str] = &["setup.py", SETUP_CFG];
+
+/// Tool configuration files that name a tool without a dependency entry.
+///
+/// A project can install its tools from CI or a developer shell rather than
+/// list them in `pyproject.toml`; the file the tool reads is itself evidence
+/// that the project uses it. Existence is enough — these files are dedicated to
+/// one tool, so no content is guessed at and no file is executed.
+///
+/// `setup.cfg` is not here because its sections need reading rather than its
+/// existence; [`SETUP_CFG_TOOL_SECTIONS`] is the smaller list read from it.
+const CONFIG_TOOLS: &[(&str, &str)] = &[
+    ("pytest.ini", "pytest"),
+    ("tox.ini", "tox"),
+    ("noxfile.py", "nox"),
+    ("ruff.toml", "ruff"),
+    (".ruff.toml", "ruff"),
+    ("mypy.ini", "mypy"),
+    (".mypy.ini", "mypy"),
+    ("pyrightconfig.json", "pyright"),
+    ("pylintrc", "pylint"),
+    (".pylintrc", "pylint"),
+    (".flake8", "flake8"),
+];
+
+/// Tool sections in `setup.cfg`.
+///
+/// The packaging metadata in that file is still not read; these section names
+/// are, because they name a tool without putting it in a dependency table.
+const SETUP_CFG_TOOL_SECTIONS: &[(&str, &str)] = &[
+    ("tool:pytest", "pytest"),
+    ("flake8", "flake8"),
+    ("mypy", "mypy"),
+    ("pylint", "pylint"),
+];
+
+/// `[tool.*]` tables in `pyproject.toml` that name a tool SURE checks.
+///
+/// The table's existence is the declaration; its contents are the tool's
+/// business and are never interpreted here.
+const TOOL_SECTIONS: &[(&str, &str)] = &[
+    ("pytest", "pytest"),
+    ("tox", "tox"),
+    ("ruff", "ruff"),
+    ("mypy", "mypy"),
+    ("pyright", "pyright"),
+    ("pylint", "pylint"),
+    ("flake8", "flake8"),
+];
 
 /// The prefix and suffix a requirements file is recognised by.
 ///
@@ -594,6 +646,19 @@ impl ToolRole {
     }
 }
 
+/// Where a recognised tool's declaration came from.
+///
+/// The order matters: a dedicated config file or `[tool.*]` table is a
+/// project's explicit choice of runner, and wins over a package that merely
+/// appears in a dependency list. The derived `Ord` puts [`Self::Config`] first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolingEvidence {
+    /// A dedicated config file or `[tool.*]` table names the tool.
+    Config,
+    /// A dependency or requirements table names the package.
+    Dependency,
+}
+
 /// One recognised package, and where it was declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tooling {
@@ -606,6 +671,15 @@ pub struct Tooling {
     /// Empty for the root project. Carried so that a monorepo's tools can be
     /// told apart by where they were declared once member manifests are read.
     pub from: PathBuf,
+    /// The file that declared it, when discovery can name one.
+    ///
+    /// `None` for a hand-built value that has no file behind it; `Some` for a
+    /// dependency table, a requirements file, or a tool's own config file. The
+    /// check's `declared_in` reads this so a `pytest.ini` declaration points at
+    /// `pytest.ini` rather than at the manifest SURE happened to read first.
+    pub source: Option<PathBuf>,
+    /// Whether the declaration is a config file/table or a dependency list.
+    pub evidence: ToolingEvidence,
 }
 
 /// The packages SURE recognises, and what each one is.
@@ -1036,6 +1110,10 @@ pub struct PyProject {
     pub build_requires: Vec<String>,
     /// Which `[tool.*]` tables are present, by [`Installer`].
     pub tool_tables: Vec<Installer>,
+    /// The `[tool.*]` tables that name a tool SURE checks, sorted.
+    ///
+    /// Names from [`TOOL_SECTIONS`]; the table's contents are not read.
+    pub tool_sections: Vec<String>,
     /// Every dependency, sorted by name then kind then group.
     pub dependencies: Vec<Dependency>,
     /// Names whose declared value was not something SURE can read as a
@@ -1242,6 +1320,17 @@ impl PyProject {
         }
         tool_tables.sort_unstable();
 
+        // --- which tool sections are present ----------------------------------
+        let mut tool_sections = Vec::new();
+        if let Some(tool) = root.get("tool").and_then(serde_json::Value::as_object) {
+            for &(section, _) in TOOL_SECTIONS {
+                if tool.get(section).is_some_and(serde_json::Value::is_object) {
+                    tool_sections.push(section.to_owned());
+                }
+            }
+        }
+        tool_sections.sort();
+
         Ok(Self {
             name: text(project.and_then(|project| project.get("name")))
                 .or_else(|| text(poetry.and_then(|poetry| poetry.get("name")))),
@@ -1261,6 +1350,7 @@ impl PyProject {
             build_backend,
             build_requires,
             tool_tables,
+            tool_sections,
             dependencies,
             dependencies_not_text,
             entry_points,
@@ -1636,16 +1726,25 @@ pub fn invocation_for(
 /// always used: a tool list is sorted as the manifests were read, so the first
 /// match is the stable and reproposable choice, and picking any other would make
 /// the plan depend on nothing.
+///
+/// The one deliberate exception is `Test`: a runner named by a dedicated config
+/// file (`tox.ini`, `noxfile.py`, `pytest.ini`, a `[tool.tox]`/`[tool.pytest]`
+/// table, or a `setup.cfg` section) wins over a package that merely appears in
+/// a dependency list. A project with a `tox.ini` runs its tests through tox;
+/// running a bare `pytest` would bypass the environments tox defines. MiQi's
+/// project-test detector follows the same rule.
 fn declared_tool(role: CommandRole, tools: &[Tooling]) -> Option<&str> {
-    role.tool_roles()
-        .iter()
-        .flat_map(|&wanted| {
-            tools
-                .iter()
-                .filter(move |tool| tool.role == wanted)
-                .map(|tool| tool.package)
-        })
-        .next()
+    let matching = || {
+        role.tool_roles()
+            .iter()
+            .flat_map(|&wanted| tools.iter().filter(move |tool| tool.role == wanted))
+    };
+    if role == CommandRole::Test
+        && let Some(tool) = matching().find(|tool| tool.evidence == ToolingEvidence::Config)
+    {
+        return Some(tool.package);
+    }
+    matching().next().map(|tool| tool.package)
 }
 
 /// A tool a project runs, through the installer if there is one.
@@ -1723,10 +1822,13 @@ pub struct PythonProject {
     pub tooling: Vec<Tooling>,
     /// What the project says about the interpreter it wants.
     pub python: PythonVersion,
-    /// The legacy files that are there, and that SURE does not read.
+    /// The legacy files that are there, whose packaging metadata SURE does not
+    /// read.
     ///
     /// Names from [`LEGACY_FILES`], so this is a fixed vocabulary and not
-    /// project text.
+    /// project text. `setup.py` is a program and is not read at all;
+    /// `setup.cfg` contributes its tool sections to [`Self::tooling`] while its
+    /// packaging metadata remains outside what SURE reads.
     pub unread_legacy: Vec<&'static str>,
 }
 
@@ -1835,6 +1937,7 @@ fn grade(
     manifest: &ManifestState,
     found_requirements: bool,
     found_legacy: bool,
+    found_config: bool,
     pipfile_read: bool,
 ) -> (SupportLevel, &'static str) {
     match manifest {
@@ -1861,10 +1964,15 @@ fn grade(
             "This project has a requirements file and no pyproject.toml, so SURE can see \
              what it installs and cannot read how it is built.",
         ),
+        ManifestState::Absent if found_config => (
+            SupportLevel::InspectOnly,
+            "This project configures Python tools but has no pyproject.toml, so SURE can \
+             run the configured checks and cannot read how the project is built.",
+        ),
         ManifestState::Absent if found_legacy => (
             SupportLevel::InspectOnly,
-            "This project declares itself in setup.py or setup.cfg, which SURE does not \
-             read, so it can only look at the project's files.",
+            "This project declares itself in setup.py or setup.cfg; SURE cannot read their \
+             packaging metadata, so it can only look at the project's files.",
         ),
         ManifestState::Absent => (
             SupportLevel::InspectOnly,
@@ -1920,6 +2028,13 @@ pub(super) fn look(
         .filter(|(name, _)| matches!(tree.probe(Path::new(name)), Probe::File(_)))
         .collect();
     let requirement_paths = requirement_candidates(&tree);
+    let config_tools: Vec<(&'static str, &'static str)> = CONFIG_TOOLS
+        .iter()
+        .copied()
+        .filter(|(name, _)| matches!(tree.probe(Path::new(*name)), Probe::File(_)))
+        .collect();
+    let setup_cfg_sections = read_setup_cfg_tool_sections(root, &tree, options, budget, unread);
+    let found_tool_config = !config_tools.is_empty() || !setup_cfg_sections.is_empty();
 
     if !looks_like_one(
         manifest_there,
@@ -1928,6 +2043,7 @@ pub(super) fn look(
         &unread_legacy,
         &lockfiles_present,
         &requirement_paths,
+        found_tool_config,
     ) {
         return None;
     }
@@ -1940,6 +2056,11 @@ pub(super) fn look(
 
     // --- the legacy files, by existence and never by contents ---------------
     for &name in &unread_legacy {
+        found_by.push(PathBuf::from(name));
+    }
+
+    // --- the tool configuration files, by existence -------------------------
+    for &(name, _) in &config_tools {
         found_by.push(PathBuf::from(name));
     }
 
@@ -2046,7 +2167,13 @@ pub(super) fn look(
     // --- the tools, from every list of dependencies ------------------------
     let mut tooling = Vec::new();
     if let Some(project) = manifest.project() {
-        collect_tooling(&project.dependencies, Path::new(""), &mut tooling);
+        collect_tooling(
+            &project.dependencies,
+            Path::new(""),
+            Some(Path::new(MANIFEST)),
+            ToolingEvidence::Dependency,
+            &mut tooling,
+        );
         // A build backend is a tool the project declared even though it is not
         // in a dependency table, and `[tool.poetry]` names one by existing.
         for backend in project
@@ -2054,27 +2181,88 @@ pub(super) fn look(
             .iter()
             .filter_map(|requirement| requirement_name(requirement))
         {
-            collect_tooling_named(&backend, Path::new(""), &mut tooling);
+            collect_tooling_named(
+                &backend,
+                Path::new(""),
+                Some(Path::new(MANIFEST)),
+                ToolingEvidence::Dependency,
+                &mut tooling,
+            );
         }
     }
     if let Some(pipfile) = pipfile.project() {
-        collect_tooling(&pipfile.dependencies, Path::new(""), &mut tooling);
+        collect_tooling(
+            &pipfile.dependencies,
+            Path::new(""),
+            Some(Path::new(PIPFILE)),
+            ToolingEvidence::Dependency,
+            &mut tooling,
+        );
     }
     for file in &requirements {
         for requirement in &file.requirements {
-            collect_tooling_named(&requirement.name, Path::new(""), &mut tooling);
+            collect_tooling_named(
+                &requirement.name,
+                Path::new(""),
+                Some(file.path.as_path()),
+                ToolingEvidence::Dependency,
+                &mut tooling,
+            );
         }
     }
-    // Sorted by the table's name, then role, then the directory it came from —
-    // every one of the three a fixed order, so two runs over one project cannot
-    // produce two lists.
+    // A `[tool.*]` table is a declaration the dependency tables do not carry:
+    // a project can install ruff or pytest from CI and still configure it in
+    // `pyproject.toml`. The table's existence names the tool; its contents are
+    // the tool's business and are not read.
+    if let Some(project) = manifest.project() {
+        for section in &project.tool_sections {
+            if let Some(&(_, package)) = TOOL_SECTIONS.iter().find(|(name, _)| *name == section) {
+                collect_tooling_named(
+                    package,
+                    Path::new(""),
+                    Some(Path::new(MANIFEST)),
+                    ToolingEvidence::Config,
+                    &mut tooling,
+                );
+            }
+        }
+    }
+    // A dedicated config file is the same declaration for a tool that has no
+    // pyproject table. Existence is enough; nothing is parsed or executed.
+    for &(name, package) in &config_tools {
+        collect_tooling_named(
+            package,
+            Path::new(""),
+            Some(Path::new(name)),
+            ToolingEvidence::Config,
+            &mut tooling,
+        );
+    }
+    // `setup.cfg`'s tool sections are the same evidence; its packaging
+    // metadata remains unread.
+    for &package in &setup_cfg_sections {
+        collect_tooling_named(
+            package,
+            Path::new(""),
+            Some(Path::new(SETUP_CFG)),
+            ToolingEvidence::Config,
+            &mut tooling,
+        );
+    }
+    // Sorted by the table's name, role, directory, evidence, then source — every
+    // one of the five a fixed order, so two runs over one project cannot produce
+    // two lists. `Config` sorts before `Dependency`, so `dedup_by` collapses a
+    // package declared in both and keeps the config file as the source a report
+    // names.
     tooling.sort_by(|a, b| {
         a.package
             .cmp(b.package)
             .then(a.role.cmp(&b.role))
             .then(a.from.cmp(&b.from))
+            .then(a.evidence.cmp(&b.evidence))
+            .then(a.source.cmp(&b.source))
     });
-    tooling.dedup();
+    tooling.dedup_by(|a, b| a.package == b.package && a.role == b.role && a.from == b.from);
 
     let managers = Managers {
         configured,
@@ -2085,6 +2273,7 @@ pub(super) fn look(
         &manifest,
         !requirements.is_empty(),
         !unread_legacy.is_empty(),
+        found_tool_config,
         found_a_pipfile,
     );
 
@@ -2105,17 +2294,77 @@ pub(super) fn look(
     })
 }
 
+/// Read `setup.cfg`'s tool sections, and never its packaging metadata.
+///
+/// The file is read as text inside the same budget and byte limits as every
+/// other manifest; only section names from [`SETUP_CFG_TOOL_SECTIONS`] are
+/// looked at. A `setup.cfg` that cannot be read is recorded in `unread`, the
+/// same way `.python-version` is, rather than silently treated as one with no
+/// tools.
+fn read_setup_cfg_tool_sections(
+    root: &Path,
+    tree: &read::Tree<'_>,
+    options: &DiscoverOptions,
+    budget: &mut Budget,
+    unread: &mut Vec<Unread>,
+) -> Vec<&'static str> {
+    let relative = Path::new(SETUP_CFG);
+    match read::read_text_file(root, tree.probe(relative), options, budget) {
+        ReadFile::Absent => Vec::new(),
+        ReadFile::Unread(reason) => {
+            unread.push(Unread {
+                path: relative.to_path_buf(),
+                reason,
+            });
+            Vec::new()
+        }
+        ReadFile::Parsed(value) => value
+            .as_str()
+            .map(setup_cfg_tool_sections)
+            .unwrap_or_default(),
+    }
+}
+
+/// Which tool sections a `setup.cfg` names.
+///
+/// A section header is `[name]` on a line of its own; comments and values are
+/// not interpreted. The names are compared case-insensitively because config
+/// parsers do, and only names from [`SETUP_CFG_TOOL_SECTIONS`] are returned.
+fn setup_cfg_tool_sections(text: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        let Some(open) = line.find('[') else {
+            continue;
+        };
+        let rest = &line[open + 1..];
+        let Some(close) = rest.find(']') else {
+            continue;
+        };
+        let section = rest[..close].trim().to_ascii_lowercase();
+        if let Some(&(_, package)) = SETUP_CFG_TOOL_SECTIONS
+            .iter()
+            .find(|(name, _)| *name == section)
+            && !found.contains(&package)
+        {
+            found.push(package);
+        }
+    }
+    found
+}
+
 /// Whether anything here says this is a Python project.
 ///
-/// Six things count, and every one is a **project-level** file: a
+/// Seven things count, and every one is a **project-level** file: a
 /// `pyproject.toml`, a `Pipfile`, a `.python-version`, a `setup.py` or
-/// `setup.cfg`, a lockfile, a requirements file. Source files are **not** on the
-/// list, for the reason [`super::node::looks_like_one`] gives: a directory
-/// containing a `.py` file is a directory containing a `.py` file, and every one
-/// of the six above is a file a person creates deliberately to declare
-/// something.
+/// `setup.cfg`, a lockfile, a requirements file, or a dedicated tool config
+/// file (`pytest.ini`, `tox.ini`, `noxfile.py`, and the linter/type-checker
+/// files in [`CONFIG_TOOLS`]). Source files are **not** on the list, for the
+/// reason [`super::node::looks_like_one`] gives: a directory containing a `.py`
+/// file is a directory containing a `.py` file, and every one of the seven above
+/// is a file a person creates deliberately to declare something.
 ///
-/// Six arguments rather than the tree, because the decision is made from
+/// Seven arguments rather than the tree, because the decision is made from
 /// *presence alone* and this signature is what says so: nothing here can read a
 /// file, spend the budget, or record an [`Unread`].
 fn looks_like_one(
@@ -2125,6 +2374,7 @@ fn looks_like_one(
     legacy: &[&'static str],
     lockfiles: &[(&'static str, Installer)],
     requirements: &[PathBuf],
+    tool_config: bool,
 ) -> bool {
     manifest_there
         || pipfile_there
@@ -2132,6 +2382,7 @@ fn looks_like_one(
         || !legacy.is_empty()
         || !lockfiles.is_empty()
         || !requirements.is_empty()
+        || tool_config
 }
 
 /// The requirements files at the project root the naming rule selects.
@@ -2328,19 +2579,33 @@ fn read_requirement_lines(path: &Path, text: &str) -> RequirementsFile {
 }
 
 /// Every recognised package among a list of dependencies.
-fn collect_tooling(dependencies: &[Dependency], from: &Path, into: &mut Vec<Tooling>) {
+fn collect_tooling(
+    dependencies: &[Dependency],
+    from: &Path,
+    source: Option<&Path>,
+    evidence: ToolingEvidence,
+    into: &mut Vec<Tooling>,
+) {
     for dependency in dependencies {
-        collect_tooling_named(&dependency.name, from, into);
+        collect_tooling_named(&dependency.name, from, source, evidence, into);
     }
 }
 
 /// Every recognised role of one package name.
-fn collect_tooling_named(name: &str, from: &Path, into: &mut Vec<Tooling>) {
+fn collect_tooling_named(
+    name: &str,
+    from: &Path,
+    source: Option<&Path>,
+    evidence: ToolingEvidence,
+    into: &mut Vec<Tooling>,
+) {
     for (package, role) in tool_roles_of(name) {
         into.push(Tooling {
             package,
             role,
             from: from.to_path_buf(),
+            source: source.map(Path::to_path_buf),
+            evidence,
         });
     }
 }
@@ -2400,7 +2665,13 @@ mod tests {
              dependencies = [\"Scikit_Learn>=1\", \"RUFF\", \"PyTest\"]\n",
         );
         let mut tooling = Vec::new();
-        collect_tooling(&project.dependencies, Path::new(""), &mut tooling);
+        collect_tooling(
+            &project.dependencies,
+            Path::new(""),
+            None,
+            ToolingEvidence::Dependency,
+            &mut tooling,
+        );
         let names: BTreeSet<&str> = tooling.iter().map(|tool| tool.package).collect();
         assert_eq!(
             names,
@@ -2630,6 +2901,8 @@ mod tests {
             package: "pytest",
             role: ToolRole::TestRunner,
             from: PathBuf::new(),
+            source: None,
+            evidence: ToolingEvidence::Dependency,
         }];
         let test = command_for(Some(Installer::Uv), CommandRole::Test, &tooling);
         assert_eq!(test.command.as_deref(), Some("uv run pytest"));
@@ -2645,6 +2918,8 @@ mod tests {
             package: "pytest",
             role: ToolRole::TestRunner,
             from: PathBuf::new(),
+            source: None,
+            evidence: ToolingEvidence::Dependency,
         }];
         assert_eq!(
             command_for(Some(Installer::Pip), CommandRole::Test, &tooling)
@@ -2719,6 +2994,8 @@ mod tests {
             package: "setuptools",
             role: ToolRole::BuildBackend,
             from: PathBuf::new(),
+            source: None,
+            evidence: ToolingEvidence::Dependency,
         }];
         let built = command_for(None, CommandRole::Build, &tooling);
         assert_eq!(built.command.as_deref(), Some("python -m build"));
@@ -3002,7 +3279,8 @@ mod tests {
             false,
             none,
             no_locks,
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             true,
@@ -3010,7 +3288,8 @@ mod tests {
             false,
             none,
             no_locks,
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             false,
@@ -3018,7 +3297,8 @@ mod tests {
             false,
             none,
             no_locks,
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             false,
@@ -3026,7 +3306,8 @@ mod tests {
             true,
             none,
             no_locks,
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             false,
@@ -3034,7 +3315,8 @@ mod tests {
             false,
             &["setup.py"],
             no_locks,
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             false,
@@ -3042,7 +3324,8 @@ mod tests {
             false,
             none,
             &[("uv.lock", Installer::Uv)],
-            no_requirements
+            no_requirements,
+            false,
         ));
         assert!(looks_like_one(
             false,
@@ -3050,7 +3333,17 @@ mod tests {
             false,
             none,
             no_locks,
-            &[PathBuf::from("requirements.txt")]
+            &[PathBuf::from("requirements.txt")],
+            false,
+        ));
+        assert!(looks_like_one(
+            false,
+            false,
+            false,
+            none,
+            no_locks,
+            no_requirements,
+            true
         ));
     }
 }
