@@ -58,7 +58,7 @@ store directory cannot.
 | `sure config set SETTING VALUE` | write one setting into your own settings file, the one outside every project | works: only the settings a run reads from that file, only on request, and never a project's own `sure.yaml` |
 | `sure hook ingest` | record one event from a coding harness | works; for a pre-action event it also answers with the action SURE would take and a sentence saying why |
 | `sure hook allow-once --tool NAME (--command WORDS \| --path PATH) [--project DIR] [--minutes N]` | record a one-time allowance for one request SURE would otherwise hold | works; SURE reads the settings in force and the tool name, and if together they leave a request naming that tool that this project could be held for, it writes the grant to its store and says which acts that covers, read off the settings in force at the moment it writes. If they leave none — the default configuration does, for every tool, and strict-on-its-own does for any tool that is not a read — it refuses, names the tool, and writes nothing, because a grant no matching request could spend is a promise SURE cannot keep. What the sentence offers with it is the change that would make the grant spendable — a setting, where a setting is what stands in the way — which for a tool whose action would change the project's own files is `execution.allow_project_write: true` in the user's own settings file, together with `protection.mode: strict` where the protection in force would otherwise allow the change outright; a project's `sure.yaml` cannot grant that permission, and the sentence says so. Where no setting in this build is the cause the sentence says that instead of naming one, because naming one would be advice to change the wrong thing — and there is no such tool in this build, so that arm is kept for a build in which a permission is once again out of reach rather than deleted. Either way the sentence says the request that spends it has to be one SURE *holds*, rather than promising that the next matching request is let through — see `docs/security/PROTECTION_MODE.md` |
-| `sure explain [ID]` | explain one recorded result in plain language | works: a stored finding or check result, by its id or store row; with no ID, the most recent one. It does not re-run a check and does not turn a stored `CannotConfirm` into a pass |
+| `sure explain [ID]` | explain one recorded result in plain language | works: a stored finding or check result, by its id or store row; with no ID, the most recent recorded finding (or check result if no finding is recorded). It does not re-run a check and does not turn a stored `CannotConfirm` into a pass |
 | `sure mcp serve` | answer a coding harness that speaks the Model Context Protocol | works; each tool it exposes runs one command in this table and returns that command's own answer |
 | `sure protocol [--speaks VERSION]` | say which harness protocol this build speaks, or whether it can talk to a caller that speaks one | works |
 | `sure version` | print the version of this build | works |
@@ -749,8 +749,8 @@ exits 5 with the reason.
 
 Explain one recorded finding or check result in plain language. `ID` may be the
 stable finding id (`fnd_…`), the check-result id (`chk_…`), or the store row
-number `sure history show` prints. With no id, the most recent recorded finding or
-check result is explained.
+number `sure history show` prints. With no id, the most recent recorded finding
+is explained; if no finding was recorded, the most recent check result is.
 
 It opens the store, decodes the document that was recorded, and prints what it
 says — title, severity, status, evidence and next step. It never re-runs a check

@@ -194,7 +194,7 @@ pub enum Command {
     /// Explain one recorded finding or check result in plain language.
     Explain {
         /// The finding id, check-result id, or store row. Default: the most
-        /// recent recorded result.
+        /// recent recorded finding; if none, the most recent check result.
         id: Option<String>,
     },
 
@@ -290,7 +290,7 @@ pub enum HistoryAction {
 /// What `sure config` can be asked to do.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Show where SURE keeps its files on this machine.
+    /// Show where SURE keeps its files on this machine (not implemented in this build).
     Paths,
     /// Show the settings in effect and which layer each came from.
     Show {
@@ -298,7 +298,7 @@ pub enum ConfigAction {
         /// settings only; the project layer is not read.
         path: Option<PathBuf>,
     },
-    /// Report problems in the configuration without checking the project.
+    /// Report problems in the configuration without checking the project (not implemented in this build).
     Validate,
     /// Write one setting into your own settings file, outside every project.
     ///

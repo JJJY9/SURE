@@ -462,9 +462,23 @@ fn send_openai_request(
         }
         Err(ureq::Error::Status(code, _)) => Ok((code, String::new())),
         Err(ureq::Error::Transport(error)) => {
-            Err(openai_failed(format!("request failed: {error}")))
+            // `Transport`'s Display writes the URL first, and the underlying
+            // message can name the host; either may carry a token or an internal
+            // name from the user's settings. The kind is enough to act on and
+            // never repeats any part of the endpoint.
+            let detail = transport_failure_detail(endpoint, &error.kind().to_string());
+            Err(openai_failed(format!("request failed: {detail}")))
         }
     }
+}
+
+/// What to say about a transport failure without repeating the endpoint.
+///
+/// The endpoint is a value from the user's settings file. Its path can carry a
+/// token and its host can name an internal service; neither belongs in a report
+/// that may be pasted into an issue. The kind is the actionable part.
+fn transport_failure_detail(_endpoint: &str, kind: &str) -> String {
+    kind.to_owned()
 }
 
 /// Read up to [`OPENAI_RESPONSE_BYTES`] from `response`.
@@ -1023,5 +1037,15 @@ mod tests {
             result.blocks_green(),
             "a critical model-backed check that could not run must block green"
         );
+    }
+    #[test]
+    fn a_transport_failure_never_repeats_the_endpoint() {
+        let endpoint = "https://example.invalid/secret-token";
+        for kind in ["Dns Failed", "Connection Failed"] {
+            let detail = transport_failure_detail(endpoint, kind);
+            assert_eq!(detail, kind);
+            assert!(!detail.contains("example.invalid"));
+            assert!(!detail.contains("secret-token"));
+        }
     }
 }
