@@ -2,8 +2,9 @@
 //!
 //! The store holds the documents a run wrote. This command finds one of them —
 //! by its stable id, by the row number `sure history` can show, or, with no id,
-//! the most recent one — and explains what it says. It never re-runs a check and
-//! never turns a stored `CannotConfirm` into a pass.
+//! the most recent finding (falling back to the most recent check result when no
+//! finding was recorded) — and explains what it says. It never re-runs a check
+//! and never turns a stored `CannotConfirm` into a pass.
 
 use std::io::Write;
 
@@ -300,32 +301,28 @@ fn lookup(store: &Store, id: &str) -> Result<StoredRecord, String> {
 }
 
 fn latest(store: &Store) -> Result<StoredRecord, String> {
-    let mut newest: Option<StoredRecord> = None;
+    // A finding is the result a person asking "explain" is usually after: it is
+    // what a repair was written for. A check result is the fallback for a run
+    // that recorded no findings, not the preferred answer.
     for document in [DocumentKind::Finding, DocumentKind::CheckResult] {
         let filter = HistoryFilter {
             kind: Some(RecordKind::Document(document)),
             ..HistoryFilter::default()
         };
-        let Some(record) = store
+        if let Some(record) = store
             .history(&filter, 1)
             .map_err(|error| error.to_string())?
             .into_iter()
             .next()
-        else {
-            continue;
-        };
-        if newest
-            .as_ref()
-            .is_none_or(|current| record.written_at_ms > current.written_at_ms)
         {
-            newest = Some(record);
+            return Ok(record);
         }
     }
-    newest.ok_or_else(|| {
+    Err(
         "SURE has recorded no findings or check results yet. `sure repair` and \
          `sure recheck` record their results; `sure check` does not."
-            .to_owned()
-    })
+            .to_owned(),
+    )
 }
 
 fn report_from_record(
@@ -469,14 +466,34 @@ mod tests {
     }
 
     #[test]
-    fn explain_without_an_id_uses_the_newest_recorded_result() {
+    fn explain_without_an_id_prefers_the_most_recent_finding() {
         let (directory, _, _) = store_with_documents();
         let report = Command::Explain { id: None }.report(Named::store(&directory));
         let Report::Explain(explain) = &report else {
             panic!("{report:?}");
         };
-        assert_eq!(explain.kind_name(), "check result");
+        assert_eq!(explain.kind_name(), "finding");
         assert!(report.human_text().contains("run the tests"));
+    }
+
+    #[test]
+    fn explain_without_an_id_falls_back_to_a_check_result() {
+        let directory = sure_testkit::scratch::directory("sure explain", "result-only");
+        let store = Store::open_at(&directory.join("sure.db")).unwrap();
+        let fingerprint = FingerprintId::generate();
+        store
+            .append_for(
+                RecordKind::Document(DocumentKind::CheckResult),
+                &serde_json::to_value(a_check_result()).unwrap(),
+                "D:/demo",
+                &fingerprint,
+            )
+            .unwrap();
+        let report = Command::Explain { id: None }.report(Named::store(&directory));
+        let Report::Explain(explain) = &report else {
+            panic!("{report:?}");
+        };
+        assert_eq!(explain.kind_name(), "check result");
     }
 
     #[test]
