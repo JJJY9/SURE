@@ -516,7 +516,7 @@ fn the_whole_documented_journey_installs_the_cli_an_integration_and_answers_a_ch
         );
         for sentence in [
             "SURE checked ",
-            "No open findings.",
+            "No unresolved findings from the checks that ran.",
             "SURE exited with status 1.",
         ] {
             assert!(

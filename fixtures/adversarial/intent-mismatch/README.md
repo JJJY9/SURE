@@ -91,7 +91,7 @@ again, and asserts that the control differs from the fixture by exactly that one
 path before it reads either answer. With the file present the answer must flip:
 one requirement matched, nothing unmatched, no candidate at all, and the summary
 one line shorter — the line counting the check that could not run is gone, and
-the findings line above it is back to `No open findings.`, because nothing is
+the findings line above it is back to `No unresolved findings.`, because nothing is
 planned and so nothing is left unrun. That second half is the flip the finding
 producer is measured by, and the test asserts it by name rather than by line
 count.

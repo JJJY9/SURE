@@ -234,6 +234,7 @@ fn a_runtime_result_reaches_the_human_and_the_machine_report() {
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
             every_stage_ran: true,
+            no_project_found: false,
         },
     );
     assert!(

@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use sure_core::claim_report::render_claim_section;
 use sure_core::coverage_summary::{CoverageNotCheckedSummary, summarize};
 use sure_core::plain_language_finding::{PlainLanguageFinding, render_findings};
-use sure_core::project_verdict::render_summary_with_completeness;
+use sure_core::project_verdict::render_summary_with_run_facts;
 use sure_core::redact::escape_control_characters;
 use sure_core::status::CheckResult;
 use sure_core::vocabulary::ProjectVerdict;
@@ -34,6 +34,12 @@ pub struct HumanReportSettings<'a> {
     /// no stages to consult, and defaults to `true` so its summary keeps the
     /// wording it had before this field existed. The CLI sets it from the run.
     pub every_stage_ran: bool,
+    /// Whether discovery found no stack and the run held no check results.
+    ///
+    /// A wrong path or a directory with no manifest is not a project with
+    /// problems; the summary says so instead of "not ready". Synthetic reports
+    /// default to `false`.
+    pub no_project_found: bool,
 }
 
 impl Default for HumanReportSettings<'_> {
@@ -43,6 +49,7 @@ impl Default for HumanReportSettings<'_> {
             schedule: None,
             run_report: None,
             every_stage_ran: true,
+            no_project_found: false,
         }
     }
 }
@@ -59,9 +66,10 @@ pub fn render_verdict(verdict: &ProjectVerdict, settings: HumanReportSettings<'_
     // here as well printed the verdict sentence twice at the top of every human
     // report, with nothing between the copies but a blank line; the summary is
     // the one that stays, because it is also the form that is read on its own.
-    out.push_str(&render_summary_with_completeness(
+    out.push_str(&render_summary_with_run_facts(
         verdict,
         settings.every_stage_ran,
+        settings.no_project_found,
     ));
     out.push('\n');
 

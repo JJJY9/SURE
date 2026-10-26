@@ -5,7 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use sure_core::project_verdict::{build_verdict, render_summary, render_summary_with_completeness};
+use sure_core::project_verdict::{
+    build_verdict, render_summary, render_summary_with_completeness, render_summary_with_run_facts,
+};
 use sure_domain::capability::CapabilityReport;
 use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceClass};
 use sure_domain::finding::{AssessmentSource, FindingBuilder, FindingStatus, SeverityRationale};
@@ -200,6 +202,28 @@ fn not_enough_checked_aggregate_is_not_ready_and_says_why() {
     assert!(
         summary.contains("Not enough could be checked"),
         "summary: {summary}"
+    );
+}
+
+#[test]
+fn not_enough_checked_with_no_checks_says_it_is_not_a_project() {
+    let verdict = build_verdict(
+        fingerprint(),
+        not_enough_checked_aggregate(),
+        ProjectIntent::empty(),
+        CapabilityReport::cli(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let summary = render_summary_with_run_facts(&verdict, false, true);
+    assert!(
+        summary.contains("does not look like a project SURE can check"),
+        "summary: {summary}"
+    );
+    assert!(
+        !summary.contains("This project is not ready to hand off."),
+        "a path with no project should say so rather than call the project not ready: {summary}"
     );
 }
 

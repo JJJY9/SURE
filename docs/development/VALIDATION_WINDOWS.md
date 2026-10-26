@@ -381,7 +381,7 @@ Not enough could be checked to say whether this is ready.
 This project is not ready to hand off.
 I can check whether the current project runs and whether anything obviously looks incomplete. I cannot confirm that it matches your original request because that request was not provided to SURE.
 SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)
-Open findings: 1 Must fix, 1 Can fix later.
+Unresolved findings: 1 Must fix, 1 Can fix later.
 2 check(s) could not run or were skipped. 1 of them are critical. (run the tests)
 
 Findings

@@ -46,7 +46,7 @@ apart from the client it stands in for.
 
 Every one of the five is a `note`, and nothing any of the five detectors says
 about this project is material. The fixture would be worth nothing if the five
-were simply not read — a report that says `No open findings.` because nothing
+were simply not read — a report that says `No unresolved findings.` because nothing
 looked is not the same as one that says it because what it looked at cannot reach
 a user — so the grading drives three controls over copies of this project, each
 changing exactly one thing:
