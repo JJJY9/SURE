@@ -2144,6 +2144,13 @@ fn describe_plan(
         schedule.may_run().count(),
         schedule.blocked().count(),
     )];
+    if !planned.missing.is_empty() {
+        parts.push(format!(
+            "{} declared check(s) have no command because the project does not declare one; \
+             they are listed as not checked below.",
+            planned.missing.len()
+        ));
+    }
     if !refused.is_empty() {
         parts.push(format!(
             "{} candidate(s) could not become a check: {}.",

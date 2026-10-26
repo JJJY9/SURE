@@ -625,6 +625,10 @@ fn finished(
     writeln!(out, "SURE checked {}.", report.project)?;
     writeln!(out)?;
 
+    let no_project_found = run.support.level == sure_core::vocabulary::SupportLevel::InspectOnly
+        && run.report.results().is_empty()
+        && run.verdict.findings.is_empty();
+
     // Everything the verdict is made of, in the words this repository already
     // uses for it. Rendering it here a second time would be a second explanation
     // of one result, and the two would drift the first time either was improved.
@@ -635,13 +639,14 @@ fn finished(
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
             every_stage_ran: outcome.every_stage_ran(),
+            no_project_found,
         },
         out,
     )?;
     writeln!(out)?;
     checks_that_passed(run, out)?;
 
-    repairs(run, out)?;
+    repairs(run, outcome.purpose, out)?;
     lifecycle(run, out)?;
     stages(outcome, out)?;
     privacy(&report.privacy, report.model_use, out)?;
@@ -739,8 +744,16 @@ fn checks_that_passed(run: &RunOutcome, out: &mut impl Write) -> io::Result<()> 
 /// this location could break. It is the selection that has to pass before the
 /// finding closes, so it is the selection a reader is owed; the function is the
 /// one the pipeline calls rather than a second rule written here.
-fn repairs(run: &RunOutcome, out: &mut impl Write) -> io::Result<()> {
+fn repairs(run: &RunOutcome, purpose: Purpose, out: &mut impl Write) -> io::Result<()> {
     if run.repairs.is_empty() {
+        if purpose == Purpose::Repair && run.verdict.findings.is_empty() {
+            writeln!(
+                out,
+                "There is nothing to repair: this run produced no findings. The exit status still \
+                 reports the project's check status; it is not a failure to write instructions."
+            )?;
+            writeln!(out)?;
+        }
         return Ok(());
     }
     writeln!(

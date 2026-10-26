@@ -154,7 +154,7 @@ This project is not ready to hand off.
 and the counts:
 
 ```text
-Open findings: 5 Must fix, 5 Should fix first, 5 Can fix later, 3 Note.
+Unresolved findings: 5 Must fix, 5 Should fix first, 5 Can fix later, 3 Note.
 18 check(s) could not run or were skipped. 1 of them are critical. (run the tests)
 ```
 
@@ -315,7 +315,7 @@ not there. The sentence is defensible; it is one word away from being exact.
 
 ## 5. The one reading that can go wrong
 
-The counts line says `Open findings: 5 Must fix, 5 Should fix first, 5 Can fix
+The counts line says `Unresolved findings: 5 Must fix, 5 Should fix first, 5 Can fix
 later, 3 Note.` Every one of those eighteen is `Cannot confirm`. The severities
 are the *checks'* own — `findings_from_checks.rs` states the rule ("A check the
 plan called `must_fix` produces a `must_fix` finding") — and the same eighteen
@@ -327,7 +327,7 @@ report reads as five established must-fix defects, and nothing on that line says
 they are eighteen checks that did not run. The correction is one line below
 (`18 check(s) could not run or were skipped`) and every entry repeats `Status:
 Cannot confirm`, so a reader who reads the report rather than the line is fine.
-A reader who skims — or a script that parses `Open findings` and stops — is not.
+A reader who skims — or a script that parses `Unresolved findings` and stops — is not.
 
 I judge this an honest but poorly-labelled count, not a false green: it errs
 toward alarm, the verdict is not-green either way, and the run never claims a

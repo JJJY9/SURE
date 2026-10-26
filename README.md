@@ -100,7 +100,7 @@ SURE checked C:\demo\hello.
 Not enough could be checked to say whether this is ready.
 This project is not ready to hand off.
 ...
-No open findings.
+No unresolved findings from the checks that ran.
 
 What the run did, stage by stage
   1/12. Find the project's parts: node (level B); all of it was read. Support reaches level B.
