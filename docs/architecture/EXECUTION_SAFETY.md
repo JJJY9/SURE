@@ -114,10 +114,12 @@ command before a runner sees it. That is a measurement rather than a reading:
 `pipeline.rs`'s `a_run_a_user_did_not_grant_starts_nothing` drives the real
 pipeline with a runner that records being called and asserts the record is
 empty. Stage 6 reports which of the two happened instead of leaving it to be
-inferred — *"N check(s) would run your project's code and the execution mode
-stopped every one of them"*, or *"…and the execution mode allowed them. Each one
-has a result"* — and a check the runner produced nothing for is an error rather
-than a pass.
+inferred: when every check ran it says *"N check(s) would run your project's
+code and the execution mode allowed them. Each one has a result"*; when any were
+stopped it names the permission that stopped them — the execution mode, a
+missing dependency-install grant, or missing network access — and records those
+checks as not checked rather than passed. A check the runner produced nothing
+for is an error rather than a pass.
 
 **And the level SURE reports about a project has not moved.**
 `sure_core::support::CEILING` is `InspectOnly`, for the reason

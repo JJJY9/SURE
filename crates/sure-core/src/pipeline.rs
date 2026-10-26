@@ -2243,23 +2243,25 @@ fn describe_dynamic(
                 scheduled.proposal().requirements().runs_project_code()
             })
     };
-    let stopped: Vec<&str> = dynamic_checks()
-        .filter(|scheduled| {
+    let stopped: Vec<(&str, Option<NotCheckedReason>)> = dynamic_checks()
+        .filter_map(|scheduled| {
             enforcement
                 .stopped()
                 .iter()
-                .any(|result| &result.id == scheduled.proposal().id())
+                .find(|result| &result.id == scheduled.proposal().id())
+                .map(|result| (scheduled.proposal().title(), result.not_checked_reason))
         })
-        .map(|scheduled| scheduled.proposal().title())
         .collect();
+    let stopped_titles: Vec<&str> = stopped.iter().map(|(title, _)| *title).collect();
+    let reason = common_not_checked_reason(stopped.iter().map(|(_, reason)| *reason));
+    let why = stopped_reason_phrase(reason);
     if stopped.len() == dynamic {
         return StageOutcome::NotRun {
-            reason: Some(NotCheckedReason::ExecutionNotAuthorized),
+            reason,
             detail: format!(
-                "{dynamic} check(s) would run your project's code and the execution mode stopped \
-                 every one of them, so none was carried out and each is recorded as not checked \
-                 rather than passed: {}.",
-                stopped.join(", ")
+                "{dynamic} check(s) would run your project's code, but {why}, so none was \
+                 carried out and each is recorded as not checked rather than passed: {}.",
+                stopped_titles.join(", ")
             ),
         };
     }
@@ -2273,14 +2275,44 @@ fn describe_dynamic(
         };
     }
     StageOutcome::NotRun {
-        reason: Some(NotCheckedReason::ExecutionNotAuthorized),
+        reason,
         detail: format!(
-            "{dynamic} check(s) would run your project's code. The execution mode stopped {} of \
-             them and those are recorded as not checked: {}. The rest were carried out and each \
+            "{dynamic} check(s) would run your project's code. {} of them did not run because \
+             {why}, and those are recorded as not checked: {}. The rest were carried out and each \
              has a result.",
             stopped.len(),
-            stopped.join(", ")
+            stopped_titles.join(", ")
         ),
+    }
+}
+
+/// The reason every stopped check shares, if they share one.
+///
+/// A mixed set answers `None` rather than picking one check's reason and
+/// speaking for the others: [`StageOutcome::NotRun`] allows that, and a stage
+/// sentence that named one permission while another stopped a check would be
+/// the same misattribution this helper exists to stop.
+fn common_not_checked_reason(
+    mut reasons: impl Iterator<Item = Option<NotCheckedReason>>,
+) -> Option<NotCheckedReason> {
+    let first = reasons.next()??;
+    reasons.all(|reason| reason == Some(first)).then_some(first)
+}
+
+/// Why stopped checks did not run, in the terms of the permission that stopped
+/// them rather than the execution mode alone.
+fn stopped_reason_phrase(reason: Option<NotCheckedReason>) -> &'static str {
+    match reason {
+        Some(NotCheckedReason::DependencyInstallNotPermitted) => {
+            "installing their dependencies is not allowed"
+        }
+        Some(NotCheckedReason::NetworkNotPermitted) => "network access is not allowed",
+        Some(NotCheckedReason::ExecutionNotAuthorized) => "the execution mode stopped them",
+        Some(NotCheckedReason::UserDeclined) => "you declined them",
+        Some(NotCheckedReason::ContainerExecutionUnavailable) => {
+            "this build cannot run checks in a container"
+        }
+        _ => "the run's permissions stopped them",
     }
 }
 
@@ -4087,6 +4119,35 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("candidate evidence")),
             "the refusal does not say the finding is candidate evidence: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_stage_sentence_only_names_a_reason_every_stopped_check_shares() {
+        let install = Some(NotCheckedReason::DependencyInstallNotPermitted);
+        let network = Some(NotCheckedReason::NetworkNotPermitted);
+
+        assert_eq!(
+            common_not_checked_reason([install, install].into_iter()),
+            install
+        );
+        assert_eq!(
+            common_not_checked_reason([install, network].into_iter()),
+            None,
+            "a mixed set named one check's permission for the others"
+        );
+        assert_eq!(
+            common_not_checked_reason([install, None].into_iter()),
+            None,
+            "a check with no recorded reason was folded into a permission it never named"
+        );
+        assert_eq!(
+            stopped_reason_phrase(install),
+            "installing their dependencies is not allowed"
+        );
+        assert_eq!(
+            stopped_reason_phrase(Some(NotCheckedReason::ExecutionNotAuthorized)),
+            "the execution mode stopped them"
         );
     }
 
