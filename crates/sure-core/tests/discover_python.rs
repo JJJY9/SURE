@@ -1183,6 +1183,44 @@ fn a_configured_runner_wins_over_a_dependency_runner() {
 }
 
 #[test]
+fn tox_ini_wins_over_a_pytest_ini() {
+    // MiQi's config order is tox.ini, noxfile.py, pytest.ini, then the
+    // pyproject tables. A tox project is run through tox even when a pytest
+    // config is also present.
+    let fixture = Fixture::new("tox-ini-wins");
+    fixture.write("tox.ini", "[testenv]\ncommands = python -m pytest\n");
+    fixture.write("pytest.ini", "[pytest]\ntestpaths = tests\n");
+
+    let python = fixture.python();
+    let test = python
+        .conventional_commands()
+        .into_iter()
+        .find(|row| row.role == CommandRole::Test)
+        .expect("a row for test");
+    assert_eq!(test.command.as_deref(), Some("python -m tox"));
+}
+
+#[test]
+fn pytest_ini_wins_over_a_pyproject_tox_table() {
+    // The file-level pytest declaration is earlier in MiQi's order than the
+    // pyproject `[tool.tox]` table.
+    let fixture = Fixture::new("pytest-ini-wins-over-table");
+    fixture.write(
+        "pyproject.toml",
+        "[project]\nname = \"x\"\n\n[tool.tox]\nenvlist = [\"py311\"]\n",
+    );
+    fixture.write("pytest.ini", "[pytest]\n");
+
+    let python = fixture.python();
+    let test = python
+        .conventional_commands()
+        .into_iter()
+        .find(|row| row.role == CommandRole::Test)
+        .expect("a row for test");
+    assert_eq!(test.command.as_deref(), Some("python -m pytest"));
+}
+
+#[test]
 fn setup_cfg_tool_sections_declare_tools_without_reading_packaging_metadata() {
     let fixture = Fixture::new("tooling-from-setup-cfg");
     fixture.write(

@@ -119,43 +119,43 @@ const LEGACY_FILES: &[&str] = &["setup.py", SETUP_CFG];
 ///
 /// `setup.cfg` is not here because its sections need reading rather than its
 /// existence; [`SETUP_CFG_TOOL_SECTIONS`] is the smaller list read from it.
-const CONFIG_TOOLS: &[(&str, &str)] = &[
-    ("pytest.ini", "pytest"),
-    ("tox.ini", "tox"),
-    ("noxfile.py", "nox"),
-    ("ruff.toml", "ruff"),
-    (".ruff.toml", "ruff"),
-    ("mypy.ini", "mypy"),
-    (".mypy.ini", "mypy"),
-    ("pyrightconfig.json", "pyright"),
-    ("pylintrc", "pylint"),
-    (".pylintrc", "pylint"),
-    (".flake8", "flake8"),
+const CONFIG_TOOLS: &[(&str, &str, ToolingEvidence)] = &[
+    ("pytest.ini", "pytest", ToolingEvidence::PytestIni),
+    ("tox.ini", "tox", ToolingEvidence::ToxIni),
+    ("noxfile.py", "nox", ToolingEvidence::Noxfile),
+    ("ruff.toml", "ruff", ToolingEvidence::Config),
+    (".ruff.toml", "ruff", ToolingEvidence::Config),
+    ("mypy.ini", "mypy", ToolingEvidence::Config),
+    (".mypy.ini", "mypy", ToolingEvidence::Config),
+    ("pyrightconfig.json", "pyright", ToolingEvidence::Config),
+    ("pylintrc", "pylint", ToolingEvidence::Config),
+    (".pylintrc", "pylint", ToolingEvidence::Config),
+    (".flake8", "flake8", ToolingEvidence::Config),
 ];
 
 /// Tool sections in `setup.cfg`.
 ///
 /// The packaging metadata in that file is still not read; these section names
 /// are, because they name a tool without putting it in a dependency table.
-const SETUP_CFG_TOOL_SECTIONS: &[(&str, &str)] = &[
-    ("tool:pytest", "pytest"),
-    ("flake8", "flake8"),
-    ("mypy", "mypy"),
-    ("pylint", "pylint"),
+const SETUP_CFG_TOOL_SECTIONS: &[(&str, &str, ToolingEvidence)] = &[
+    ("tool:pytest", "pytest", ToolingEvidence::SetupCfgPytest),
+    ("flake8", "flake8", ToolingEvidence::Config),
+    ("mypy", "mypy", ToolingEvidence::Config),
+    ("pylint", "pylint", ToolingEvidence::Config),
 ];
 
 /// `[tool.*]` tables in `pyproject.toml` that name a tool SURE checks.
 ///
 /// The table's existence is the declaration; its contents are the tool's
 /// business and are never interpreted here.
-const TOOL_SECTIONS: &[(&str, &str)] = &[
-    ("pytest", "pytest"),
-    ("tox", "tox"),
-    ("ruff", "ruff"),
-    ("mypy", "mypy"),
-    ("pyright", "pyright"),
-    ("pylint", "pylint"),
-    ("flake8", "flake8"),
+const TOOL_SECTIONS: &[(&str, &str, ToolingEvidence)] = &[
+    ("pytest", "pytest", ToolingEvidence::PytestTable),
+    ("tox", "tox", ToolingEvidence::ToxTable),
+    ("ruff", "ruff", ToolingEvidence::Config),
+    ("mypy", "mypy", ToolingEvidence::Config),
+    ("pyright", "pyright", ToolingEvidence::Config),
+    ("pylint", "pylint", ToolingEvidence::Config),
+    ("flake8", "flake8", ToolingEvidence::Config),
 ];
 
 /// The prefix and suffix a requirements file is recognised by.
@@ -648,12 +648,25 @@ impl ToolRole {
 
 /// Where a recognised tool's declaration came from.
 ///
-/// The order matters: a dedicated config file or `[tool.*]` table is a
-/// project's explicit choice of runner, and wins over a package that merely
-/// appears in a dependency list. The derived `Ord` puts [`Self::Config`] first.
+/// The order is the precedence MiQi's project-test detector uses: a `tox.ini`
+/// names the test entry point, then a `noxfile.py`, then a `pytest.ini`, then
+/// the corresponding `pyproject.toml` tables, then `setup.cfg`. A dependency
+/// list comes last. The derived `Ord` puts the earliest declaration first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ToolingEvidence {
-    /// A dedicated config file or `[tool.*]` table names the tool.
+    /// `tox.ini`.
+    ToxIni,
+    /// `noxfile.py`.
+    Noxfile,
+    /// `pytest.ini`.
+    PytestIni,
+    /// `[tool.tox]` in `pyproject.toml`.
+    ToxTable,
+    /// `[tool.pytest]` in `pyproject.toml`.
+    PytestTable,
+    /// `[tool:pytest]` in `setup.cfg`.
+    SetupCfgPytest,
+    /// Any other dedicated config file or `[tool.*]` table.
     Config,
     /// A dependency or requirements table names the package.
     Dependency,
@@ -1323,7 +1336,7 @@ impl PyProject {
         // --- which tool sections are present ----------------------------------
         let mut tool_sections = Vec::new();
         if let Some(tool) = root.get("tool").and_then(serde_json::Value::as_object) {
-            for &(section, _) in TOOL_SECTIONS {
+            for &(section, _, _) in TOOL_SECTIONS {
                 if tool.get(section).is_some_and(serde_json::Value::is_object) {
                     tool_sections.push(section.to_owned());
                 }
@@ -1740,7 +1753,7 @@ fn declared_tool(role: CommandRole, tools: &[Tooling]) -> Option<&str> {
             .flat_map(|&wanted| tools.iter().filter(move |tool| tool.role == wanted))
     };
     if role == CommandRole::Test
-        && let Some(tool) = matching().find(|tool| tool.evidence == ToolingEvidence::Config)
+        && let Some(tool) = matching().min_by_key(|tool| tool.evidence)
     {
         return Some(tool.package);
     }
@@ -2028,10 +2041,10 @@ pub(super) fn look(
         .filter(|(name, _)| matches!(tree.probe(Path::new(name)), Probe::File(_)))
         .collect();
     let requirement_paths = requirement_candidates(&tree);
-    let config_tools: Vec<(&'static str, &'static str)> = CONFIG_TOOLS
+    let config_tools: Vec<(&'static str, &'static str, ToolingEvidence)> = CONFIG_TOOLS
         .iter()
         .copied()
-        .filter(|(name, _)| matches!(tree.probe(Path::new(*name)), Probe::File(_)))
+        .filter(|(name, _, _)| matches!(tree.probe(Path::new(*name)), Probe::File(_)))
         .collect();
     let setup_cfg_sections = read_setup_cfg_tool_sections(root, &tree, options, budget, unread);
     let found_tool_config = !config_tools.is_empty() || !setup_cfg_sections.is_empty();
@@ -2060,7 +2073,7 @@ pub(super) fn look(
     }
 
     // --- the tool configuration files, by existence -------------------------
-    for &(name, _) in &config_tools {
+    for &(name, _, _) in &config_tools {
         found_by.push(PathBuf::from(name));
     }
 
@@ -2216,12 +2229,14 @@ pub(super) fn look(
     // the tool's business and are not read.
     if let Some(project) = manifest.project() {
         for section in &project.tool_sections {
-            if let Some(&(_, package)) = TOOL_SECTIONS.iter().find(|(name, _)| *name == section) {
+            if let Some(&(_, package, evidence)) =
+                TOOL_SECTIONS.iter().find(|(name, _, _)| *name == section)
+            {
                 collect_tooling_named(
                     package,
                     Path::new(""),
                     Some(Path::new(MANIFEST)),
-                    ToolingEvidence::Config,
+                    evidence,
                     &mut tooling,
                 );
             }
@@ -2229,23 +2244,23 @@ pub(super) fn look(
     }
     // A dedicated config file is the same declaration for a tool that has no
     // pyproject table. Existence is enough; nothing is parsed or executed.
-    for &(name, package) in &config_tools {
+    for &(name, package, evidence) in &config_tools {
         collect_tooling_named(
             package,
             Path::new(""),
             Some(Path::new(name)),
-            ToolingEvidence::Config,
+            evidence,
             &mut tooling,
         );
     }
     // `setup.cfg`'s tool sections are the same evidence; its packaging
     // metadata remains unread.
-    for &package in &setup_cfg_sections {
+    for &(package, evidence) in &setup_cfg_sections {
         collect_tooling_named(
             package,
             Path::new(""),
             Some(Path::new(SETUP_CFG)),
-            ToolingEvidence::Config,
+            evidence,
             &mut tooling,
         );
     }
@@ -2307,7 +2322,7 @@ fn read_setup_cfg_tool_sections(
     options: &DiscoverOptions,
     budget: &mut Budget,
     unread: &mut Vec<Unread>,
-) -> Vec<&'static str> {
+) -> Vec<(&'static str, ToolingEvidence)> {
     let relative = Path::new(SETUP_CFG);
     match read::read_text_file(root, tree.probe(relative), options, budget) {
         ReadFile::Absent => Vec::new(),
@@ -2330,7 +2345,7 @@ fn read_setup_cfg_tool_sections(
 /// A section header is `[name]` on a line of its own; comments and values are
 /// not interpreted. The names are compared case-insensitively because config
 /// parsers do, and only names from [`SETUP_CFG_TOOL_SECTIONS`] are returned.
-fn setup_cfg_tool_sections(text: &str) -> Vec<&'static str> {
+fn setup_cfg_tool_sections(text: &str) -> Vec<(&'static str, ToolingEvidence)> {
     let mut found = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
@@ -2342,12 +2357,12 @@ fn setup_cfg_tool_sections(text: &str) -> Vec<&'static str> {
             continue;
         };
         let section = rest[..close].trim().to_ascii_lowercase();
-        if let Some(&(_, package)) = SETUP_CFG_TOOL_SECTIONS
+        if let Some(&(_, package, evidence)) = SETUP_CFG_TOOL_SECTIONS
             .iter()
-            .find(|(name, _)| *name == section)
-            && !found.contains(&package)
+            .find(|(name, _, _)| *name == section)
+            && !found.iter().any(|(seen, _)| *seen == package)
         {
-            found.push(package);
+            found.push((package, evidence));
         }
     }
     found

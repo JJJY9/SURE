@@ -200,7 +200,10 @@ dependency name a project wrote can reach a sentence SURE prints. It also
 carries the file that declared it when discovery can name one — a dependency
 table, a requirements file, a `[tool.*]` section, or a dedicated config file —
 so a check's `declared_in` points at the evidence rather than at whichever
-manifest SURE read first. A package not
+manifest SURE read first. For the test role, a runner named by a config
+declaration wins over one that merely appears in a dependency list, in the order
+`tox.ini`, `noxfile.py`, `pytest.ini`, the `pyproject.toml` tables, then
+`setup.cfg`; MiQi's project-test detector uses the same order. A package not
 in the table is not reported at all, which is a deliberate silence: "SURE did not
 recognise this package" is not a finding, and guessing from a name would be. One
 package may appear twice when it is genuinely two things — Biome lints *and*
