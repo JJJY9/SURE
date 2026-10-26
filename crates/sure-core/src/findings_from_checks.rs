@@ -98,7 +98,7 @@ use sure_domain::finding::{
 };
 use sure_domain::ids::FingerprintId;
 use sure_domain::severity::Severity;
-use sure_domain::status::{CheckResult, CheckStatus};
+use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason};
 
 use crate::schedule::CheckSchedule;
 
@@ -184,7 +184,12 @@ fn finding_for(result: &CheckResult, schedule: &CheckSchedule) -> Option<Finding
         .status(status_for(result, spoke, settled))
         .explanation(explanation_for(result, spoke, settled))
         .user_impact(impact_for(spoke, settled))
-        .next_step(next_step_for(&anchor, spoke, settled))
+        .next_step(next_step_for(
+            &anchor,
+            spoke,
+            settled,
+            result.not_checked_reason,
+        ))
         .evidence([evidence])
         .fingerprint(result.project_fingerprint.clone());
 
@@ -249,8 +254,33 @@ fn impact_for(spoke: bool, settled: bool) -> String {
         .to_owned()
 }
 
-fn next_step_for(anchor: &EvidenceAnchor, spoke: bool, settled: bool) -> String {
+fn next_step_for(
+    anchor: &EvidenceAnchor,
+    spoke: bool,
+    settled: bool,
+    not_checked_reason: Option<NotCheckedReason>,
+) -> String {
     if !spoke {
+        if not_checked_reason == Some(NotCheckedReason::DependencyInstallNotPermitted) {
+            if anchor.subject == AnchorSubject::Command && !anchor.locator.trim().is_empty() {
+                return format!(
+                    "Install the packages this check needs, then run `{}` and let SURE re-check \
+                     it. To let SURE install them, run `sure config set execution.\
+                     allow_dependency_install true` and, if they must be downloaded, `sure config \
+                     set execution.allow_network true`; then re-check.",
+                    anchor.locator.trim()
+                );
+            }
+            return "Install the packages this check needs, or let SURE install them with `sure \
+                    config set execution.allow_dependency_install true` and, if they must be \
+                    downloaded, `sure config set execution.allow_network true`; then re-check."
+                .to_owned();
+        }
+        if not_checked_reason == Some(NotCheckedReason::NetworkNotPermitted) {
+            return "Allow network access with `sure config set execution.allow_network true`, \
+                    then re-check."
+                .to_owned();
+        }
         if anchor.subject == AnchorSubject::Command && !anchor.locator.trim().is_empty() {
             return format!(
                 "Run `{}` and let SURE re-check it, or allow SURE to run it with `sure config \
@@ -460,6 +490,71 @@ mod tests {
                 .next_step
                 .contains("sure config set execution.mode host_confirmed"),
             "a check the user has not allowed must name the command that allows it: {}",
+            finding.next_step
+        );
+    }
+
+    #[test]
+    fn a_finding_blocked_by_dependency_install_names_the_install_permission() {
+        // The real shape from 2026-10-26: `execution.mode` was already
+        // `host_confirmed`, so pointing the user at it again changed nothing.
+        // The permission that actually stopped the check is
+        // `execution.allow_dependency_install`.
+        let result = CheckResult::not_run(
+            CheckId::generate(),
+            "build the distribution",
+            Severity::MustFix,
+            true,
+            NotCheckedReason::DependencyInstallNotPermitted,
+            fingerprint(),
+        );
+        let finding = &findings_from_checks(&[result], &empty_schedule())[0];
+
+        assert_eq!(finding.status, FindingStatus::CannotConfirm);
+        assert!(
+            finding
+                .next_step
+                .contains("sure config set execution.allow_dependency_install true"),
+            "dependency install refusal did not name the install permission: {}",
+            finding.next_step
+        );
+        assert!(
+            finding
+                .next_step
+                .contains("sure config set execution.allow_network true"),
+            "dependency install refusal did not mention the network permission: {}",
+            finding.next_step
+        );
+        assert!(
+            !finding.next_step.contains("execution.mode"),
+            "dependency install refusal pointed at execution.mode: {}",
+            finding.next_step
+        );
+    }
+
+    #[test]
+    fn a_finding_blocked_by_network_names_the_network_permission() {
+        let result = CheckResult::not_run(
+            CheckId::generate(),
+            "fetch the remote manifest",
+            Severity::MustFix,
+            true,
+            NotCheckedReason::NetworkNotPermitted,
+            fingerprint(),
+        );
+        let finding = &findings_from_checks(&[result], &empty_schedule())[0];
+
+        assert_eq!(finding.status, FindingStatus::CannotConfirm);
+        assert!(
+            finding
+                .next_step
+                .contains("sure config set execution.allow_network true"),
+            "{}",
+            finding.next_step
+        );
+        assert!(
+            !finding.next_step.contains("execution.mode"),
+            "network refusal pointed at execution.mode: {}",
             finding.next_step
         );
     }
