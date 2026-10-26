@@ -94,6 +94,7 @@ mod record;
 pub use error::StoreError;
 pub use migrations::{LATEST as LATEST_SCHEMA_VERSION, Migration, MigrationError};
 pub use record::{ALLOWANCE, APPROVAL, RECORDING, RecordKind, StoredRecord};
+pub use sure_protocol::documents::DocumentKind;
 
 use std::fs;
 use std::path::{Path, PathBuf};

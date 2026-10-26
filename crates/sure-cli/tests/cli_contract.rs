@@ -352,10 +352,8 @@ const EVERY_COMMAND: &[&[&str]] = &[
 /// `crate::history`.
 const REFUSED: &[&[&str]] = &[
     &["history", "export"],
-    &["explain"],
     &["config"],
     &["config", "paths"],
-    &["config", "show"],
     &["config", "validate"],
 ];
 

@@ -519,6 +519,10 @@ pub enum Report {
     /// the person reading them has to be able to tell which one happened: a
     /// write, a no-op, and a refusal are not "worked" and "did not work".
     Settings(Box<SettingsChange>),
+    /// `sure config show`, carrying the settings in effect and their layers.
+    ConfigShow(Box<crate::config_show::ConfigShowReport>),
+    /// `sure explain`, carrying one recorded finding or check result.
+    Explain(Box<crate::explain::ExplainReport>),
     /// A command whose work lands in a later phase.
     Unavailable(NotYet),
     /// A command that tried and did not finish.
@@ -615,6 +619,7 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => "ok",
                 SettingsOutcome::Refused { .. } => "failed",
             },
+            Self::ConfigShow(_) | Self::Explain(_) => "ok",
             Self::Unavailable(_) => "unavailable",
             // A command that did not finish has not answered, and saying
             // `not_green` would read as "the project has problems" — which is a
@@ -724,6 +729,7 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => exit::OK,
                 SettingsOutcome::Refused { .. } => exit::FAILED,
             },
+            Self::ConfigShow(_) | Self::Explain(_) => exit::OK,
             Self::Unavailable(_) => exit::UNAVAILABLE,
             Self::Failed(_) => exit::FAILED,
             // 0 for allow/warn so the launcher does not block the operation.
@@ -797,6 +803,7 @@ impl Report {
             // follows: there is nothing to file, and a person who piped the
             // output meant to read why.
             Self::Settings(change) => !matches!(change.outcome, SettingsOutcome::Refused { .. }),
+            Self::ConfigShow(_) | Self::Explain(_) => true,
             Self::Unavailable(_) | Self::Failed(_) => false,
             // A hook decision is an answer: the command ran and produced a result.
             Self::HookDecision(_) => true,
@@ -862,6 +869,8 @@ impl Report {
             // code that decided which of the three things happened rather than
             // in a renderer that has to reconstruct it.
             Self::Settings(change) => crate::settings::human(change, out),
+            Self::ConfigShow(report) => report.human(out),
+            Self::Explain(report) => report.human(out),
             Self::Failed(failure) => {
                 writeln!(
                     out,
@@ -1133,6 +1142,8 @@ impl Report {
             // command's own module so that the shape a script reads is decided
             // beside the prose a person reads.
             Self::Settings(change) => frame["details"] = crate::settings::machine(change),
+            Self::ConfigShow(report) => frame["details"] = report.machine(),
+            Self::Explain(report) => frame["details"] = report.machine(),
             // The failure's own words. `what` is a sentence SURE wrote about
             // itself and `detail` is whatever went wrong, kept apart here for
             // the same reason they are apart in the struct: a reader deciding
@@ -1228,6 +1239,8 @@ impl Report {
             // frame that said `config` for a write would name a surface that
             // does not exist.
             Self::Settings(change) => change.command,
+            Self::ConfigShow(_) => "config show",
+            Self::Explain(_) => "explain",
             Self::Unavailable(not_yet) => not_yet.command,
             Self::Failed(failure) => failure.command,
             Self::HookDecision(_) => "hook",

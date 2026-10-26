@@ -191,9 +191,10 @@ pub enum Command {
         action: HookAction,
     },
 
-    /// Explain one recorded result in plain language (not implemented in this build).
+    /// Explain one recorded finding or check result in plain language.
     Explain {
-        /// The result to explain.
+        /// The finding id, check-result id, or store row. Default: the most
+        /// recent recorded result.
         id: Option<String>,
     },
 
@@ -291,8 +292,12 @@ pub enum HistoryAction {
 pub enum ConfigAction {
     /// Show where SURE keeps its files on this machine.
     Paths,
-    /// Show the settings in effect and which layer each came from (not implemented in this build).
-    Show,
+    /// Show the settings in effect and which layer each came from.
+    Show {
+        /// The project whose `sure.yaml` is read. Default: the user's own
+        /// settings only; the project layer is not read.
+        path: Option<PathBuf>,
+    },
     /// Report problems in the configuration without checking the project.
     Validate,
     /// Write one setting into your own settings file, outside every project.
