@@ -467,6 +467,10 @@ impl PythonChecks {
         for &(role, check) in CHECKS {
             let id = check_id(&component, &format!("python{}", role.as_str()));
             let title = titled(role);
+            // The file this role's check points at. A tool named by its own
+            // config file names that file; a tool from a dependency table
+            // falls back to the manifest SURE read.
+            let declared_in = declared_in_for(project, role, &component);
             // **The plan, asked for once**, and both the line the reason carries
             // and the operation beside it are derived from it: `invocation_for`
             // is what `command_for` renders, so the row a report prints and the
@@ -482,7 +486,7 @@ impl PythonChecks {
                 (None, _) => checks.missing.push(MissingCommand::new(
                     id,
                     title,
-                    component.clone(),
+                    declared_in.clone(),
                     check.severity,
                     check.critical,
                     gap_kind(project, role),
@@ -490,7 +494,7 @@ impl PythonChecks {
                 (Some(_), Runner::Unknown { why }) => checks.missing.push(MissingCommand::new(
                     id,
                     title,
-                    component.clone(),
+                    declared_in.clone(),
                     check.severity,
                     check.critical,
                     MissingKind::NoRunner { why },
@@ -507,7 +511,7 @@ impl PythonChecks {
                         // answer.
                         EvidenceClass::DeterministicCheck,
                         CheckReason::DeclaredCommand {
-                            declared_in: component.clone(),
+                            declared_in,
                             // The rendered line, and only the rendered line: it is
                             // what a report prints, and the program that would run
                             // is the `CommandSpec` beside it. Nothing reads this
@@ -670,9 +674,28 @@ impl PythonChecks {
     }
 }
 
-/// The file SURE read this project from, or `None` when it read no manifest.
+/// The file a role's check points at.
 ///
-/// See [`PythonChecks::component`] for what this does and does not claim.
+/// A tool named by its own config file names that file; a tool from a
+/// dependency table falls back to the manifest SURE read. The check identifier
+/// still comes from [`component`], so adding `pytest.ini` to a project does not
+/// rename the check a previous run recorded.
+fn declared_in_for(project: &PythonProject, role: CommandRole, fallback: &str) -> String {
+    tool_role(role)
+        .and_then(|wanted| {
+            project
+                .tooling_of_role(wanted)
+                .find_map(|tool| tool.source.as_deref())
+        })
+        .map_or_else(|| fallback.to_owned(), display_path)
+}
+
+/// The file SURE read this project from, or `None` when nothing marks one.
+///
+/// See [`PythonChecks::component`] for what this does and does not claim. A
+/// project with no manifest and no requirements but a dedicated tool config
+/// (`pytest.ini`, `ruff.toml`, ...) falls back to that config, so its checks
+/// have a component instead of disappearing.
 fn component(project: &PythonProject) -> Option<String> {
     if project.manifest.project().is_some() {
         return Some(crate::discover::python::MANIFEST.to_owned());
@@ -684,6 +707,12 @@ fn component(project: &PythonProject) -> Option<String> {
         .requirements
         .first()
         .map(|file| display_path(&file.path))
+        .or_else(|| {
+            project
+                .tooling
+                .iter()
+                .find_map(|tool| tool.source.as_deref().map(display_path))
+        })
 }
 
 /// Why there is no command for a role, told apart from a project that declares
@@ -755,7 +784,7 @@ mod tests {
     use super::*;
     use crate::discover::python::{
         InstallerEvidence, InstallerFinding, ManifestState, PyProject, Requirement,
-        RequirementsFile, Tooling,
+        RequirementsFile, Tooling, ToolingEvidence,
     };
     use crate::planned_work::CheckOperation;
     use serde_json::json;
@@ -851,6 +880,8 @@ mod tests {
                 // Empty is what a root project's own tools carry; see
                 // `Tooling::from`.
                 from: "".into(),
+                source: None,
+                evidence: ToolingEvidence::Dependency,
             })
             .collect()
     }
@@ -1421,6 +1452,39 @@ mod tests {
             comments: 0,
             truncated: false,
         }
+    }
+
+    #[test]
+    fn a_tool_from_a_config_file_names_that_file_in_the_reason() {
+        let mut project = project(
+            json!({ "project": { "name": "demo" } }),
+            &[("pytest", ToolRole::TestRunner)],
+        );
+        project.tooling[0].source = Some(PathBuf::from("pytest.ini"));
+
+        let checks = checks_of(&project);
+        match work_for(&checks, CommandRole::Test).proposal().reason() {
+            CheckReason::DeclaredCommand {
+                declared_in,
+                command,
+            } => {
+                assert_eq!(declared_in, "pytest.ini");
+                assert_eq!(command, "python -m pytest");
+            }
+            other => panic!("a declared test check carries {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_only_project_has_a_component_and_is_not_silent() {
+        let mut project = project(
+            json!({ "project": { "name": "demo" } }),
+            &[("pytest", ToolRole::TestRunner)],
+        );
+        project.manifest = ManifestState::Absent;
+        project.tooling[0].source = Some(PathBuf::from("pytest.ini"));
+
+        assert_eq!(component(&project).as_deref(), Some("pytest.ini"));
     }
 
     #[test]
