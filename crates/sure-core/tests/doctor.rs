@@ -87,8 +87,9 @@ fn the_diagnostic_never_reaches_for_the_settings_module() {
     //
     // A source scan rather than a run, because what is being ruled out is an
     // absence. Prose about settings is fine and appears in the report itself —
-    // `sure config show` is named as a command that refuses — which is why
-    // the tokens are module paths and constructors rather than the word.
+    // `sure config show` is named as the command that reports them, with
+    // provider values hidden — which is why the tokens are module paths and
+    // constructors rather than the word.
     const REACHES: &[&str] = &[
         "crate::config",
         "config::Config",

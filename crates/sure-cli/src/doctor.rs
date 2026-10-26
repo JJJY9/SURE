@@ -187,31 +187,10 @@ pub fn human(report: &DoctorReport, out: &mut impl Write) -> io::Result<()> {
 /// The last line of the report: where a reader goes next, and what this build
 /// actually answers there.
 ///
-/// # What it said, and why that was this task
-///
-/// It read *"Settings are read by `sure config show`. Anything SURE has recorded
-/// is deleted with `sure history delete`."* The second half is true and the first
-/// was not: `sure config show` is not a reader in this build. `P16-T012` measured
-/// it by running the built binary, and it exits **3** and prints *"sure config is
-/// not implemented in this build."* — as do `sure config paths` and `sure config
-/// validate`. A user who followed that line was sent to a command this build
-/// refuses, so the honest answer arrived *after* a false instruction rather than
-/// instead of one.
-///
-/// **That is the defect class and not a nitpick**, because `crate::commands`
-/// keeps `config` out of its `IMPLEMENTED` list for this exact reason — so that
-/// `sure mcp` never tells an agent that `sure config show` answers, which would
-/// be SURE's own false green told to the caller least able to check it — and the
-/// human-facing report said the opposite of the machine-facing one.
-///
-/// # The asymmetry the repair has to respect
-///
-/// `sure config set` **does** work: it writes one setting into the file only the
-/// user can write, and this build answers it. So the repair is not to strike
-/// config out of the report, which would leave a reader who has just been told
-/// where their settings file is with nothing to do about it. It is to stop
-/// describing a reader that does not read, and to name the one `config`
-/// invocation that answers.
+/// It names `sure config set`, which writes one setting into the file only the
+/// user can write; `sure config show`, which reports the settings in effect and
+/// shows an analysis provider's endpoint, model and command only as set or not
+/// set; and `sure history delete`.
 ///
 /// # The statuses, which are measurements rather than composition
 ///
@@ -223,7 +202,7 @@ pub fn human(report: &DoctorReport, out: &mut impl Write) -> io::Result<()> {
 ///
 /// ```text
 /// sure config set privacy.full_recording true   exit 0   "sure config set wrote your settings file."
-/// sure config show                              exit 3   "sure config is not implemented in this build."
+/// sure config show                              exit 0   "SURE settings in effect"
 /// sure history delete --all                     exit 0   "Nothing was deleted."
 /// ```
 ///
@@ -242,9 +221,9 @@ pub fn human(report: &DoctorReport, out: &mut impl Write) -> io::Result<()> {
 /// line uses for it, and the machine-facing list in `crate::commands` that the
 /// same claim is written in. A command that started or stopped answering fails
 /// that test rather than quietly making this line false.
-const CLOSING_LINE: &str = "Settings are written with `sure config set`; `sure config show` \
-                            refuses in this build rather than answering. Anything SURE has \
-                            recorded is deleted with `sure history delete`.";
+const CLOSING_LINE: &str = "Settings are written with `sure config set` and read with \
+                            `sure config show`. Anything SURE has recorded is deleted with \
+                            `sure history delete`.";
 
 /// The four locations, with the heading that says what they are.
 fn places_in_words(places: &Places, out: &mut impl Write) -> io::Result<()> {
@@ -1220,7 +1199,7 @@ mod tests {
     ///
     /// ```text
     /// sure config set privacy.full_recording true   exit 0   "sure config set wrote your settings file."
-    /// sure config show                              exit 3   "sure config is not implemented in this build."
+    /// sure config show                              exit 0   "SURE settings in effect"
     /// sure history delete --all                     exit 0   "Nothing was deleted."
     /// ```
     ///
@@ -1231,11 +1210,7 @@ mod tests {
     /// re-measuring; relaxing an assertion here would be the drift itself.
     const NAMED_BY_THE_CLOSING_LINE: &[(&str, Said, u8)] = &[
         ("sure config set", Said::Works, crate::report::exit::OK),
-        (
-            "sure config show",
-            Said::Refuses,
-            crate::report::exit::UNAVAILABLE,
-        ),
+        ("sure config show", Said::Works, crate::report::exit::OK),
         ("sure history delete", Said::Works, crate::report::exit::OK),
     ];
 
@@ -1282,7 +1257,7 @@ mod tests {
                 }),
             },
             "sure config show" => Command::Config {
-                action: Some(ConfigAction::Show),
+                action: Some(ConfigAction::Show { path: None }),
             },
             "sure history delete" => Command::History {
                 action: Some(HistoryAction::Delete {
