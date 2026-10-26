@@ -585,10 +585,15 @@ pub fn human(report: &HistoryReport, out: &mut impl Write) -> io::Result<()> {
             )
         }
         HistoryOutcome::NoSessions => {
-            writeln!(out, "SURE has recorded no sessions on this machine.")?;
             writeln!(
                 out,
-                "`sure check` does not record a session; `sure repair` and `sure recheck` do."
+                "SURE has recorded no harness sessions on this machine."
+            )?;
+            writeln!(
+                out,
+                "`sure check` records nothing; `sure repair` and `sure recheck` record their \
+                 results in the store. A session is recorded only when SURE is started by a \
+                 harness integration."
             )?;
             writeln!(out)?;
             row(out, "store", &clean(&report.store))?;

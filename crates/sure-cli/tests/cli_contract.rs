@@ -1063,6 +1063,51 @@ fn a_history_with_nothing_in_it_says_so_rather_than_printing_an_empty_table() {
 }
 
 #[test]
+fn a_store_with_runs_but_no_harness_sessions_does_not_claim_repair_records_one() {
+    // `repair` and `recheck` write their results to the store, but a session is
+    // the harness integration's conversation, not a CLI run. A new user who
+    // repairs a project and then asks for the history will hit this branch, and
+    // the answer must not tell them a session should be there.
+    let store = a_store_of_our_own();
+    let project = a_project_of_our_own();
+    let repair = run_in_a_store(
+        &store,
+        &[
+            "repair",
+            project.to_str().expect("this test's paths are utf-8"),
+        ],
+    );
+    assert!(
+        store_file(&store).exists(),
+        "`sure repair` did not create the store this test needs (status {}, stdout: {}, \
+         stderr: {})",
+        repair.status,
+        repair.stdout,
+        repair.stderr
+    );
+
+    let human = run_in_a_store(&store, &["history"]);
+    assert_eq!(human.status, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("no harness sessions"),
+        "the empty history does not say it holds no harness sessions:\n{}",
+        human.stdout
+    );
+    assert!(
+        human.stdout.contains("record their results in the store"),
+        "the empty history does not distinguish a run from a session:\n{}",
+        human.stdout
+    );
+    assert!(
+        !human
+            .stdout
+            .contains("`sure repair` and `sure recheck` do."),
+        "the empty history still claims repair and recheck record a session:\n{}",
+        human.stdout
+    );
+}
+
+#[test]
 fn a_recorded_session_is_visible_with_its_project_its_harness_and_how_long_it_is_kept() {
     // The inspect half of the acceptance criterion, at the process. Before this
     // task there was no way for a user to see that anything had been recorded at
