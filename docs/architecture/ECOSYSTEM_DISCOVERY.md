@@ -554,6 +554,25 @@ network request. A project whose `go.mod` SURE could not read gets three missing
 commands rather than an empty plan, so a report never mistakes an unread
 manifest for a project with nothing to run.
 
+## .NET
+
+SURE looks for a solution (`*.sln`, `*.slnx`) or a project file (`*.csproj`,
+`*.fsproj`, `*.vbproj`) at the project root, reads the chosen file as text to
+prove it is readable, and does not parse it: no project graph is expanded, no
+package reference is resolved, and no MSBuild target is evaluated during
+discovery. `global.json` and `.editorconfig` are recorded by existence only.
+
+The checks are `dotnet test`, `dotnet build`, and — only when `.editorconfig`
+is present — `dotnet format --verify-no-changes --no-restore`. A root with
+several project files and no solution is reported at `InspectOnly` with missing
+commands rather than a guess about which project was meant; a manifest SURE
+could not read is reported the same way.
+
+`dotnet` writes `bin/` and `obj/` inside the project by default. SURE points
+`BaseIntermediateOutputPath`, `MSBuildProjectExtensionsPath` and `OutputPath` at
+`.sure/dotnet/<role>/`, its ignored cache directory, so checking the project
+does not modify it and the fingerprint does not move when the build runs.
+
 ## Support levels
 
 `grade` returns the level and the sentence together, as constants, so a level and

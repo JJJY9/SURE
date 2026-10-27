@@ -53,6 +53,7 @@
 //! [`Unread`] in the result rather than a log line — the two are separate types
 //! for the same reason [`crate::diagnostics`] gives.
 
+pub mod dotnet;
 pub mod go;
 pub mod node;
 mod pattern;
@@ -74,6 +75,7 @@ pub use read::UnreadReason;
 // The case-folding rule a path is looked up by, for the checks that compare a
 // path they know against the paths a walk found. Exposed rather than duplicated
 // so that the rule is written once — see `read::lookup_key`'s own note.
+pub use dotnet::DotnetProject;
 pub use go::GoProject;
 pub(crate) use read::lookup_key;
 pub use rust::RustProject;
@@ -95,11 +97,14 @@ pub enum Ecosystem {
     Rust,
     /// Go: `go.mod` and `go.sum`.
     Go,
+    /// .NET: a solution or project file at the root.
+    Dotnet,
 }
 
 impl Ecosystem {
     /// Every ecosystem this build looks for, in a fixed order.
-    pub const ALL: &'static [Self] = &[Self::Node, Self::Python, Self::Rust, Self::Go];
+    pub const ALL: &'static [Self] =
+        &[Self::Node, Self::Python, Self::Rust, Self::Go, Self::Dotnet];
 
     /// The stable name, used in output and in the reason a level was assigned.
     #[must_use]
@@ -109,6 +114,7 @@ impl Ecosystem {
             Self::Python => "python",
             Self::Rust => "rust",
             Self::Go => "go",
+            Self::Dotnet => "dotnet",
         }
     }
 
@@ -120,6 +126,7 @@ impl Ecosystem {
             Self::Python => "Python",
             Self::Rust => "Rust",
             Self::Go => "Go",
+            Self::Dotnet => ".NET",
         }
     }
 }
@@ -140,6 +147,8 @@ pub enum Findings {
     Rust(Box<RustProject>),
     /// What a Go project declares.
     Go(Box<GoProject>),
+    /// What a .NET project declares.
+    Dotnet(Box<DotnetProject>),
 }
 
 /// What SURE concluded about one ecosystem, and why.
@@ -510,6 +519,9 @@ pub fn discover(root: &Path, options: &DiscoverOptions) -> Result<Discovery, Sca
     if let Some(report) = go::look(root, &scan, options, &mut budget, &mut unread) {
         ecosystems.push(report);
     }
+    if let Some(report) = dotnet::look(root, &scan, options, &mut budget, &mut unread) {
+        ecosystems.push(report);
+    }
 
     Ok(Discovery {
         root: root.to_path_buf(),
@@ -532,11 +544,12 @@ mod tests {
         }
         // The list is the answer to "did SURE look?", so a list that omitted
         // one would make an untouched ecosystem look like an absent one.
-        assert_eq!(Ecosystem::ALL.len(), 4);
+        assert_eq!(Ecosystem::ALL.len(), 5);
         assert!(Ecosystem::ALL.contains(&Ecosystem::Node));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Python));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Rust));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Go));
+        assert!(Ecosystem::ALL.contains(&Ecosystem::Dotnet));
         // Distinct, so that `report(ecosystem)` can find at most one and two
         // ecosystems cannot answer to one name.
         let names: std::collections::BTreeSet<&str> =

@@ -54,8 +54,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::discover::{
-    Discovery, Ecosystem, Findings, GoProject, MemberManifest, PythonProject, Source, UnreadReason,
-    node, python, rust,
+    Discovery, DotnetProject, Ecosystem, Findings, GoProject, MemberManifest, PythonProject,
+    Source, UnreadReason, node, python, rust,
 };
 
 /// Every component in a project, and which contains which.
@@ -237,6 +237,7 @@ impl Component {
                     Findings::Python(project) => python_root_reading(project),
                     Findings::Rust(project) => rust_root_reading(&project.manifest),
                     Findings::Go(project) => go_root_reading(project),
+                    Findings::Dotnet(project) => dotnet_root_reading(project),
                 },
             })
             .collect();
@@ -502,6 +503,11 @@ impl EcosystemResolution {
                           does not read that file, so a Go project is reported as one \
                           component whether or not it is several.",
             },
+            Some(Findings::Dotnet(_)) => Members::NotRead {
+                because: "A .NET solution names its projects, and SURE reads the solution \
+                          marker but does not expand the project graph, so a .NET project \
+                          is reported as one component whether or not it is several.",
+            },
         };
         Self { ecosystem, members }
     }
@@ -610,6 +616,7 @@ fn add_members(components: &mut Vec<Component>, ecosystem: Ecosystem, findings: 
         // Python member is — which is the reason [`Findings`] is an enum.
         Findings::Python(_) => {}
         Findings::Go(_) => {}
+        Findings::Dotnet(_) => {}
     }
 }
 
@@ -691,6 +698,16 @@ fn rust_root_reading(state: &rust::ManifestState) -> ManifestReading {
 /// recorded failure outranks a missing file, because "there is a `pyproject.toml`
 /// SURE could not read" is the answer a reader needs and "no manifest" would be
 /// wrong.
+fn dotnet_root_reading(project: &DotnetProject) -> ManifestReading {
+    if project.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &project.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
 fn go_root_reading(project: &GoProject) -> ManifestReading {
     if project.manifest.is_some() {
         ManifestReading::Read
