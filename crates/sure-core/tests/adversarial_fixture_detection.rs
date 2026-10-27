@@ -2214,6 +2214,7 @@ fn pipelined_with(
         store: None,
         goal,
         analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run()

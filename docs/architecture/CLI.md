@@ -63,11 +63,12 @@ store directory cannot.
 | `sure protocol [--speaks VERSION]` | say which harness protocol this build speaks, or whether it can talk to a caller that speaks one | works |
 | `sure version` | print the version of this build | works |
 
-Three options are global — accepted before or after the command name, because they
+Four options are global — accepted before or after the command name, because they
 describe the run rather than the command: `--format human|json`, which the last
 section of this document is about, `--store-dir DIR`, which says where the run's
-record store goes, and `--settings-file FILE`, which says which user-level
-settings file the run reads. A command line may name a store location or a
+record store goes, `--settings-file FILE`, which says which user-level settings
+file the run reads, and `--commands-file FILE`, which supplies user-declared
+check commands for a project SURE cannot discover. A command line may name a store location or a
 settings file whether or not the command in it writes to the store: a location
 that is wrong is a wrong command line, and finding that out only when a command
 happens to write would make the same mistake a usage error in one invocation and
@@ -564,6 +565,36 @@ in force.
 
 Either way nothing was silently given up: the difference between the two is that
 one of them has somebody waiting and the other does not.
+
+## `--commands-file FILE`
+
+The check commands a user declares for a project SURE cannot discover — a
+Makefile, a shell script, a build system with no manifest SURE knows. The file is
+YAML, names a program and its arguments per role, and is read by `sure check`,
+`sure recheck` and `sure repair`:
+
+```yaml
+commands:
+  test: ["make", "test"]
+  build: ["make", "build"]
+  lint: ["make", "lint"]
+  typecheck: ["make", "typecheck"]
+```
+
+The first element is the program and the rest are arguments, one element per
+argument. **SURE never splits a shell string**, so a command line with pipes,
+redirections or variable expansion is not accepted; write the argv the program
+would receive. Unknown roles, an empty vector and an empty program are refused
+before any check is planned.
+
+**The file replaces the native plan, and it is outside the project.** The file is
+a path from this process's argument vector, refused when it is inside the project
+being checked, for the same reason `--settings-file` is: the project is the thing
+being judged, and a file it can edit is a plan it wrote for its own verdict. A
+role the file omits is recorded as not declared rather than silently dropped, so
+a test-only override is not a green verdict. Commands are planned under the same
+execution mode and permissions as every other check; a run that has not been
+granted `run_project_code` does not run them.
 
 ## `sure config set SETTING VALUE`
 

@@ -105,6 +105,7 @@
 //! states the same rule for the same reason.
 
 use std::path::Path;
+use std::time::Duration;
 
 use sure_domain::evidence::{
     ClaimAssessment, Evidence, EvidenceAnchor, EvidenceClass, StalenessReason,
@@ -123,7 +124,7 @@ use crate::aggregation::{RunReport, aggregate_run};
 use crate::analysis_provider;
 use crate::candidate_scanner::CandidateScanner;
 use crate::capability_report;
-use crate::checks::{self, check_id};
+use crate::checks::{self, MissingCommand, MissingKind, check_id};
 use crate::claim_checker::{self, CheckedClaim};
 use crate::components::ComponentGraph;
 use crate::config::AnalysisConfig;
@@ -135,6 +136,7 @@ use crate::coverage_summary::{CoverageNotCheckedSummary, summarize};
 use crate::demo_data_heuristics::DemoDataHeuristics;
 use crate::discover::{self, DiscoverOptions, Discovery, Ecosystem, Findings};
 use crate::enforce::Enforcement;
+use crate::external_commands::{ExternalCommand, ExternalRole};
 use crate::false_completion_aggregator;
 use crate::findings_from_checks::findings_from_checks;
 use crate::fingerprint::{self, project_fingerprint};
@@ -142,14 +144,17 @@ use crate::intent_implementation::compare_intent_to_project;
 use crate::intent_model;
 use crate::noop_heuristics::NoOpHeuristics;
 use crate::planned_check_runner::{CheckRunner, run_scheduled_checks};
-use crate::planned_work::{CheckOperation, PlannedWork, PrecomputedEvidence};
+use crate::planned_work::{CheckOperation, CommandSpec, PlannedWork, PrecomputedEvidence};
+use crate::process::{Environment, Limits};
 use crate::project_intent;
 use crate::project_verdict::build_verdict;
 use crate::recheck_lifecycle::{self, LifecycleInputs, LifecycleUpdate};
 use crate::repair_impact::{seed_rechecks, select_impacted_checks};
 use crate::route_consistency::RouteConsistency;
 use crate::runtime_probes::{PlanRefused, ProbePlan};
-use crate::schedule::{CheckProposal, CheckSchedule, PlanBuilder, ProposalRefused, ScheduledCheck};
+use crate::schedule::{
+    CheckProposal, CheckReason, CheckSchedule, PlanBuilder, ProposalRefused, ScheduledCheck,
+};
 use crate::service_plan::ServicePlan;
 use crate::store::Store;
 use crate::support;
@@ -671,6 +676,12 @@ pub struct Pipeline<'a> {
     /// arbitration had not put in force. When the project names no provider,
     /// the user's own file decides (`Authority::analysis`).
     pub analysis: AnalysisConfig,
+    /// User-declared commands for a project with no stack SURE can discover.
+    ///
+    /// Empty is the ordinary case. Non-empty means the user named a commands
+    /// file on the command line, and those commands replace the native plan
+    /// rather than being added beside it.
+    pub external_commands: &'a [ExternalCommand],
 }
 
 /// A stage that stopped the run.
@@ -815,6 +826,7 @@ impl Pipeline<'_> {
             &graph,
             &intent,
             &self.config.checks,
+            self.external_commands,
             &mut builder,
         );
         let refused: Vec<ProposalRefused> = builder.refused().to_vec();
@@ -1820,35 +1832,41 @@ fn propose_everything(
     graph: &ComponentGraph,
     intent: &ProjectIntent,
     preferences: &crate::config::ChecksConfig,
+    external_commands: &[ExternalCommand],
     builder: &mut PlanBuilder,
 ) -> Planned {
     let mut planned = Planned::default();
 
-    if let Some(node) = node_of(discovery) {
-        let checks = checks::node::NodeChecks::of(&node, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
+    if external_commands.is_empty() {
+        if let Some(node) = node_of(discovery) {
+            let checks = checks::node::NodeChecks::of(&node, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
 
-        // The runtime probes need the Node project, because a probe is a command
-        // the manifest declares. A project that is not Node-shaped plans none,
-        // which is a statement about the project rather than a failure.
-        match ProbePlan::of(graph, &node, preferences) {
-            Ok(probes) => {
-                planned.not_planned = probes.not_planned().len();
-                probes.add_to(builder);
+            // The runtime probes need the Node project, because a probe is a
+            // command the manifest declares. A project that is not Node-shaped
+            // plans none, which is a statement about the project rather than a
+            // failure.
+            match ProbePlan::of(graph, &node, preferences) {
+                Ok(probes) => {
+                    planned.not_planned = probes.not_planned().len();
+                    probes.add_to(builder);
+                }
+                Err(refusal) => planned.probe_refusal = Some(refusal),
             }
-            Err(refusal) => planned.probe_refusal = Some(refusal),
         }
-    }
-    if let Some(python) = python_of(discovery) {
-        let checks = checks::python::PythonChecks::of(&python, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
-    }
-    if let Some(rust) = rust_of(discovery) {
-        let checks = checks::rust::RustChecks::of(&rust, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
+        if let Some(python) = python_of(discovery) {
+            let checks = checks::python::PythonChecks::of(&python, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
+        }
+        if let Some(rust) = rust_of(discovery) {
+            let checks = checks::rust::RustChecks::of(&rust, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
+        }
+    } else {
+        plan_external_commands(external_commands, &discovery.root, builder, &mut planned);
     }
 
     // The project's own declared services, planned **outside** the three blocks
@@ -1887,6 +1905,68 @@ fn propose_everything(
     }
 
     planned
+}
+
+/// Plan the user's commands for a project SURE cannot discover.
+///
+/// **The commands replace the native plan rather than joining it.** A user who
+/// wrote a commands file has said how this project is checked; running a second
+/// set of discovered commands beside it would make the report about a plan the
+/// user did not write. Roles the file does not name are recorded as
+/// `NotDeclared` — the project-level scope limit that keeps a test-only override
+/// from turning into a green verdict by omission.
+fn plan_external_commands(
+    commands: &[ExternalCommand],
+    root: &Path,
+    builder: &mut PlanBuilder,
+    planned: &mut Planned,
+) {
+    let supplied: Vec<ExternalRole> = commands.iter().map(|command| command.role).collect();
+    for role in ExternalRole::ALL {
+        if supplied.contains(role) {
+            continue;
+        }
+        planned.missing.push(MissingCommand::new(
+            check_id(
+                "your SURE commands file",
+                &format!("external{}", role.as_str()),
+            ),
+            role.title(),
+            "your SURE commands file",
+            role.severity(),
+            role.critical(),
+            MissingKind::NotDeclared,
+        ));
+    }
+    for command in commands {
+        let Some((program, arguments)) = command.argv.split_first() else {
+            continue;
+        };
+        let reason = CheckReason::DeclaredCommand {
+            declared_in: "your SURE commands file".to_owned(),
+            command: command.command_line(),
+        };
+        let proposal = CheckProposal::new(
+            check_id(
+                "your SURE commands file",
+                &format!("external{}", command.role.as_str()),
+            ),
+            command.role.title(),
+            command.role.severity(),
+            command.role.critical(),
+            EvidenceClass::DeterministicCheck,
+            reason,
+            &[command.role.action()],
+        );
+        let spec = CommandSpec::new(
+            program.clone(),
+            root,
+            Environment::inherited(),
+            Limits::new(Duration::from_secs(600), 64 * 1024, 64 * 1024),
+        )
+        .with_arguments(arguments.iter().cloned());
+        drop(builder.propose(PlannedWork::new(proposal, CheckOperation::Command(spec))));
+    }
 }
 
 /// The work beside one stage-7 candidate: the reading that produced it.
@@ -2644,6 +2724,7 @@ mod tests {
                 store: Some(store),
                 goal: None,
                 analysis: Default::default(),
+                external_commands: &[],
                 runner: &runner,
             }
             .run()
@@ -2875,6 +2956,7 @@ mod tests {
                 store: Some(store),
                 goal: None,
                 analysis: Default::default(),
+                external_commands: &[],
                 runner: &runner,
             }
             .run()
@@ -2995,6 +3077,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner,
         }
     }
@@ -3284,6 +3367,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -3342,6 +3426,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -3417,6 +3502,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -3766,6 +3852,7 @@ mod tests {
                 store: None,
                 goal: None,
                 analysis: Default::default(),
+                external_commands: &[],
                 runner: &runner,
             }
             .run();
@@ -4022,6 +4109,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();

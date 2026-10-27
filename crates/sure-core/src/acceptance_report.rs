@@ -1433,6 +1433,7 @@ fn intent(fixtures_root: &Path, id: &str) -> Result<Measurement, CorpusError> {
         store: None,
         goal: None,
         analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();
@@ -1683,6 +1684,7 @@ fn execution_refusal(
         store: None,
         goal: None,
         analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();

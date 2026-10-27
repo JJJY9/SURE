@@ -35,6 +35,7 @@ pub mod doctor;
 pub mod documents;
 pub mod enforce;
 pub mod env_completeness;
+pub mod external_commands;
 pub mod external_service;
 pub mod false_completion_aggregator;
 pub mod finding_gravity;

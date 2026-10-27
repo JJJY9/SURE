@@ -353,6 +353,7 @@ mod tests {
             Named {
                 store: None,
                 settings_file: Some(&settings),
+                commands_file: None,
             },
         )
         .unwrap();
@@ -397,6 +398,7 @@ mod tests {
             Named {
                 store: None,
                 settings_file: Some(&settings),
+                commands_file: None,
             },
         )
         .unwrap();
@@ -424,6 +426,7 @@ mod tests {
             Named {
                 store: None,
                 settings_file: Some(&settings),
+                commands_file: None,
             },
         )
         .unwrap_err();

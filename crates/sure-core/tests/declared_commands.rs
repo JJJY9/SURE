@@ -234,6 +234,7 @@ fn check(root: &Path) -> RunOutcome {
         store: None,
         goal: None,
         analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run()

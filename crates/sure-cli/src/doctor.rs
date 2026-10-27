@@ -1339,6 +1339,7 @@ mod tests {
             let report = command.report(crate::commands::Named {
                 store: Some(&store),
                 settings_file: Some(&settings),
+                commands_file: None,
             });
             assert_eq!(
                 report.exit_code(),

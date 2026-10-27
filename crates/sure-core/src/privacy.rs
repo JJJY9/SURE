@@ -531,6 +531,7 @@ mod tests {
             store: None,
             goal: None,
             analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run()

@@ -144,6 +144,7 @@ fn the_run(fixture: &Fixture) -> (Config, PipelineOutcome) {
         store: None,
         goal: None,
         analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();
