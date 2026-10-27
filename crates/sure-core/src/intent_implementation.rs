@@ -279,6 +279,11 @@ fn command_anchors(discovery: &Discovery) -> Vec<IntentMatchAnchor> {
                 // completeness scanners still run over the files.
                 let _ = project;
             }
+            Findings::Dotnet(project) => {
+                // The solution/project graph is not a source tree SURE reads for
+                // implementation markers; the completeness scanners still run.
+                let _ = project;
+            }
         }
     }
     anchors

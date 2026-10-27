@@ -895,6 +895,25 @@ const GIT_VERBS: &[Verb] = &[
 /// install/network. The distinction matters because SURE plans the first three
 /// under `host_confirmed` without demanding a network grant, the same way it
 /// plans a Python test runner.
+/// .NET's own commands.
+///
+/// `test`, `build`, `run`, `format` and the MSBuild entry points run the
+/// project's code; `restore`/`add`/`new`/`tool`/`workload` install or fetch;
+/// the version/info queries are static.
+const DOTNET_VERBS: &[Verb] = &[
+    verb(
+        &[
+            "test", "build", "run", "format", "publish", "pack", "msbuild", "vstest",
+        ],
+        RUNS_CODE,
+    ),
+    verb(
+        &["restore", "add", "new", "tool", "nuget", "workload"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(&["help"], STATIC_ONLY),
+];
+
 const GO_VERBS: &[Verb] = &[
     verb(
         &[
@@ -1034,6 +1053,27 @@ const ENTRY_TABLE: &[Entry] = &[
         module_flag: None,
         text_flags: &[],
         value_flags: &["-C", "-mod", "-tags", "-o", "-ldflags", "-gcflags"],
+    },
+    Entry {
+        names: &["dotnet"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: DOTNET_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &[
+            "--configuration",
+            "-c",
+            "--framework",
+            "-f",
+            "--output",
+            "-o",
+            "--runtime",
+            "-r",
+            "--verbosity",
+            "-v",
+        ],
     },
     Entry {
         names: &["npm", "yarn", "pnpm"],

@@ -16,7 +16,9 @@ Initial target families:
 SURE can discover common manifests/commands and run approved generic checks, but does not claim framework-specific completeness.
 
 The build currently ships generic Go discovery (`go.mod`, `go test ./...`,
-`go build ./...`, `go vet ./...`) beside the Node/Python/Rust paths.
+`go build ./...`, `go vet ./...`) and generic .NET discovery (`*.sln`/`*.csproj`,
+`dotnet test`, `dotnet build`, plus `dotnet format --verify-no-changes` when the
+project declares `.editorconfig`) beside the Node/Python/Rust paths.
 
 ## Level C — inspect-only
 

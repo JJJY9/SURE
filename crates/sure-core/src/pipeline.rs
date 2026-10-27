@@ -1881,6 +1881,11 @@ fn propose_everything(
             planned.missing.extend(checks.missing().iter().cloned());
             checks.add_to(&go, &discovery.root, builder);
         }
+        if let Some(dotnet) = dotnet_of(discovery) {
+            let checks = checks::dotnet::DotnetChecks::of(&dotnet);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&dotnet, &discovery.root, builder);
+        }
     } else {
         plan_external_commands(external_commands, &discovery.root, builder, &mut planned);
     }
@@ -2168,6 +2173,13 @@ fn rust_of(discovery: &Discovery) -> Option<crate::discover::RustProject> {
 fn go_of(discovery: &Discovery) -> Option<crate::discover::GoProject> {
     match &discovery.report(Ecosystem::Go)?.findings {
         Findings::Go(go) => Some((**go).clone()),
+        _ => None,
+    }
+}
+
+fn dotnet_of(discovery: &Discovery) -> Option<crate::discover::DotnetProject> {
+    match &discovery.report(Ecosystem::Dotnet)?.findings {
+        Findings::Dotnet(project) => Some((**project).clone()),
         _ => None,
     }
 }
