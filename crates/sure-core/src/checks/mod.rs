@@ -124,6 +124,7 @@
 //! above are untouched by that: they hold a program and an argument vector and
 //! plan a command.
 
+pub mod go;
 pub mod node;
 pub mod python;
 pub mod rust;

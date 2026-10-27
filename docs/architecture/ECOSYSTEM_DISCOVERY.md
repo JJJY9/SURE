@@ -541,6 +541,19 @@ same reason.
 `clippy` and `rust`; a third table would be a tool SURE does not know, and
 naming it would be repeating a project's text in SURE's own vocabulary.
 
+## Go
+
+SURE reads `go.mod` for the `module`, `go` and `toolchain` directives, and reads
+`go.sum` for its existence. It does not run `go list`, resolve a module graph, or
+read `go.work`; a multi-module workspace is therefore reported as one component
+rather than several. The three checks are `go test ./...`, `go build ./...` and
+`go vet ./...`, planned like every other check and gated by the execution mode.
+
+`go test`/`build`/`vet` are classified as project code, not as an install or a
+network request. A project whose `go.mod` SURE could not read gets three missing
+commands rather than an empty plan, so a report never mistakes an unread
+manifest for a project with nothing to run.
+
 ## Support levels
 
 `grade` returns the level and the sentence together, as constants, so a level and

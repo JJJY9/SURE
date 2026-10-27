@@ -15,6 +15,9 @@ Initial target families:
 
 SURE can discover common manifests/commands and run approved generic checks, but does not claim framework-specific completeness.
 
+The build currently ships generic Go discovery (`go.mod`, `go test ./...`,
+`go build ./...`, `go vet ./...`) beside the Node/Python/Rust paths.
+
 ## Level C — inspect-only
 
 SURE can inspect files/config and report obvious issues but lacks safe/reliable run semantics.

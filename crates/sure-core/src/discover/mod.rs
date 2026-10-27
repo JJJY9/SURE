@@ -53,6 +53,7 @@
 //! [`Unread`] in the result rather than a log line — the two are separate types
 //! for the same reason [`crate::diagnostics`] gives.
 
+pub mod go;
 pub mod node;
 mod pattern;
 pub mod python;
@@ -73,6 +74,7 @@ pub use read::UnreadReason;
 // The case-folding rule a path is looked up by, for the checks that compare a
 // path they know against the paths a walk found. Exposed rather than duplicated
 // so that the rule is written once — see `read::lookup_key`'s own note.
+pub use go::GoProject;
 pub(crate) use read::lookup_key;
 pub use rust::RustProject;
 
@@ -91,11 +93,13 @@ pub enum Ecosystem {
     Python,
     /// Rust: `Cargo.toml`, `Cargo.lock`, and the toolchain pin beside them.
     Rust,
+    /// Go: `go.mod` and `go.sum`.
+    Go,
 }
 
 impl Ecosystem {
     /// Every ecosystem this build looks for, in a fixed order.
-    pub const ALL: &'static [Self] = &[Self::Node, Self::Python, Self::Rust];
+    pub const ALL: &'static [Self] = &[Self::Node, Self::Python, Self::Rust, Self::Go];
 
     /// The stable name, used in output and in the reason a level was assigned.
     #[must_use]
@@ -104,6 +108,7 @@ impl Ecosystem {
             Self::Node => "node",
             Self::Python => "python",
             Self::Rust => "rust",
+            Self::Go => "go",
         }
     }
 
@@ -114,6 +119,7 @@ impl Ecosystem {
             Self::Node => "JavaScript or TypeScript",
             Self::Python => "Python",
             Self::Rust => "Rust",
+            Self::Go => "Go",
         }
     }
 }
@@ -132,6 +138,8 @@ pub enum Findings {
     Python(Box<PythonProject>),
     /// What a Rust project declares.
     Rust(Box<RustProject>),
+    /// What a Go project declares.
+    Go(Box<GoProject>),
 }
 
 /// What SURE concluded about one ecosystem, and why.
@@ -499,6 +507,9 @@ pub fn discover(root: &Path, options: &DiscoverOptions) -> Result<Discovery, Sca
     if let Some(report) = rust::look(root, &scan, options, &mut budget, &mut unread) {
         ecosystems.push(report);
     }
+    if let Some(report) = go::look(root, &scan, options, &mut budget, &mut unread) {
+        ecosystems.push(report);
+    }
 
     Ok(Discovery {
         root: root.to_path_buf(),
@@ -521,10 +532,11 @@ mod tests {
         }
         // The list is the answer to "did SURE look?", so a list that omitted
         // one would make an untouched ecosystem look like an absent one.
-        assert_eq!(Ecosystem::ALL.len(), 3);
+        assert_eq!(Ecosystem::ALL.len(), 4);
         assert!(Ecosystem::ALL.contains(&Ecosystem::Node));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Python));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Rust));
+        assert!(Ecosystem::ALL.contains(&Ecosystem::Go));
         // Distinct, so that `report(ecosystem)` can find at most one and two
         // ecosystems cannot answer to one name.
         let names: std::collections::BTreeSet<&str> =
