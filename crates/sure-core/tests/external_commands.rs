@@ -12,6 +12,7 @@ use sure_core::planned_check_runner::ProcessRunner;
 use sure_core::process::Cancellation;
 use sure_domain::execution::{ExecutionMode, ExecutionPermissions, Permission};
 use sure_domain::status::CheckStatus;
+use sure_domain::vocabulary::SupportLevel;
 
 fn host_confirmed() -> ExecutionPermissions {
     let mut permissions = ExecutionPermissions::inspect_only();
@@ -51,6 +52,7 @@ fn a_project_with_no_discovered_stack_runs_the_users_commands() {
     .run();
 
     let run = outcome.run.expect("the declared commands ran");
+    assert_eq!(run.support.level, SupportLevel::Generic);
     let results = run.report.results();
     assert_eq!(results.len(), 4, "{results:?}");
     assert!(
