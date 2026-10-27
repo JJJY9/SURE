@@ -1886,6 +1886,11 @@ fn propose_everything(
             planned.missing.extend(checks.missing().iter().cloned());
             checks.add_to(&dotnet, &discovery.root, builder);
         }
+        if let Some(java) = java_of(discovery) {
+            let checks = checks::java::JavaChecks::of(&java);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&java, &discovery.root, builder);
+        }
     } else {
         plan_external_commands(external_commands, &discovery.root, builder, &mut planned);
     }
@@ -2180,6 +2185,13 @@ fn go_of(discovery: &Discovery) -> Option<crate::discover::GoProject> {
 fn dotnet_of(discovery: &Discovery) -> Option<crate::discover::DotnetProject> {
     match &discovery.report(Ecosystem::Dotnet)?.findings {
         Findings::Dotnet(project) => Some((**project).clone()),
+        _ => None,
+    }
+}
+
+fn java_of(discovery: &Discovery) -> Option<crate::discover::JavaProject> {
+    match &discovery.report(Ecosystem::Java)?.findings {
+        Findings::Java(project) => Some((**project).clone()),
         _ => None,
     }
 }

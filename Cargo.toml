@@ -47,6 +47,12 @@ clap = { version = "4.6.6", features = ["derive"] }
 # `toml::Value` explicitly and carries anything JSON cannot represent as the
 # text TOML wrote it with.
 toml = "1.1.6"
+# Maven's `pom.xml` is XML, and a hand-rolled tag scanner would mis-read the
+# shapes a real POM uses — namespaces, comments, CDATA, entities — in exactly the
+# way this repository treats as a false green. `roxmltree` is a read-only parser
+# with no unsafe code and no build script, and discovery uses it to read the
+# project element's own children and nothing else.
+roxmltree = "0.20.0"
 # `sure.yaml` is a documented product surface (`PROJECT_NAME.md`,
 # `docs/architecture/ARCHITECTURE.md`), so it is parsed with a real YAML parser
 # rather than a hand-rolled one. `serde_yaml` itself is archived upstream, and

@@ -284,6 +284,11 @@ fn command_anchors(discovery: &Discovery) -> Vec<IntentMatchAnchor> {
                 // implementation markers; the completeness scanners still run.
                 let _ = project;
             }
+            Findings::Java(project) => {
+                // A Maven POM names no source tree SURE reads for implementation
+                // markers; the completeness scanners still run.
+                let _ = project;
+            }
         }
     }
     anchors

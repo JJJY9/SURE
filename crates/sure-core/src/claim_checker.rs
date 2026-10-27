@@ -976,6 +976,8 @@ const DEPENDENCY_MANAGER_PHRASES: &[(&str, &str)] = &[
     ("composer", "composer"),
     ("dotnet", "dotnet"),
     ("gradle", "gradle"),
+    ("maven", "maven"),
+    ("mvn", "mvn"),
 ];
 
 fn match_dependency_changed<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {

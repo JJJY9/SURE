@@ -689,7 +689,8 @@ impl<'a> AdmittedRun<'a> {
         let mut program: OsString = self.spec.program().to_os_string();
         let mut arguments: Vec<OsString> = self.spec.arguments().to_vec();
         if let Some(launchers) = launchers
-            && let Some(launch) = launchers.resolve(&program, &arguments)
+            && let Some(launch) =
+                launchers.resolve(&program, &arguments, self.spec.working_directory())
         {
             program = launch.program.into_os_string();
             arguments = launch.arguments;

@@ -925,6 +925,22 @@ const GO_VERBS: &[Verb] = &[
     verb(&["env", "version", "list", "help"], STATIC_ONLY),
 ];
 
+/// Maven's lifecycles.
+///
+/// `test`, `package`, `verify` and `compile` run the project's own build and
+/// tests — which may include plugins the project bound to those phases — and are
+/// classified as `DynamicHost` the way `go test` and `dotnet build` are.
+/// `install` and `deploy` copy or upload artifacts, and `dependency` resolves
+/// them, so those are install and network. `clean` deletes the build output
+/// directory; nothing SURE plans uses it, and naming it destructive is the
+/// direction this table fails in.
+const MAVEN_VERBS: &[Verb] = &[
+    verb(&["test", "package", "verify", "compile"], RUNS_CODE),
+    verb(&["install", "deploy", "dependency"], INSTALLS_AND_RUNS),
+    verb(&["clean"], DESTROYS),
+    verb(&["version", "help"], STATIC_ONLY),
+];
+
 const CARGO_VERBS: &[Verb] = &[
     verb(
         &[
@@ -1073,6 +1089,31 @@ const ENTRY_TABLE: &[Entry] = &[
             "-r",
             "--verbosity",
             "-v",
+        ],
+    },
+    Entry {
+        names: &["mvn"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: MAVEN_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &[
+            "-f",
+            "--file",
+            "-s",
+            "--settings",
+            "-P",
+            "--activate-profiles",
+            "-pl",
+            "--projects",
+            "-T",
+            "--threads",
+            "-l",
+            "--log-file",
+            "-gs",
+            "--global-settings",
         ],
     },
     Entry {

@@ -122,9 +122,9 @@ fn a_directory_sure_read_nothing_in_is_classified_inspect_only_without_claiming_
     // adds a clause here — see `nothing_was_found`.)
     assert_eq!(
         reason,
-        "SURE looked for JavaScript or TypeScript, Python and Rust here and found nothing it \
-         reads. So the project is at level C (inspect_only). SURE can look at this project's \
-         files, but cannot safely run it."
+        "SURE looked for JavaScript or TypeScript, Python, Rust, Go, .NET and Java here and \
+         found nothing it reads. So the project is at level C (inspect_only). SURE can look at \
+         this project's files, but cannot safely run it."
     );
 }
 
