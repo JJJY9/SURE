@@ -544,10 +544,15 @@ naming it would be repeating a project's text in SURE's own vocabulary.
 ## Go
 
 SURE reads `go.mod` for the `module`, `go` and `toolchain` directives, and reads
-`go.sum` for its existence. It does not run `go list`, resolve a module graph, or
-read `go.work`; a multi-module workspace is therefore reported as one component
-rather than several. The three checks are `go test ./...`, `go build ./...` and
-`go vet ./...`, planned like every other check and gated by the execution mode.
+`go.sum` for its existence. When `go.work` is present it reads its `go`,
+`toolchain` and `use` directives, then reads the `go.mod` of every relative `use`
+directory: a workspace is reported as one component per module, and each readable
+module gets its own `go test ./...`, `go build ./...` and `go vet ./...`, run in
+that module's directory. A `use` directory with no readable `go.mod` gets three
+missing commands. `go.work` `replace` entries are left to the toolchain; absolute `use` paths and
+paths containing `..` are ignored because a component path must stay inside the
+project root; nothing runs `go list` or resolves the module graph. A root with both `go.mod` and
+`go.work` gets the root module's checks plus one set per workspace module.
 
 `go test`/`build`/`vet` are classified as project code, not as an install or a
 network request. A project whose `go.mod` SURE could not read gets three missing

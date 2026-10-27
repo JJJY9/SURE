@@ -498,11 +498,16 @@ impl EcosystemResolution {
                           read the tables that say so, so a Python project is \
                           reported as one component whether or not it is several.",
             },
-            Some(Findings::Go(_)) => Members::NotRead {
-                because: "Go workspaces can name several modules in go.work, and SURE \
-                          does not read that file, so a Go project is reported as one \
-                          component whether or not it is several.",
-            },
+            Some(Findings::Go(project)) => {
+                if project.workspace.is_some() {
+                    Members::Resolved { truncated: false }
+                } else {
+                    Members::NotRead {
+                        because: "SURE could not read this project's go.work, so it \
+                                  cannot tell which modules the workspace names.",
+                    }
+                }
+            }
             Some(Findings::Dotnet(_)) => Members::NotRead {
                 because: "A .NET solution names its projects, and SURE reads the solution \
                           marker but does not expand the project graph, so a .NET project \
@@ -615,7 +620,21 @@ fn add_members(components: &mut Vec<Component>, ecosystem: Ecosystem, findings: 
         // member list later fails to compile here until somebody decides what a
         // Python member is — which is the reason [`Findings`] is an enum.
         Findings::Python(_) => {}
-        Findings::Go(_) => {}
+        Findings::Go(project) => {
+            let declared_by = [Source::new(
+                crate::discover::go::WORKSPACE,
+                "the use directives",
+            )];
+            for module in &project.modules {
+                merge(
+                    components,
+                    ecosystem,
+                    &module.path,
+                    go_member_reading(module),
+                    &declared_by,
+                );
+            }
+        }
         Findings::Dotnet(_) => {}
     }
 }
@@ -659,6 +678,16 @@ fn merge(
 /// `manifest` is what discovery saw at its name without parsing. The four
 /// combinations are four different things and none of them collapses into
 /// another.
+fn go_member_reading(module: &crate::discover::go::GoModule) -> ManifestReading {
+    if module.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &module.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
 fn member_reading(package_read: bool, manifest: MemberManifest) -> ManifestReading {
     if package_read {
         return ManifestReading::Read;
