@@ -256,6 +256,47 @@ impl PlannedCommand {
         let program: OsString = program.into();
         let arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
         let classification = safety::classify(program.clone(), arguments.clone());
+        Self::with_classification(check, program, arguments, classification, mode, permissions)
+    }
+
+    /// A command the user named in a `--commands-file`.
+    ///
+    /// Same constructor and the same decision path, with one difference: the
+    /// classification is [`Classification::declared_by_user`] rather than the
+    /// program table's. The user wrote the argv themselves in a file SURE refuses
+    /// to read from inside the project; the command still needs
+    /// `run_project_code`, so it runs only under a mode and permission that allow
+    /// project code.
+    #[must_use]
+    pub fn new_declared<I, S>(
+        check: PlannedCheck,
+        program: impl Into<OsString>,
+        arguments: I,
+        mode: ExecutionMode,
+        permissions: &ExecutionPermissions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        Self::with_classification(
+            check,
+            program.into(),
+            arguments.into_iter().map(Into::into).collect(),
+            safety::Classification::declared_by_user(),
+            mode,
+            permissions,
+        )
+    }
+
+    fn with_classification(
+        check: PlannedCheck,
+        program: OsString,
+        arguments: Vec<OsString>,
+        classification: safety::Classification,
+        mode: ExecutionMode,
+        permissions: &ExecutionPermissions,
+    ) -> Self {
         let needs = needs_of(classification.effects());
         let decision = decide_for(classification.effects(), mode, permissions);
         let reason = refusal_reason(
@@ -629,6 +670,28 @@ impl PermissionPlan {
         ));
     }
 
+    /// Plan one user-declared command.
+    ///
+    /// Same plan, same mode and permissions, and the same refusal path; the only
+    /// difference is the classification the command carries.
+    pub fn add_declared<I, S>(
+        &mut self,
+        check: PlannedCheck,
+        program: impl Into<OsString>,
+        arguments: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        self.commands.push(PlannedCommand::new_declared(
+            check,
+            program,
+            arguments,
+            self.mode,
+            &self.permissions,
+        ));
+    }
+
     /// The execution mode the plan was built under.
     #[must_use]
     pub const fn mode(&self) -> ExecutionMode {
@@ -868,6 +931,30 @@ mod tests {
             Some(NotCheckedReason::NetworkNotPermitted),
             "the reason names the permission that is actually missing"
         );
+    }
+
+    #[test]
+    fn a_user_declared_command_is_dynamic_only_even_when_the_table_does_not_know_it() {
+        // `frobnicate` is not in the program table, so the normal path would
+        // classify it as install/network/destructive and refuse it. A command
+        // the user named in a commands file is the user's own argv; it needs
+        // only `run_project_code`, exactly as a package script does.
+        let mut permissions = ExecutionPermissions::inspect_only();
+        permissions.set(Permission::RunProjectCode, true);
+        let mut plan =
+            PermissionPlan::new(ExecutionMode::HostConfirmed, fingerprint(), permissions);
+        plan.add_declared(check("a declared test"), "frobnicate", ["--everything"]);
+
+        let command = &plan.commands()[0];
+        assert_eq!(
+            command.source(),
+            safety::Source::Rule {
+                program: "a command you declared",
+                decided_by: None,
+            }
+        );
+        assert!(command.reason().is_none(), "{:?}", command.reason());
+        assert_eq!(command.effects().classes(), &[CommandClass::DynamicHost]);
     }
 
     #[test]

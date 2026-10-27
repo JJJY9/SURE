@@ -738,6 +738,10 @@ pub struct CommandSpec {
     working_directory: PathBuf,
     environment: Environment,
     limits: Limits,
+    /// The user named this argv in a commands file, rather than SURE reading it
+    /// from a manifest. The flag reaches enforcement as
+    /// `Classification::declared_by_user` and nowhere else.
+    user_declared: bool,
 }
 
 impl CommandSpec {
@@ -759,7 +763,21 @@ impl CommandSpec {
             working_directory: working_directory.into(),
             environment,
             limits,
+            user_declared: false,
         }
+    }
+
+    /// Mark this command as one the user named in a commands file.
+    #[must_use]
+    pub fn with_user_declared(mut self, user_declared: bool) -> Self {
+        self.user_declared = user_declared;
+        self
+    }
+
+    /// Whether the user named this argv themselves.
+    #[must_use]
+    pub const fn is_user_declared(&self) -> bool {
+        self.user_declared
     }
 
     /// The arguments, in the order the program will receive them.
