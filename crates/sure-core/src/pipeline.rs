@@ -777,7 +777,10 @@ impl Pipeline<'_> {
                 );
             }
         };
-        let support = support::classify(&discovery);
+        let support = support::classify_with_external_commands(
+            &discovery,
+            !self.external_commands.is_empty(),
+        );
         stages.push(
             Stage::Discover,
             StageOutcome::Ran {

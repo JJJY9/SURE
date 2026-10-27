@@ -212,6 +212,27 @@ pub fn classify(discovery: &Discovery) -> ProjectSupport {
     ProjectSupport::new(level, reason)
 }
 
+/// The support level when the user supplied the commands themselves.
+///
+/// A project with no stack SURE can read is normally level C — *inspect only* —
+/// because SURE cannot plan a command for it. A commands file changes that: the
+/// user named the argv, and SURE can run it under the same execution mode and
+/// permissions as any other check. The level is therefore the build's ceiling
+/// (B, generic), with a reason that says the commands came from the user rather
+/// than from a manifest SURE understood.
+#[must_use]
+pub fn classify_with_external_commands(discovery: &Discovery, external: bool) -> ProjectSupport {
+    if !external {
+        return classify(discovery);
+    }
+    let level = weakest(SupportLevel::Generic, [CEILING]);
+    ProjectSupport::new(
+        level,
+        "You declared the commands SURE runs here; SURE can run them when your execution          settings allow project code. Support reaches level B (generic)."
+            .to_owned(),
+    )
+}
+
 /// The weakest of a set of levels.
 ///
 /// [`SupportLevel`] declares its variants best first, so the *weakest* is
