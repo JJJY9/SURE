@@ -55,6 +55,7 @@
 
 pub mod dotnet;
 pub mod go;
+pub mod java;
 pub mod node;
 mod pattern;
 pub mod python;
@@ -77,6 +78,7 @@ pub use read::UnreadReason;
 // so that the rule is written once — see `read::lookup_key`'s own note.
 pub use dotnet::DotnetProject;
 pub use go::GoProject;
+pub use java::JavaProject;
 pub(crate) use read::lookup_key;
 pub use rust::RustProject;
 
@@ -99,12 +101,20 @@ pub enum Ecosystem {
     Go,
     /// .NET: a solution or project file at the root.
     Dotnet,
+    /// Java: a Maven `pom.xml`, or the markers of a Gradle build.
+    Java,
 }
 
 impl Ecosystem {
     /// Every ecosystem this build looks for, in a fixed order.
-    pub const ALL: &'static [Self] =
-        &[Self::Node, Self::Python, Self::Rust, Self::Go, Self::Dotnet];
+    pub const ALL: &'static [Self] = &[
+        Self::Node,
+        Self::Python,
+        Self::Rust,
+        Self::Go,
+        Self::Dotnet,
+        Self::Java,
+    ];
 
     /// The stable name, used in output and in the reason a level was assigned.
     #[must_use]
@@ -115,6 +125,7 @@ impl Ecosystem {
             Self::Rust => "rust",
             Self::Go => "go",
             Self::Dotnet => "dotnet",
+            Self::Java => "java",
         }
     }
 
@@ -127,6 +138,7 @@ impl Ecosystem {
             Self::Rust => "Rust",
             Self::Go => "Go",
             Self::Dotnet => ".NET",
+            Self::Java => "Java",
         }
     }
 }
@@ -149,6 +161,8 @@ pub enum Findings {
     Go(Box<GoProject>),
     /// What a .NET project declares.
     Dotnet(Box<DotnetProject>),
+    /// What a Java project declares.
+    Java(Box<JavaProject>),
 }
 
 /// What SURE concluded about one ecosystem, and why.
@@ -522,6 +536,9 @@ pub fn discover(root: &Path, options: &DiscoverOptions) -> Result<Discovery, Sca
     if let Some(report) = dotnet::look(root, &scan, options, &mut budget, &mut unread) {
         ecosystems.push(report);
     }
+    if let Some(report) = java::look(root, &scan, options, &mut budget, &mut unread) {
+        ecosystems.push(report);
+    }
 
     Ok(Discovery {
         root: root.to_path_buf(),
@@ -544,12 +561,13 @@ mod tests {
         }
         // The list is the answer to "did SURE look?", so a list that omitted
         // one would make an untouched ecosystem look like an absent one.
-        assert_eq!(Ecosystem::ALL.len(), 5);
+        assert_eq!(Ecosystem::ALL.len(), 6);
         assert!(Ecosystem::ALL.contains(&Ecosystem::Node));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Python));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Rust));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Go));
         assert!(Ecosystem::ALL.contains(&Ecosystem::Dotnet));
+        assert!(Ecosystem::ALL.contains(&Ecosystem::Java));
         // Distinct, so that `report(ecosystem)` can find at most one and two
         // ecosystems cannot answer to one name.
         let names: std::collections::BTreeSet<&str> =

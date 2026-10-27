@@ -1,4 +1,4 @@
-//! Starting the package managers Windows installs as batch files.
+//! Starting the tools Windows installs as batch files.
 //!
 //! A Node project's checks are planned as `npm run test` and the like
 //! ([`crate::checks::node`]), and on Windows the `npm` a person has is
@@ -6,11 +6,14 @@
 //! [`crate::safety`] reads a `.cmd` name as unread text, and
 //! [`crate::planned_work::Resolution`] says `InterpreterRequired` rather than a
 //! program, so those checks could never run on the platform this product is
-//! built for first.
+//! built for first. Maven has the same shape: `mvn` is `mvn.cmd` on Windows, and
+//! it starts `java` with Maven's own classworlds launcher. Both are translated
+//! here, and each is translated from what the shim's installation holds, not by
+//! reading the shim.
 //!
 //! # What this module starts instead
 //!
-//! The shim itself runs one thing: the Node executable beside it, with the
+//! The npm shim itself runs one thing: the Node executable beside it, with the
 //! package manager's own JavaScript entry (`node_modules/npm/bin/npm-cli.js`,
 //! `node_modules/pnpm/bin/pnpm.cjs`, `node_modules/yarn/bin/yarn.js`). This
 //! module resolves the planned name to exactly that pair — **a real executable
@@ -24,15 +27,25 @@
 //! classifies, and a project allowed to run its own scripts is allowed to run
 //! the package manager's entry with them.
 //!
+//! A Maven shim is translated to what `mvn.cmd` runs: `java`, Maven's
+//! classworlds jar in `boot/`, `conf/m2.conf`, and the launcher class — every
+//! one of them found under the Maven home the shim's own location names. The
+//! planned arguments (`-B test`, …) follow unchanged. The Java executable is
+//! `JAVA_HOME`'s when that is set and startable, because that is the first place
+//! `mvn.cmd` looks, and the `java` on `PATH` otherwise.
+//!
 //! # What it refuses
 //!
-//! Only a bare `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` name whose resolved
-//! file is a `.cmd` or `.bat` **and** whose directory carries both a startable
-//! `node` (beside the shim or on `PATH`) and either the manager's shipped entry
-//! or the corepack dispatcher is translated. Every other shape — a `.ps1`, a
-//! name that resolves to nothing, an install without its JavaScript side —
-//! returns `None`, and the original program is used: the check then fails with
-//! the honest `InterpreterRequired`/not-found reason it already had. Nothing is
+//! For a package manager, only a bare `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg`
+//! name whose resolved file is a `.cmd` or `.bat` **and** whose directory
+//! carries both a startable `node` (beside the shim or on `PATH`) and either
+//! the manager's shipped entry or the corepack dispatcher is translated. For
+//! Maven, only a bare `mvn` whose resolved file is a `.cmd` or `.bat`, whose
+//! home carries `bin/m2.conf` and a `boot/plexus-classworlds-*.jar`, and for
+//! which a startable `java` exists is translated. Every other shape — a `.ps1`,
+//! a name that resolves to nothing, an install without its other half — returns
+//! `None`, and the original program is used: the check then fails with the
+//! honest `InterpreterRequired`/not-found reason it already had. Nothing is
 //! guessed.
 //!
 //! # Where it is bound
@@ -84,12 +97,22 @@ impl PackageLaunchers {
     /// What to start for `program`, or `None` when the planned name is not a
     /// batch shim this module knows how to translate.
     ///
+    /// `working_directory` is the directory the check runs in. Maven's launcher
+    /// takes it as `-Dmaven.multiModuleProjectDirectory`, which is what
+    /// `mvn.cmd` passes and what Maven uses to find `.mvn/` configuration beside
+    /// the project it was started for.
+    ///
     /// `None` is not an error: the caller keeps the plan's own program, and a
-    /// machine where npm is missing or is a real executable is untouched.
+    /// machine where the tool is missing or is a real executable is untouched.
     #[must_use]
-    pub fn resolve(&self, program: &OsStr, arguments: &[OsString]) -> Option<Launch> {
+    pub fn resolve(
+        &self,
+        program: &OsStr,
+        arguments: &[OsString],
+        working_directory: &Path,
+    ) -> Option<Launch> {
         // Only Windows completes a bare name with `.cmd`/`.bat`; on every other
-        // platform npm is the file itself and is started as it stands. The
+        // platform the tool is the file itself and is started as it stands. The
         // guard is a value rather than `#[cfg]` so the module compiles — and
         // its type is usable — everywhere.
         if !cfg!(windows) {
@@ -101,6 +124,9 @@ impl PackageLaunchers {
             return None;
         }
         let name = named.file_stem()?.to_str()?.to_ascii_lowercase();
+        if name == "mvn" {
+            return self.resolve_maven(program, arguments, working_directory);
+        }
         // The package's own directory and the JavaScript entry its shim runs.
         // `yarnpkg` is Yarn's alternative name; `pnpx` is pnpm's npx.
         let (package, entry) = match name.as_str() {
@@ -161,6 +187,90 @@ impl PackageLaunchers {
             arguments: launched,
         })
     }
+
+    /// Translate a Maven batch shim to the `java` command it starts.
+    ///
+    /// Maven's `mvn.cmd` runs the classworlds launcher from its own
+    /// installation: the `boot/plexus-classworlds-*.jar`, `bin/m2.conf` and the
+    /// home directory are all under the directory the shim sits in, which is
+    /// `<home>/bin`. Nothing here reads the shim; the three files are what the
+    /// installation is required to have, and all three are checked before this
+    /// answers.
+    fn resolve_maven(
+        &self,
+        program: &OsStr,
+        arguments: &[OsString],
+        working_directory: &Path,
+    ) -> Option<Launch> {
+        let Resolution::InterpreterRequired(shim) = self.path.resolve(program) else {
+            return None;
+        };
+        let extension = shim.extension()?.to_str()?.to_ascii_lowercase();
+        if extension != "cmd" && extension != "bat" {
+            return None;
+        }
+        let home = shim.parent()?.parent()?;
+        let conf = home.join("bin").join("m2.conf");
+        if !conf.is_file() || !has_classworlds(&home.join("boot")) {
+            return None;
+        }
+        let java = self.java()?;
+
+        let mut launched: Vec<OsString> = Vec::with_capacity(arguments.len() + 7);
+        launched.push(OsString::from("-classpath"));
+        // The JVM expands a classpath entry ending in `*` to the jars in that
+        // directory, which is how the shim names the one jar whose version is
+        // part of its file name.
+        launched.push(home.join("boot").join("*").into_os_string());
+        launched.push(OsString::from(format!(
+            "-Dclassworlds.conf={}",
+            conf.display()
+        )));
+        launched.push(OsString::from(format!("-Dmaven.home={}", home.display())));
+        launched.push(OsString::from(format!(
+            "-Dmaven.multiModuleProjectDirectory={}",
+            working_directory.display()
+        )));
+        launched.push(OsString::from(
+            "org.codehaus.plexus.classworlds.launcher.Launcher",
+        ));
+        launched.extend(arguments.iter().cloned());
+        Some(Launch {
+            program: java,
+            arguments: launched,
+        })
+    }
+
+    /// The `java` a Maven shim would start: `JAVA_HOME`'s, then `PATH`'s.
+    ///
+    /// `mvn.cmd` checks `JAVA_HOME` first and falls back to `java` on `PATH`;
+    /// translating in the other order would run the check under a different JDK
+    /// than the person's own `mvn` would. A `JAVA_HOME` whose `bin/java.exe` is
+    /// not there is not used, which is also what the shim does.
+    fn java(&self) -> Option<PathBuf> {
+        if let Some(home) = std::env::var_os("JAVA_HOME") {
+            let candidate = PathBuf::from(home).join("bin").join("java.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        match self.path.resolve(OsStr::new("java")) {
+            Resolution::Executable(found) => Some(found),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a Maven `boot` directory holds the classworlds jar.
+fn has_classworlds(boot: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(boot) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        name.starts_with("plexus-classworlds") && name.ends_with(".jar")
+    })
 }
 
 /// The `node.exe` that ships beside an npm shim, if one does.
@@ -237,6 +347,7 @@ mod tests {
             .resolve(
                 OsStr::new("npm"),
                 &[OsString::from("run"), OsString::from("test")],
+                scratch.path(),
             )
             .expect("the shim is translatable");
 
@@ -258,7 +369,7 @@ mod tests {
         scratch.file("npm.cmd");
 
         assert_eq!(
-            launchers(scratch.path()).resolve(OsStr::new("npm"), &[]),
+            launchers(scratch.path()).resolve(OsStr::new("npm"), &[], scratch.path()),
             None
         );
     }
@@ -271,7 +382,7 @@ mod tests {
 
         // Empty search path: node is neither beside the shim nor on PATH.
         assert_eq!(
-            launchers(scratch.path()).resolve(OsStr::new("npm"), &[]),
+            launchers(scratch.path()).resolve(OsStr::new("npm"), &[], scratch.path()),
             None
         );
     }
@@ -284,15 +395,15 @@ mod tests {
         scratch.file("node_modules/npm/bin/npm-cli.js");
 
         assert_eq!(
-            launchers(scratch.path()).resolve(OsStr::new("python"), &[]),
+            launchers(scratch.path()).resolve(OsStr::new("python"), &[], scratch.path()),
             None
         );
         assert_eq!(
-            launchers(scratch.path()).resolve(OsStr::new("./npm"), &[]),
+            launchers(scratch.path()).resolve(OsStr::new("./npm"), &[], scratch.path()),
             None
         );
         assert_eq!(
-            launchers(scratch.path()).resolve(OsStr::new("pnpm"), &[]),
+            launchers(scratch.path()).resolve(OsStr::new("pnpm"), &[], scratch.path()),
             None
         );
     }
@@ -308,6 +419,7 @@ mod tests {
             .resolve(
                 OsStr::new("pnpm"),
                 &[OsString::from("run"), OsString::from("test")],
+                scratch.path(),
             )
             .expect("the pnpm shim is translatable");
 
@@ -330,7 +442,11 @@ mod tests {
         let cli = scratch.file("node_modules/yarn/bin/yarn.js");
 
         let launch = launchers(scratch.path())
-            .resolve(OsStr::new("yarnpkg"), &[OsString::from("test")])
+            .resolve(
+                OsStr::new("yarnpkg"),
+                &[OsString::from("test")],
+                scratch.path(),
+            )
             .expect("the yarn shim is translatable");
 
         assert_eq!(launch.program, node);
@@ -351,6 +467,7 @@ mod tests {
             .resolve(
                 OsStr::new("pnpm"),
                 &[OsString::from("run"), OsString::from("test")],
+                scratch.path(),
             )
             .expect("the corepack shim is translatable");
 
@@ -374,13 +491,83 @@ mod tests {
         let cli = scratch.file("node_modules/npm/bin/npx-cli.js");
 
         let launch = launchers(scratch.path())
-            .resolve(OsStr::new("npx"), &[OsString::from("--no-install")])
+            .resolve(
+                OsStr::new("npx"),
+                &[OsString::from("--no-install")],
+                scratch.path(),
+            )
             .expect("the npx shim is translatable");
 
         assert_eq!(launch.program, node);
         assert_eq!(
             launch.arguments,
             vec![cli.into_os_string(), OsString::from("--no-install")]
+        );
+    }
+
+    #[test]
+    fn a_maven_shim_becomes_java_and_the_classworlds_launcher() {
+        let scratch = Scratch::new("maven");
+        let home = scratch.path().join("apache-maven-3.9.9");
+        let bin = home.join("bin");
+        scratch.file("apache-maven-3.9.9/bin/mvn.cmd");
+        scratch.file("apache-maven-3.9.9/bin/m2.conf");
+        scratch.file("apache-maven-3.9.9/boot/plexus-classworlds-2.7.0.jar");
+        scratch.file("apache-maven-3.9.9/bin/java.exe");
+
+        let launch = launchers(&bin)
+            .resolve(
+                OsStr::new("mvn"),
+                &[OsString::from("-B"), OsString::from("test")],
+                scratch.path(),
+            )
+            .expect("the Maven shim is translatable");
+
+        assert_eq!(
+            launch.program.file_name().and_then(|name| name.to_str()),
+            Some("java.exe")
+        );
+        assert_eq!(launch.arguments[0], OsString::from("-classpath"));
+        assert_eq!(
+            launch.arguments[1],
+            home.join("boot").join("*").into_os_string()
+        );
+        assert!(
+            launch
+                .arguments
+                .contains(&OsString::from(format!("-Dmaven.home={}", home.display()))),
+            "{:?}",
+            launch.arguments
+        );
+        assert!(
+            launch.arguments.contains(&OsString::from(format!(
+                "-Dmaven.multiModuleProjectDirectory={}",
+                scratch.path().display()
+            ))),
+            "{:?}",
+            launch.arguments
+        );
+        assert_eq!(
+            &launch.arguments[launch.arguments.len() - 3..],
+            &[
+                OsString::from("org.codehaus.plexus.classworlds.launcher.Launcher"),
+                OsString::from("-B"),
+                OsString::from("test"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_maven_shim_without_its_classworlds_jar_is_not_translated() {
+        let scratch = Scratch::new("maven-no-launcher");
+        let bin = scratch.path().join("apache-maven-3.9.9").join("bin");
+        scratch.file("apache-maven-3.9.9/bin/mvn.cmd");
+        scratch.file("apache-maven-3.9.9/bin/m2.conf");
+        scratch.file("apache-maven-3.9.9/bin/java.exe");
+
+        assert_eq!(
+            launchers(&bin).resolve(OsStr::new("mvn"), &[], scratch.path()),
+            None
         );
     }
 }

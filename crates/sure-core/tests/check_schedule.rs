@@ -158,6 +158,31 @@ const MAY_PROPOSE: &[(&str, &str)] = &[
          cannot be bound to the state the change was made to",
     ),
     (
+        "src/checks/go.rs",
+        "the Go proposer from the MiQi integration (`PR #15`): it turns a \
+         `go.mod`, and each module a `go.work` names, into `go test`, \
+         `go build` and `go vet` checks. The entry was missing when the \
+         proposer landed and this list only noticed when the Java proposer \
+         was added; the rule is unchanged — a file that decides which checks \
+         exist is a decision, and the decision is written here",
+    ),
+    (
+        "src/checks/dotnet.rs",
+        "the .NET proposer from the MiQi integration (`PR #17`): it turns a \
+         solution or project file into `dotnet test`, `dotnet build` and — \
+         when the project configures formatting — `dotnet format \
+         --verify-no-changes`. Same missing entry as the Go one above, added \
+         in the same commit for the same reason",
+    ),
+    (
+        "src/checks/java.rs",
+        "the Java proposer from the MiQi integration: it turns a Maven \
+         `pom.xml` into `mvn -B -ntp test` and `mvn -B -ntp package \
+         -DskipTests`. A Gradle project gets no proposal at all because its \
+         build script is code SURE does not read, so what this file decides \
+         is which Maven projects have checks and which have missing commands",
+    ),
+    (
         "src/runtime_probes.rs",
         "`P5-T001`, and the first entry on this list that is not a submodule of \
          `checks/`: it is a level above the three proposers rather than beside \

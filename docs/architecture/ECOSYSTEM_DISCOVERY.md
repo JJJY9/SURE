@@ -578,6 +578,38 @@ could not read is reported the same way.
 `.sure/dotnet/<role>/`, its ignored cache directory, so checking the project
 does not modify it and the fingerprint does not move when the build runs.
 
+## Java
+
+SURE reads `pom.xml` with an XML parser and takes the root `<project>` element's
+direct children: `groupId`, `artifactId`, `version`, `packaging`, and the
+`<modules>` list. A module path is resolved like a `go.work` `use` path — inside
+the project root only — and each module's own `pom.xml` is read the same way.
+The modules become components; the checks stay at the root, because Maven builds
+a reactor from the aggregator and one `mvn test` at the root is one run of every
+module rather than one per module. The checks are `mvn -B -ntp test` and `mvn
+-B -ntp package -DskipTests`; the first is batch mode without transfer
+progress, so a first run's download bars cannot fill the bounded log before the
+part that says whether the build passed. A module with no readable `pom.xml` is
+a finding, and the reactor command is what reports it.
+
+**Profiles, parents and everything else are left to Maven.** A `<modules>` list
+inside a profile is not expanded, because whether a profile is active is a
+decision Maven makes from the environment; coordinates inherited from a parent
+POM are not resolved, because that needs the parent's file. A `pom.xml` SURE
+cannot parse is an unread manifest and the checks are missing commands.
+
+A Gradle project is reported at `InspectOnly` and gets no commands: `build.gradle`
+and `settings.gradle` (or the Kotlin spellings) are code, and SURE does not
+execute or interpret build scripts. `mvnw`/`mvnw.cmd` and `gradlew`/`gradlew.bat`
+are recorded by existence only.
+
+On Windows `mvn` is `mvn.cmd`, a batch file SURE does not start by name. The
+runner translates it the way it translates an npm shim
+(`crate::package_launcher`): `java`, the `boot/plexus-classworlds-*.jar`,
+`bin/m2.conf` and the launcher class, all found under the Maven home the shim's
+own location names, with `JAVA_HOME`'s Java when that is set. Nothing reads the
+batch file.
+
 ## Support levels
 
 `grade` returns the level and the sentence together, as constants, so a level and
@@ -859,11 +891,21 @@ Recorded so they are not forgotten. None is resolved by a task yet.
     the overlap is computed against the truncated list. `Workspaces::truncated`
     is what says the list was cut.
 
+17. **A Maven module list declared inside a profile is not read, and neither is
+    a coordinate inherited from a parent POM.** SURE reads the root `<project>`
+    element's direct children. Both of the others are Maven's own decisions:
+    whether a profile is active depends on the environment, and a parent's
+    coordinates need the parent's file, which may live outside the project or in
+    a repository SURE does not contact. A project whose modules exist only in a
+    profile is therefore reported as a POM with no modules — true about the file
+    SURE read, and not the reactor Maven would build.
+
 ## Enforced by
 
 Node tests are in `crates/sure-core/tests/discover_node.rs`; Python tests are in
 `crates/sure-core/tests/discover_python.rs`; Rust tests are in
-`crates/sure-core/tests/discover_rust.rs`; unit-test names without a file are in
+`crates/sure-core/tests/discover_rust.rs`; Java tests are in
+`crates/sure-core/tests/java_project.rs`; unit-test names without a file are in
 `src/discover/python.rs` or `src/discover/rust.rs` as named.
 
 | Statement | Where the meaning lives | Enforced by |

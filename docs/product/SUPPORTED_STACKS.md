@@ -16,9 +16,12 @@ Initial target families:
 SURE can discover common manifests/commands and run approved generic checks, but does not claim framework-specific completeness.
 
 The build currently ships generic Go discovery (`go.mod`; `go.work` modules
-each get `go test ./...`, `go build ./...`, `go vet ./...`) and generic .NET discovery (`*.sln`/`*.csproj`,
+each get `go test ./...`, `go build ./...`, `go vet ./...`), generic .NET discovery (`*.sln`/`*.csproj`,
 `dotnet test`, `dotnet build`, plus `dotnet format --verify-no-changes` when the
-project declares `.editorconfig`) beside the Node/Python/Rust paths.
+project declares `.editorconfig`), and generic Maven discovery (`pom.xml`, including the module
+`pom.xml` files a reactor names; `mvn -B -ntp test` and `mvn -B -ntp package -DskipTests` at the root)
+beside the Node/Python/Rust paths. A Gradle build is inspected only: its build
+script is code, and SURE does not execute or interpret build scripts.
 
 ## Level C — inspect-only
 
