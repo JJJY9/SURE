@@ -187,6 +187,27 @@ impl Classification {
         }
     }
 
+    /// A command the user named in a `--commands-file`.
+    ///
+    /// The user wrote the program and its argv themselves, in a file SURE
+    /// refuses to read from inside the checked project. It is treated as one
+    /// category — [`CommandClass::DynamicHost`] — rather than through the
+    /// program table: the table exists to answer *what would this unknown text
+    /// do*, and the user has already answered it by naming the argv. The command
+    /// still needs `run_project_code`, so a run that has not been granted it does
+    /// not start anything, and SURE does not silently install or reach the
+    /// network on its behalf.
+    #[must_use]
+    pub fn declared_by_user() -> Self {
+        Self {
+            effects: CommandEffects::single(CommandClass::DynamicHost),
+            source: Source::Rule {
+                program: "a command you declared",
+                decided_by: None,
+            },
+        }
+    }
+
     fn unread(reason: &'static str) -> Self {
         Self::unknown(Source::UnreadText(reason))
     }

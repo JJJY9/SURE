@@ -887,7 +887,15 @@ impl Pipeline<'_> {
                 CheckOperation::Precomputed(_) => None,
             };
             if let Some(spec) = command {
-                permission_plan.add(check.clone(), spec.program(), spec.arguments().to_vec());
+                if spec.is_user_declared() {
+                    permission_plan.add_declared(
+                        check.clone(),
+                        spec.program(),
+                        spec.arguments().to_vec(),
+                    );
+                } else {
+                    permission_plan.add(check.clone(), spec.program(), spec.arguments().to_vec());
+                }
             }
         }
         // The plan a report is built from, named the way a person reads it: the
@@ -1964,7 +1972,8 @@ fn plan_external_commands(
             Environment::inherited(),
             Limits::new(Duration::from_secs(600), 64 * 1024, 64 * 1024),
         )
-        .with_arguments(arguments.iter().cloned());
+        .with_arguments(arguments.iter().cloned())
+        .with_user_declared(true);
         drop(builder.propose(PlannedWork::new(proposal, CheckOperation::Command(spec))));
     }
 }

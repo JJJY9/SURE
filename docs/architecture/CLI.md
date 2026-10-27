@@ -594,7 +594,10 @@ being judged, and a file it can edit is a plan it wrote for its own verdict. A
 role the file omits is recorded as not declared rather than silently dropped, so
 a test-only override is not a green verdict. Commands are planned under the same
 execution mode and permissions as every other check; a run that has not been
-granted `run_project_code` does not run them.
+granted `run_project_code` does not run them. The argv is the user's own
+declaration, so it is classified as project code (`Runtime`/`run_project_code`)
+and not re-read as an install or network request the way an unknown program from
+a project's text would be.
 
 ## `sure config set SETTING VALUE`
 
