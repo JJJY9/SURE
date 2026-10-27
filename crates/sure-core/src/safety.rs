@@ -888,6 +888,24 @@ const GIT_VERBS: &[Verb] = &[
     ),
 ];
 
+/// Go's own commands.
+///
+/// `test`, `build` and `vet` run the project's code and are classified as
+/// `DynamicHost`; `go get` and `go mod download` change the module cache and are
+/// install/network. The distinction matters because SURE plans the first three
+/// under `host_confirmed` without demanding a network grant, the same way it
+/// plans a Python test runner.
+const GO_VERBS: &[Verb] = &[
+    verb(
+        &[
+            "test", "build", "vet", "run", "install", "generate", "fmt", "doc",
+        ],
+        RUNS_CODE,
+    ),
+    verb(&["get", "mod"], INSTALLS_AND_RUNS),
+    verb(&["env", "version", "list", "help"], STATIC_ONLY),
+];
+
 const CARGO_VERBS: &[Verb] = &[
     verb(
         &[
@@ -1006,6 +1024,16 @@ const ENTRY_TABLE: &[Entry] = &[
             "--jobs",
             "-j",
         ],
+    },
+    Entry {
+        names: &["go"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: GO_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["-C", "-mod", "-tags", "-o", "-ldflags", "-gcflags"],
     },
     Entry {
         names: &["npm", "yarn", "pnpm"],

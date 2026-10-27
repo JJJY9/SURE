@@ -1876,6 +1876,11 @@ fn propose_everything(
             planned.missing.extend(checks.missing().iter().cloned());
             checks.add_to(builder);
         }
+        if let Some(go) = go_of(discovery) {
+            let checks = checks::go::GoChecks::of(&go);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&go, &discovery.root, builder);
+        }
     } else {
         plan_external_commands(external_commands, &discovery.root, builder, &mut planned);
     }
@@ -2156,6 +2161,13 @@ fn python_of(discovery: &Discovery) -> Option<crate::discover::PythonProject> {
 fn rust_of(discovery: &Discovery) -> Option<crate::discover::RustProject> {
     match &discovery.report(Ecosystem::Rust)?.findings {
         Findings::Rust(rust) => Some((**rust).clone()),
+        _ => None,
+    }
+}
+
+fn go_of(discovery: &Discovery) -> Option<crate::discover::GoProject> {
+    match &discovery.report(Ecosystem::Go)?.findings {
+        Findings::Go(go) => Some((**go).clone()),
         _ => None,
     }
 }

@@ -54,8 +54,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::discover::{
-    Discovery, Ecosystem, Findings, MemberManifest, PythonProject, Source, UnreadReason, node,
-    python, rust,
+    Discovery, Ecosystem, Findings, GoProject, MemberManifest, PythonProject, Source, UnreadReason,
+    node, python, rust,
 };
 
 /// Every component in a project, and which contains which.
@@ -236,6 +236,7 @@ impl Component {
                     Findings::Node(project) => root_reading(&project.manifest),
                     Findings::Python(project) => python_root_reading(project),
                     Findings::Rust(project) => rust_root_reading(&project.manifest),
+                    Findings::Go(project) => go_root_reading(project),
                 },
             })
             .collect();
@@ -496,6 +497,11 @@ impl EcosystemResolution {
                           read the tables that say so, so a Python project is \
                           reported as one component whether or not it is several.",
             },
+            Some(Findings::Go(_)) => Members::NotRead {
+                because: "Go workspaces can name several modules in go.work, and SURE \
+                          does not read that file, so a Go project is reported as one \
+                          component whether or not it is several.",
+            },
         };
         Self { ecosystem, members }
     }
@@ -603,6 +609,7 @@ fn add_members(components: &mut Vec<Component>, ecosystem: Ecosystem, findings: 
         // member list later fails to compile here until somebody decides what a
         // Python member is — which is the reason [`Findings`] is an enum.
         Findings::Python(_) => {}
+        Findings::Go(_) => {}
     }
 }
 
@@ -684,6 +691,16 @@ fn rust_root_reading(state: &rust::ManifestState) -> ManifestReading {
 /// recorded failure outranks a missing file, because "there is a `pyproject.toml`
 /// SURE could not read" is the answer a reader needs and "no manifest" would be
 /// wrong.
+fn go_root_reading(project: &GoProject) -> ManifestReading {
+    if project.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &project.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
 fn python_root_reading(project: &PythonProject) -> ManifestReading {
     let states = [&project.manifest, &project.pipfile];
     if states
