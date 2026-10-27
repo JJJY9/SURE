@@ -80,6 +80,8 @@ pub struct Named<'a> {
     /// The file that may grant what the user's own settings file may grant, and
     /// the one `crate::mcp` refuses outright: see [`Command::report`].
     pub settings_file: Option<&'a Path>,
+    /// The file this run reads user-declared check commands from, if any.
+    pub commands_file: Option<&'a Path>,
 }
 
 impl<'a> Named<'a> {
@@ -89,6 +91,7 @@ impl<'a> Named<'a> {
         Self {
             store: Some(store),
             settings_file: None,
+            commands_file: None,
         }
     }
 }
@@ -732,6 +735,7 @@ mod tests {
             let report = command.report(Named {
                 store: Some(&directory.join("store")),
                 settings_file: Some(&settings),
+                commands_file: None,
             });
 
             match (&report, *entry) {

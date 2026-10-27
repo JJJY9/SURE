@@ -79,6 +79,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use sure_core::config::Authority;
+use sure_core::external_commands;
 use sure_core::finding::Finding;
 use sure_core::fingerprint::{FingerprintOptions, project_fingerprint};
 use sure_core::intent::IntentSource;
@@ -167,7 +168,7 @@ pub fn run(
         Err(detail) => return failed(purpose, NOTHING_RECORDED, detail),
     };
     match Paths::discover_with(named.store, named.settings_file) {
-        Ok(paths) => run_with(purpose, &paths, &project, goal),
+        Ok(paths) => run_with_commands(purpose, &paths, &project, goal, named.commands_file),
         // Not `Unavailable`: SURE has somewhere to keep its files or it does
         // not, and a machine where it does not is a machine to fix rather than a
         // build to update.
@@ -216,6 +217,23 @@ fn project_of(project: Option<&Path>) -> Result<PathBuf, String> {
 /// own. Nothing about a project is consulted either way.
 #[must_use]
 pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&str>) -> Report {
+    run_with_commands(purpose, paths, project, goal, None)
+}
+
+/// The same, with an optional user-declared commands file.
+///
+/// The commands file is a path from this process's argument vector, like
+/// `--settings-file`; nothing in the checked project can reach it. A caller that
+/// does not name one passes `None` and plans the discovered stack exactly as
+/// before.
+#[must_use]
+pub fn run_with_commands(
+    purpose: Purpose,
+    paths: &Paths,
+    project: &Path,
+    goal: Option<&str>,
+    commands_file: Option<&Path>,
+) -> Report {
     // Where this run's settings come from, refused if the project could write
     // it. First, before the goal goes into the history and before any settings
     // are read, because both of those would be a run that acted on a file the
@@ -268,6 +286,46 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
     };
     let loaded = authority.project_file();
     let privacy = PrivacyStatement::of(&authority);
+
+    // User-declared commands, if the caller named a file. The file is a
+    // command-line argument and is refused when it lives inside the project:
+    // the project is the thing being judged, and a commands file it can edit is
+    // a plan the AI can write for its own verdict.
+    let external_commands = match commands_file {
+        Some(path) => {
+            let outside = match (std::fs::canonicalize(path), std::fs::canonicalize(project)) {
+                (Ok(commands), Ok(root)) => !commands.starts_with(root),
+                _ => true,
+            };
+            if !outside {
+                let what = if recorded.is_some() {
+                    RECORDED_AND_UNCHECKED
+                } else {
+                    NOTHING_RECORDED
+                };
+                return failed(
+                    purpose,
+                    what,
+                    format!(
+                        "the commands file {} is inside the project being checked; name a file outside it",
+                        path.display()
+                    ),
+                );
+            }
+            match external_commands::load(path) {
+                Ok(commands) => commands,
+                Err(detail) => {
+                    let what = if recorded.is_some() {
+                        RECORDED_AND_UNCHECKED
+                    } else {
+                        NOTHING_RECORDED
+                    };
+                    return failed(purpose, what, detail);
+                }
+            }
+        }
+        None => Vec::new(),
+    };
 
     // The history — see `open_for` for which commands create one and why.
     if store.is_none() {
@@ -345,6 +403,7 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
         config: &loaded.config,
         execution: authority.execution(),
         analysis: authority.analysis().value,
+        external_commands: &external_commands,
         store: store.as_ref(),
         goal: goal_as_recorded,
         runner: &runner,
