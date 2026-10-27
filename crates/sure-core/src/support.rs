@@ -228,7 +228,7 @@ pub fn classify_with_external_commands(discovery: &Discovery, external: bool) ->
     let level = weakest(SupportLevel::Generic, [CEILING]);
     ProjectSupport::new(
         level,
-        "You declared the commands SURE runs here; SURE can run them when your execution          settings allow project code. Support reaches level B (generic)."
+        "You declared the commands SURE runs here; SURE can run them when your execution settings allow project code. Support reaches level B (generic)."
             .to_owned(),
     )
 }
