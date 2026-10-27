@@ -22,6 +22,8 @@ pub const CLAIM_TYPE_FILE_CHANGED: &str = "file_changed";
 pub const CLAIM_TYPE_GIT_STATE: &str = "git_state";
 /// Claim type constant: current code claim.
 pub const CLAIM_TYPE_CURRENT_CODE: &str = "current_code";
+/// Claim type constant: a project dependency was installed or changed.
+pub const CLAIM_TYPE_DEPENDENCY_CHANGED: &str = "dependency_changed";
 
 /// A claim as read from the store, before checking.
 #[derive(Debug, Clone, PartialEq)]
@@ -310,8 +312,10 @@ pub fn check_claim(
                 let contradicted = match claim_type {
                     // 声称"通过/OK"却记录到失败 → 与证据矛盾。
                     CLAIM_TYPE_TEST_RAN => any_failed && claim_asserts_success(&text),
-                    // current_code / git_state 的声明天然断言成功。
-                    CLAIM_TYPE_CURRENT_CODE | CLAIM_TYPE_GIT_STATE => any_failed,
+                    // current_code / git_state / dependency_changed 的声明天然断言成功。
+                    CLAIM_TYPE_CURRENT_CODE
+                    | CLAIM_TYPE_GIT_STATE
+                    | CLAIM_TYPE_DEPENDENCY_CHANGED => any_failed,
                     _ => false,
                 };
                 if contradicted {
@@ -463,6 +467,7 @@ fn is_known_claim_type(claim_type: &str) -> bool {
             | CLAIM_TYPE_FILE_CHANGED
             | CLAIM_TYPE_GIT_STATE
             | CLAIM_TYPE_CURRENT_CODE
+            | CLAIM_TYPE_DEPENDENCY_CHANGED
     )
 }
 
@@ -487,6 +492,7 @@ fn event_type_matches_claim_family(event_type: &str, claim_type: &str) -> bool {
                 || event_type.starts_with("compile.")
                 || event_type.starts_with("run.")
         }
+        CLAIM_TYPE_DEPENDENCY_CHANGED => event_type.starts_with("dependency."),
         _ => false,
     }
 }
@@ -526,6 +532,7 @@ fn match_claim_evidence<'a>(
         CLAIM_TYPE_FILE_CHANGED => match_file_changed(&text, events),
         CLAIM_TYPE_GIT_STATE => match_git_state(&text, events),
         CLAIM_TYPE_CURRENT_CODE => match_current_code(&text, events),
+        CLAIM_TYPE_DEPENDENCY_CHANGED => match_dependency_changed(&text, events),
         _ => ClaimEvidenceMatch::incomplete("the claim type is not one SURE can match"),
     }
 }
@@ -949,6 +956,62 @@ fn match_current_code<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvide
     }
 }
 
+/// (phrase in a claim, substring a recorded dependency event's target carries).
+///
+/// A dependency claim is matched to the package manager it names, never to any
+/// dependency event: "installed express" does not say how, and SURE does not
+/// guess. The table is deliberately word-bounded (`contains_phrase`) so "go"
+/// in "going" is not read as Go modules.
+const DEPENDENCY_MANAGER_PHRASES: &[(&str, &str)] = &[
+    ("npm", "npm"),
+    ("pnpm", "pnpm"),
+    ("yarn", "yarn"),
+    ("pip", "pip"),
+    ("uv", "uv"),
+    ("poetry", "poetry"),
+    ("cargo", "cargo"),
+    ("go get", "go get"),
+    ("go mod", "go mod"),
+    ("bundle", "bundle"),
+    ("composer", "composer"),
+    ("dotnet", "dotnet"),
+    ("gradle", "gradle"),
+];
+
+fn match_dependency_changed<'a>(text: &str, events: &'a [IngestedEvent]) -> ClaimEvidenceMatch<'a> {
+    let managers = distinct_phrases(text, DEPENDENCY_MANAGER_PHRASES);
+    if managers.is_empty() {
+        return ClaimEvidenceMatch::incomplete(
+            "the claim does not name a package manager, so no recorded dependency event can be matched to it",
+        );
+    }
+
+    let mut matched = Vec::new();
+    for manager in managers {
+        let hit = events.iter().find(|event| {
+            event_type_matches_claim_family(
+                &event.envelope.event_type,
+                CLAIM_TYPE_DEPENDENCY_CHANGED,
+            ) && event_target(event).is_some_and(|target| target.contains(manager))
+        });
+        match hit {
+            Some(event) => matched.push(event),
+            None => {
+                return ClaimEvidenceMatch {
+                    events: matched,
+                    missing: Some(format!(
+                        "the claim names '{manager}', but no recorded dependency event for that manager was found"
+                    )),
+                };
+            }
+        }
+    }
+    ClaimEvidenceMatch {
+        events: matched,
+        missing: None,
+    }
+}
+
 fn evidence_freshness(proof_event: &IngestedEvent, events: &[IngestedEvent]) -> Freshness {
     let proof_time = match Timestamp::parse_rfc3339(&proof_event.envelope.timestamp) {
         Some(ts) => ts.as_millis(),
@@ -1198,6 +1261,88 @@ mod tests {
             sure_domain::evidence::ClaimAssessment::Confirmed
         );
         assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn dependency_claim_confirmed_by_matching_manager_event() {
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("installed dependencies with npm"),
+            claim_type: Some(String::from(CLAIM_TYPE_DEPENDENCY_CHANGED)),
+        };
+        let event = make_event(
+            "dependency.changed",
+            json!({"target": "npm install", "success": true}),
+        );
+        let fingerprint = FingerprintId::generate();
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(
+            result.assessment,
+            sure_domain::evidence::ClaimAssessment::Confirmed
+        );
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn dependency_claim_needs_the_manager_it_names() {
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("installed dependencies with pip"),
+            claim_type: Some(String::from(CLAIM_TYPE_DEPENDENCY_CHANGED)),
+        };
+        let event = make_event(
+            "dependency.changed",
+            json!({"target": "npm install", "success": true}),
+        );
+        let fingerprint = FingerprintId::generate();
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(
+            result.assessment,
+            sure_domain::evidence::ClaimAssessment::CannotConfirm
+        );
+        assert!(result.reason.contains("pip"), "{}", result.reason);
+    }
+
+    #[test]
+    fn failed_dependency_install_contradicts_the_claim() {
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("installed dependencies with npm"),
+            claim_type: Some(String::from(CLAIM_TYPE_DEPENDENCY_CHANGED)),
+        };
+        let event = make_event(
+            "dependency.changed",
+            json!({"target": "npm install", "success": false}),
+        );
+        let fingerprint = FingerprintId::generate();
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(
+            result.assessment,
+            sure_domain::evidence::ClaimAssessment::Contradicted
+        );
+    }
+
+    #[test]
+    fn dependency_claim_without_a_manager_is_not_widened_to_the_family() {
+        let claim = ClaimDocument {
+            record_id: 1,
+            id: String::from("claim-1"),
+            claim_text: String::from("installed the dependencies"),
+            claim_type: Some(String::from(CLAIM_TYPE_DEPENDENCY_CHANGED)),
+        };
+        let event = make_event(
+            "dependency.changed",
+            json!({"target": "npm install", "success": true}),
+        );
+        let fingerprint = FingerprintId::generate();
+        let result = check_claim(&claim, &[event], &fingerprint);
+        assert_eq!(
+            result.assessment,
+            sure_domain::evidence::ClaimAssessment::CannotConfirm
+        );
     }
 
     #[test]

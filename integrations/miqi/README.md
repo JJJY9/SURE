@@ -23,7 +23,15 @@ wherever the user keeps them.
 | `PostToolUse` | after a tool call **completed** | `tool.completed`; a completed `write_file` / `edit_file` / `apply_patch` is `file.written` (payload carries `path` and `written: true`) |
 | `Stop` | the session ends | `session.stopped` |
 | `AgentClaim` | the agent asserts something it did (`claim_id`, `claim_text`, `claim_type`) | `agent.claim` |
-| `ExecClassified` | an `exec`, classified locally by MiQi (`kind`: `test` / `build` / `compile` / `run` / `git`; `target`: a short label such as `pytest`; `success` records whether the run succeeded — failures are sent too, so a "passed" claim can be contradicted; `subcommand` for git) | `test.ran` / `build.ran` / `compile.ran` / `run.ran` / `git.action` — the families `claim_checker` reads for `test_ran` / `current_code` / `git_state` |
+| `ExecClassified` | an `exec`, classified locally by MiQi (`kind`: `test` / `build` / `compile` / `run` / `git` / `dependency`; `target`: a short label such as `pytest` or `npm install`; `success` records whether the run succeeded — failures are sent too, so a "passed" or "installed" claim can be contradicted; `subcommand` for git) | `test.ran` / `build.ran` / `compile.ran` / `run.ran` / `git.action` / `dependency.changed` — the families `claim_checker` reads for `test_ran` / `current_code` / `git_state` / `dependency_changed` |
+| `McpCall` | an MCP tool call finished (completed or failed); `tool` is the registered name (`mcp_<server>_<tool>`), `success` says whether it completed | `mcp.called` |
+| `SubagentStart` | MiQi starts a subagent job; `agent_type` and `job_id` identify it | `subagent.started` |
+| `SubagentStop` | the subagent job ended; `success` says whether it completed without error | `subagent.stopped` |
+
+`dependency_changed` claims ("installed dependencies with npm") are checked
+against the `dependency.` family; a claim that names no package manager is
+answered "cannot confirm", never widened to the family. A recorded failed
+install contradicts the claim.
 
 Required fields: `event`, `harness_session_id` (MiQi's session key),
 `timestamp_utc` (RFC 3339), `source` (the literal string `miqi`).
@@ -33,9 +41,10 @@ Optional fields: `project_root` (the session's project, an absolute path),
 the string `ok`), `args`, `error`, `path`, `claim_id` / `claim_text` /
 `claim_type` (AgentClaim only; SURE stores the claim as a Claim document and
 checks it against the recorded events — `claim_text` is redacted before it is
-stored), and `kind` / `target` / `success` / `subcommand` / `counts` (ExecClassified
+stored), `kind` / `target` / `success` / `subcommand` / `counts` (ExecClassified
 only — these are MiQi's own normalized classification, never the command
-line).
+line), and `server` / `agent_type` / `job_id` (McpCall / subagent lifecycle
+only — names MiQi already holds, never tool arguments or task text).
 
 A failed or refused tool call sends **no** `PostToolUse`: it appears in the
 record as a request without a completion, which is what it was. Nothing is
@@ -51,6 +60,12 @@ later version adds an explicit opt-in for forwarding arguments. `ExecClassified`
 does not weaken this: MiQi classifies the command locally and sends only the
 normalized label (`pytest`, `cargo build`, `git commit`), never the command
 text, its arguments, or the paths it named.
+
+**MCP arguments and results, and subagent prompts.** An `McpCall` carries the
+registered tool name and whether it succeeded, nothing the server returned and
+nothing the model passed to it. A subagent lifecycle event carries the agent
+type and MiQi's job id; the job's task text (which may quote the user) stays in
+MiQi. Both are observations, not claims.
 
 ## Tools and vocabulary
 

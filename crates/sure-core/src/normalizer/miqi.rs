@@ -71,6 +71,18 @@ pub struct MiqiRawEvent {
     /// against these; absent means "the event does not carry counts".
     #[serde(default)]
     pub counts: Option<Value>,
+    /// 2026-10-27: an MCP tool MiQi called. `tool` carries the registered
+    /// name (`mcp_<server>_<tool>`); `success` says whether the call
+    /// completed. Arguments and results never leave MiQi.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// 2026-10-27: the agent type a subagent lifecycle event is about
+    /// (`code-agent`, `sure-fix-agent`, ...).
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// 2026-10-27: MiQi's own id for the subagent job the event belongs to.
+    #[serde(default)]
+    pub job_id: Option<String>,
 }
 
 /// Why a MiQi raw event could not be normalized.
@@ -171,10 +183,23 @@ fn map_event_type(
             // a "git.command" event could never be projected as Git and a
             // git_state claim could never be matched against it.
             Some("git") => Ok("git.action"),
+            // 2026-10-27: a dependency install MiQi classified locally. The
+            // family carries the manager label and success, which is what a
+            // dependency_changed claim is matched against.
+            Some("dependency") => Ok("dependency.changed"),
             other => Err(MiqiNormalizeError::UnknownEventType {
                 event: format!("ExecClassified(kind={})", other.unwrap_or("<missing>")),
             }),
         },
+        // 2026-10-27: an MCP tool call observed after it finished. MCP tool
+        // names are server-defined (fail-closed as shell in the tool
+        // vocabulary), so this event is an observation of its own: the name
+        // and whether the call succeeded, never its arguments or result.
+        "McpCall" => Ok("mcp.called"),
+        // 2026-10-27: a subagent job's lifecycle. These are observations of
+        // delegation, not claims: no task text, prompt or result is sent.
+        "SubagentStart" => Ok("subagent.started"),
+        "SubagentStop" => Ok("subagent.stopped"),
         other => Err(MiqiNormalizeError::UnknownEventType {
             event: other.to_owned(),
         }),
@@ -228,6 +253,15 @@ fn build_payload(raw: MiqiRawEvent, event_type: &str) -> Value {
     }
     if let Some(counts) = raw.counts {
         map.insert("counts".to_owned(), counts);
+    }
+    if let Some(server) = raw.server {
+        map.insert("server".to_owned(), Value::String(server));
+    }
+    if let Some(agent_type) = raw.agent_type {
+        map.insert("agent_type".to_owned(), Value::String(agent_type));
+    }
+    if let Some(job_id) = raw.job_id {
+        map.insert("job_id".to_owned(), Value::String(job_id));
     }
 
     // Preserve the original event type for audit.
@@ -379,6 +413,41 @@ mod tests {
     }
 
     #[test]
+    fn exec_classified_dependency_maps_to_its_family() {
+        let text = fixture("exec-classified-dependency.json");
+        let envelope = normalize(&text).expect("valid fixture");
+        assert_eq!(envelope.event_type, "dependency.changed");
+        assert_eq!(envelope.payload["target"], Value::from("npm install"));
+        assert_eq!(envelope.payload["success"], Value::Bool(true));
+        assert_eq!(
+            envelope.payload["miqi_event"],
+            Value::from("ExecClassified")
+        );
+    }
+
+    #[test]
+    fn mcp_call_is_recorded_without_arguments() {
+        let text = fixture("mcp-call.json");
+        let envelope = normalize(&text).expect("valid fixture");
+        assert_eq!(envelope.event_type, "mcp.called");
+        assert_eq!(envelope.payload["tool"], Value::from("mcp_docs_search"));
+        assert_eq!(envelope.payload["success"], Value::Bool(true));
+        assert!(envelope.payload.get("args").is_none());
+    }
+
+    #[test]
+    fn subagent_lifecycle_maps_to_its_own_family() {
+        let start = normalize(&fixture("subagent-start.json")).expect("valid start");
+        assert_eq!(start.event_type, "subagent.started");
+        assert_eq!(start.payload["agent_type"], Value::from("code-agent"));
+        assert_eq!(start.payload["job_id"], Value::from("job-1"));
+
+        let stop = normalize(&fixture("subagent-stop.json")).expect("valid stop");
+        assert_eq!(stop.event_type, "subagent.stopped");
+        assert_eq!(stop.payload["success"], Value::Bool(true));
+    }
+
+    #[test]
     fn unknown_event_type_is_rejected() {
         let text = r#"{"event":"UnknownThing","harness_session_id":"c:s1","timestamp_utc":"2026-10-12T09:00:00Z","source":"miqi"}"#;
         let err = normalize(text).unwrap_err();
@@ -418,6 +487,10 @@ mod tests {
             "post-tool-use-write.json",
             "agent-claim.json",
             "exec-classified-test.json",
+            "exec-classified-dependency.json",
+            "mcp-call.json",
+            "subagent-start.json",
+            "subagent-stop.json",
             "stop.json",
         ] {
             let text = fixture(name);
