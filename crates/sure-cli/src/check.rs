@@ -503,12 +503,10 @@ fn record_goal(
     let rows = record(&store, root, &state.id, &intent)
         .map_err(|error| Failure::new(NOTHING_RECORDED, error.to_string()))?;
 
-    // One row, because the intent this builds has one requirement and the schema
-    // stores one requirement per row. Written as a match rather than as
-    // `rows[0]` so that a later version of `explicit_goal` producing several is a
-    // refusal here rather than a report naming the first of them as *the* record
-    // — and so that a store that returned nothing is not reported as record #0.
-    let Some(row) = rows.first().copied() else {
+    // One row per non-empty goal line (a one-line goal is one row). Written as a
+    // check rather than as `rows[0]` so that a store that returned nothing is not
+    // reported as record #0.
+    let Some(first_row) = rows.first().copied() else {
         return Err(Failure::new(
             RECORDED_WITHOUT_A_ROW,
             "The store accepted the goal and returned no row identifier for it. The goal is in \
@@ -527,7 +525,11 @@ fn record_goal(
     // read-back is for. Read back rather than redacted a second time here, so
     // that the report and the row agree by construction instead of by two
     // implementations staying in step.
-    let text = held_text(&store, row)?;
+    let mut texts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        texts.push(held_text(&store, *row)?);
+    }
+    let text = texts.join("\n");
 
     Ok((
         GoalRecorded {
@@ -536,7 +538,7 @@ fn record_goal(
             source: IntentSource::ExplicitUserGoal,
             project_root: root.to_owned(),
             project_state: state,
-            record: row,
+            record: first_row,
         },
         store,
     ))
@@ -1408,13 +1410,17 @@ mod tests {
     }
 
     /// The one project-intent row in a store, or a panic naming what was there.
-    fn the_intent_row(store: &Store) -> StoredRecord {
-        let mut intents: Vec<StoredRecord> = store
+    fn intent_rows(store: &Store) -> Vec<StoredRecord> {
+        store
             .history(&HistoryFilter::default(), 100)
             .unwrap_or_else(|error| panic!("cannot read the history: {error}"))
             .into_iter()
             .filter(|row| row.kind == intent_kind())
-            .collect();
+            .collect()
+    }
+
+    fn the_intent_row(store: &Store) -> StoredRecord {
+        let mut intents = intent_rows(store);
         assert_eq!(
             intents.len(),
             1,
@@ -2488,7 +2494,13 @@ privacy:
         a_project(&fixture);
         let paths = fixture.paths();
 
-        let goal = "  keep the two-space indent\nand do not trim the trailing tab\t";
+        // A multi-line goal is one requirement per line; whitespace around each
+        // line is trimmed (the one-line case keeps its text exactly, measured by
+        // `project_intent`'s own test).
+        let goal = "  keep the two-space indent
+and do not trim the trailing tab	";
+        let expected = "keep the two-space indent
+and do not trim the trailing tab";
         let report = run_with(Purpose::Check, &paths, &fixture.project(), Some(goal));
         assert_eq!(
             checked(&report)
@@ -2496,7 +2508,7 @@ privacy:
                 .as_ref()
                 .expect("recorded")
                 .goal,
-            goal,
+            expected,
             "the goal was edited on the way in"
         );
 
@@ -2515,7 +2527,14 @@ privacy:
                 row.document
             );
         }
-        assert_eq!(the_intent_row(&store).document["text"], json!(goal));
+        let mut rows = intent_rows(&store);
+        assert_eq!(rows.len(), 2);
+        rows.sort_by_key(|row| row.document["id"].as_str().unwrap_or("").to_owned());
+        assert_eq!(rows[0].document["text"], json!("keep the two-space indent"));
+        assert_eq!(
+            rows[1].document["text"],
+            json!("and do not trim the trailing tab")
+        );
     }
 
     #[test]
