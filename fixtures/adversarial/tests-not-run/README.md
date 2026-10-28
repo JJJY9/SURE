@@ -2,7 +2,7 @@
 
 ## What the AI claimed
 
-> All 12 unit tests pass.
+> All 12 pytest unit tests pass.
 
 That is the whole of the evidence for it. There is no project in this fixture to
 run, and no test command in it to fail: the fixture is a **recording**, and the
@@ -15,7 +15,7 @@ Two things happened, and the recording says so:
 | When | What |
 | --- | --- |
 | 09:10:56 | a file was written: `src/orders.js` |
-| 09:10:57 | an event named `mytest.finished`, summarised as `unit tests, 12 passed, 0 failed` |
+| 09:10:57 | an event named `mytest.finished`, summarised as `pytest unit tests, 12 passed, 0 failed` |
 
 The second line is the one a person reads as "the tests ran". SURE does not read
 it that way. To check a claim that the tests ran, SURE looks for an event whose
