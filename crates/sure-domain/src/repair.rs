@@ -181,10 +181,29 @@ fn observable_acceptance(finding: &Finding, recheck: &[CheckId]) -> Vec<String> 
     conditions
 }
 
+/// Whether a repair for this finding has to change the project's product code.
+///
+/// A finding whose strongest evidence is a [`EvidenceClass::DeterministicCheck`]
+/// is one SURE observed by running a check: the check ran, and the project did
+/// not satisfy it. What makes a check pass again is a change to the behaviour
+/// the check observed, and the shortcut that passes it without changing that
+/// behaviour is editing the check's own test until it agrees with the code.
+///
+/// This is the one predicate behind that judgement, and it has two readers:
+/// [`forbidden_shortcuts_for`], which writes the rule into the repair contract,
+/// and `sure_core::recheck_lifecycle`, which refuses to close such a finding
+/// when every file recorded as written since the earlier run is a test file.
+/// Two readers, one rule, so the contract cannot forbid something the re-check
+/// would accept.
+#[must_use]
+pub fn requires_production_change(finding: &Finding) -> bool {
+    finding.strongest_evidence_class() == EvidenceClass::DeterministicCheck
+}
+
 fn forbidden_shortcuts_for(finding: &Finding) -> Vec<String> {
     let mut shortcuts = Vec::new();
 
-    if finding.strongest_evidence_class() == EvidenceClass::DeterministicCheck {
+    if requires_production_change(finding) {
         shortcuts.push(String::from(
             "Changing only the test or assertion so it passes without fixing the underlying behavior.",
         ));
@@ -321,6 +340,33 @@ mod tests {
                 .any(|s| s.contains("test")),
             "deterministic-check findings should warn against test-only fixes"
         );
+    }
+
+    /// One predicate decides both the contract clause and what the re-check
+    /// accepts, so a contract cannot forbid a shortcut the re-check would accept.
+    #[test]
+    fn only_a_check_failure_needs_a_production_change() {
+        let check = grounded_finding();
+        assert!(requires_production_change(&check));
+
+        let mut observed = grounded_finding();
+        observed.evidence[0].class = EvidenceClass::ObservedFact;
+        assert!(
+            !requires_production_change(&observed),
+            "an observed fact is not a failed check and carries no test-change clause"
+        );
+
+        let clause = |finding: &Finding| {
+            let contract =
+                RepairContract::from_finding_with_one_check(finding, CheckId::generate())
+                    .expect("contract is generated");
+            contract
+                .forbidden_shortcuts
+                .iter()
+                .any(|s| s.contains("test or assertion"))
+        };
+        assert_eq!(clause(&check), requires_production_change(&check));
+        assert_eq!(clause(&observed), requires_production_change(&observed));
     }
 
     #[test]

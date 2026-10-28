@@ -1564,31 +1564,39 @@ impl Pipeline<'_> {
         // carried open beside this run's copy of it.
         let case = recheck_lifecycle::case_rule_for(&run.project_root);
 
-        let previous =
-            match recheck_lifecycle::previous_open_findings(store, &run.project_root, case) {
-                Ok(previous) => previous,
-                // **A scan that stopped at its bound arrives here, on purpose.**
-                // `previous_open_findings` refuses rather than answering with a
-                // list that stopped early — the direction `Store::spend_allowance`
-                // fails in — and this arm is the plain-language path that refusal
-                // was written for: the stage did not run, the detail says so in the
-                // error's own words, and no comparison is built from a list that
-                // was cut short. The alternative, reading what there was and
-                // warning about it, would put a number in front of a reader that
-                // says "this many findings are still open" when the truth is that
-                // SURE did not read far enough to know.
-                Err(error) => {
-                    return (
-                        None,
-                        StageOutcome::NotRun {
-                            reason: Some(NotCheckedReason::UnknownReason),
-                            detail: format!(
-                                "SURE could not read what an earlier run left open: {error}"
-                            ),
-                        },
-                    );
-                }
-            };
+        let previous_dated = match recheck_lifecycle::previous_open_findings_with_times(
+            store,
+            &run.project_root,
+            case,
+        ) {
+            Ok(previous) => previous,
+            // **A scan that stopped at its bound arrives here, on purpose.**
+            // `previous_open_findings_with_times` refuses rather than
+            // answering with a list that stopped early — the direction
+            // `Store::spend_allowance` fails in — and this arm is the
+            // plain-language path that refusal was written for: the stage
+            // did not run, the detail says so in the error's own words, and
+            // no comparison is built from a list that was cut short. The
+            // alternative, reading what there was and warning about it,
+            // would put a number in front of a reader that says "this many
+            // findings are still open" when the truth is that SURE did not
+            // read far enough to know.
+            Err(error) => {
+                return (
+                    None,
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::UnknownReason),
+                        detail: format!(
+                            "SURE could not read what an earlier run left open: {error}"
+                        ),
+                    },
+                );
+            }
+        };
+        let previous: Vec<sure_domain::finding::Finding> = previous_dated
+            .iter()
+            .map(|(finding, _)| finding.clone())
+            .collect();
 
         // **Nothing to compare is not a comparison, and it is answered as such.**
         // `reconcile` walks `previous_open`, and every entry it walks lands in
@@ -1617,6 +1625,33 @@ impl Pipeline<'_> {
                 },
             );
         }
+
+        // What SURE recorded as written since each earlier finding was stored.
+        // This is the evidence behind the contract's "changing only the test is
+        // not a repair" clause: a check-passing finding whose only recorded
+        // changes are tests stays open below. A read failure stops the stage
+        // rather than letting it close findings on evidence it could not look
+        // at — the same direction the previous-findings read fails in.
+        let writes = match recheck_lifecycle::repair_writes_since(
+            store,
+            &run.project_root,
+            case,
+            &previous_dated,
+        ) {
+            Ok(writes) => writes,
+            Err(error) => {
+                return (
+                    None,
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::UnknownReason),
+                        detail: format!(
+                            "SURE could not read which files were written since the earlier run: \
+                             {error}"
+                        ),
+                    },
+                );
+            }
+        };
 
         // Which checks have to pass before an earlier finding may close. The list
         // is `repair_impact::select_impacted_checks`'s answer — the module that
@@ -1688,13 +1723,23 @@ impl Pipeline<'_> {
             },
             run.project_state.id.clone(),
         );
-        let detail = format!(
+        let (update, kept_for_test_only) =
+            recheck_lifecycle::keep_test_only_fixes_open(update, &writes, case);
+        let mut detail = format!(
             "{} earlier finding(s) stayed open, {} resolved. A finding closes when every check \
              its repair contract named has passed in this run — or, for a candidate-driven check, \
              when this run no longer plans it because the marker it was built from is gone.",
             update.kept_open.len(),
             update.resolved.len(),
         );
+        if !kept_for_test_only.is_empty() {
+            detail.push_str(&format!(
+                " {} of them had passed their checks and stayed open because every file SURE saw \
+                 written since the earlier run is a test file: a failed check is not repaired by \
+                 changing its own test.",
+                kept_for_test_only.len()
+            ));
+        }
         (Some(update), StageOutcome::Ran { detail })
     }
 }

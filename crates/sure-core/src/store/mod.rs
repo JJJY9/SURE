@@ -630,13 +630,62 @@ impl Store {
         filter: &HistoryFilter<'_>,
         limit: usize,
     ) -> Result<Vec<StoredRecord>, StoreError> {
+        self.history_with_floor(filter, None, limit)
+    }
+
+    /// Read records written at or after `since_ms`, newest first.
+    ///
+    /// The same query as [`Store::history`] with one more condition, so that a
+    /// reader that only cares about what happened after a known moment does not
+    /// spend its `limit` on older rows. A reader that called [`Store::history`]
+    /// and filtered the result in Rust would be spending the bound on rows it
+    /// was about to discard — and, because the query is newest-first, would get
+    /// a *truncated* answer that looks exactly like a complete one (see
+    /// `recheck_lifecycle::HISTORY_SCAN_LIMIT` for why that direction matters).
+    ///
+    /// `since_ms` is inclusive: a record written at the same millisecond as the
+    /// moment asked about counts as "at or after" it. Nothing in this store
+    /// orders two writes within one millisecond; the inclusive end is the one
+    /// that cannot drop a write made in the same millisecond as the row it is
+    /// compared against.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::history`].
+    pub(crate) fn history_since(
+        &self,
+        filter: &HistoryFilter<'_>,
+        since_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredRecord>, StoreError> {
+        self.history_with_floor(filter, Some(since_ms), limit)
+    }
+
+    fn history_with_floor(
+        &self,
+        filter: &HistoryFilter<'_>,
+        since_ms: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<StoredRecord>, StoreError> {
         let (where_clause, parameters) = filter.sql();
+        let (where_clause, mut values) = match since_ms {
+            None => (where_clause, parameters),
+            Some(since_ms) => {
+                let mut values = parameters;
+                values.push(SqlValue::Integer(since_ms));
+                let clause = if where_clause.is_empty() {
+                    String::from(" WHERE written_at_ms >= ?")
+                } else {
+                    format!("{where_clause} AND written_at_ms >= ?")
+                };
+                (clause, values)
+            }
+        };
         let sql = format!(
             "SELECT id, kind, document_version, written_at_ms, project_root, \
              project_fingerprint, document FROM records{where_clause} \
              ORDER BY written_at_ms DESC, id DESC LIMIT ?"
         );
-        let mut values = parameters;
         values.push(SqlValue::Integer(limit as i64));
 
         let mut statement = self
