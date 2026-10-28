@@ -112,6 +112,18 @@ fn a_store_of_our_own() -> PathBuf {
     a_directory_of_our_own("store")
 }
 
+/// A `--settings-file` path with no file at it.
+///
+/// **A named file that does not exist is `ConfigSource::NoFile`** — SURE's own
+/// answer for a user who has no settings file — so a run given this path reads
+/// no user-level settings while the machine's real file is not consulted. The
+/// platform config directory cannot be moved by an environment variable, and a
+/// test that needed the machine to have no file would be a test about the
+/// developer's profile; this is the value the runs below name instead.
+fn settings_file_of_our_own() -> PathBuf {
+    a_directory_of_our_own("settings").join("user-settings.yaml")
+}
+
 /// A project for a check to be about, with something in it to read.
 ///
 /// Under the same `target/tmp` root as the stores and never the repository
@@ -225,6 +237,20 @@ fn run(args: &[&str]) -> Run {
 fn run_in_a_store(store: &Path, args: &[&str]) -> Run {
     let mut command = sure_in_a_store(store);
     command.args(args);
+    Run::of(
+        &command
+            .output()
+            .unwrap_or_else(|error| panic!("could not run {SURE}: {error}")),
+    )
+}
+
+/// The same, with the named (absent) user settings file and no other change.
+///
+/// For the cases that are about SURE's default answer: naming a file that does
+/// not exist is that default, whatever the machine's owner has configured.
+fn run_in_a_store_without_machine_settings(store: &Path, settings: &Path, args: &[&str]) -> Run {
+    let mut command = sure_in_a_store(store);
+    command.arg("--settings-file").arg(settings).args(args);
     Run::of(
         &command
             .output()
@@ -2728,8 +2754,14 @@ fn a_run_says_which_privacy_mode_it_was_under_and_what_it_did_about_models() {
     // arbitration between the project's file and the user's — are tested where
     // they can be set: `crates/sure-cli/src/check.rs` and
     // `crates/sure-core/src/privacy.rs`.
-    let human = run(&["check"]);
-    let machine = run(&["--format", "json", "check"]);
+    let settings = settings_file_of_our_own();
+    let human =
+        run_in_a_store_without_machine_settings(&a_store_of_our_own(), &settings, &["check"]);
+    let machine = run_in_a_store_without_machine_settings(
+        &a_store_of_our_own(),
+        &settings,
+        &["--format", "json", "check"],
+    );
     let frame: serde_json::Value =
         serde_json::from_str(machine.stdout.trim()).expect("one frame on one line");
 
@@ -3077,6 +3109,7 @@ fn a_recheck_closes_a_finding_whose_todo_the_repair_removed() {
     )
     .unwrap_or_else(|error| panic!("cannot write {}: {error}", todo.display()));
     let store = a_store_of_our_own();
+    let settings = settings_file_of_our_own();
     let path = project
         .to_str()
         .expect("this test's own directory is a UTF-8 path");
@@ -3086,7 +3119,11 @@ fn a_recheck_closes_a_finding_whose_todo_the_repair_removed() {
     };
 
     // The repair run writes the finding a later re-check has to find.
-    let repaired = run_in_a_store(&store, &["--format", "json", "repair", path]);
+    let repaired = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "repair", path],
+    );
     assert_eq!(
         repaired.status, 1,
         "`sure repair` returned {}:\n{}",
@@ -3109,7 +3146,11 @@ fn a_recheck_closes_a_finding_whose_todo_the_repair_removed() {
     )
     .unwrap_or_else(|error| panic!("cannot rewrite {}: {error}", todo.display()));
 
-    let rechecked = run_in_a_store(&store, &["--format", "json", "recheck", path]);
+    let rechecked = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "recheck", path],
+    );
     let rechecked = frame(&rechecked);
     let closed = rechecked["details"]["lifecycle"]["closed"]
         .as_array()
@@ -3441,15 +3482,18 @@ fn ingest_a_read(store: &Path, project: &Path, path: &str) -> Run {
     .to_string();
 
     let mut command = sure_in_a_store(store);
-    command.args([
-        "--format",
-        "json",
-        "hook",
-        "ingest",
-        "--source",
-        "cursor",
-        "pre-tool-use",
-    ]);
+    command
+        .arg("--settings-file")
+        .arg(settings_file_of_our_own())
+        .args([
+            "--format",
+            "json",
+            "hook",
+            "ingest",
+            "--source",
+            "cursor",
+            "pre-tool-use",
+        ]);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3474,21 +3518,11 @@ fn the_protection_mode_a_project_names_is_the_one_sure_decides_under() {
     // Both runs name a store of this test's own, and the machine's store is
     // compared before and after.
     //
-    // The mode is resolved from two layers and the other one is the user's own
-    // settings file, which no test may write. Rather than assume it holds
-    // nothing, the precondition is stated: if this machine has one, the runs
-    // below are not the experiment they say they are.
-    let user_settings = Paths::discover()
-        .expect("this machine reports a per-user location for SURE's files")
-        .user_config_file();
-    assert!(
-        !user_settings.is_file(),
-        "this machine has a user settings file at {}, and a protection mode in it would be \
-         answering instead of the project's own file. These runs are about the project layer: on a \
-         machine with user settings, read what they hold before believing the standard case below.",
-        user_settings.display()
-    );
-
+    // The mode is resolved from two layers, and the other one is the user's
+    // own settings file, which no test may write. `ingest_a_read` names a file
+    // that does not exist, which SURE reads as "no user file" (`ConfigSource::
+    // NoFile`), so the project's layer is the one answering on every machine —
+    // including one whose owner has a real file.
     let machine = the_store_on_this_machine();
     let store = a_store_of_our_own();
 
