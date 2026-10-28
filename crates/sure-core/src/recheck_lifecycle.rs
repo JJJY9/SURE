@@ -905,9 +905,7 @@ fn repair_writes_since_within(
                 FileChange::Unknown => writes.complete = false,
                 FileChange::InProject(relative) => {
                     writes.files.push(relative.clone());
-                    if classify_path(Path::new(relative), Path::new(""), None)
-                        != CandidateContext::Test
-                    {
+                    if !is_test_file(relative) {
                         writes.tests_only = false;
                     }
                 }
@@ -968,6 +966,52 @@ fn change_of(
         Some(relative) => FileChange::InProject(relative),
         None => FileChange::Outside,
     }
+}
+
+/// Whether a project-relative path is a test file — the question the contract
+/// clause *"changing only the test or assertion"* turns on.
+///
+/// [`classify_path`] answers a different and deliberately stricter question:
+/// which context a *candidate finding* came from. Its own tests pin
+/// `src/test_helper.rs` as product, because a helper in product code that
+/// happens to be named `test_…` must not silently demote a finding about it.
+/// The repair guard needs the other direction: a root-level `test_totals.py` is
+/// a pytest test, and reading it as product lets "changed only the test" close
+/// a finding unnoticed — measured in the 2026-10-28 MiQi repair-loop retest,
+/// where the subagent edited exactly that file and the finding still closed.
+///
+/// So this keeps [`classify_path`]'s answer and adds the file-name conventions
+/// that are test code by name: `test_…`, `…_test`, `…-test` and the bare
+/// `test`/`tests` stem, plus pytest's `conftest.py`. The stem has to match a
+/// whole segment, so `testing.py`, `contest.py` and `latest.py` stay product.
+///
+/// The two rules disagree on purpose for a file like `src/test_helper.rs`,
+/// which is product to a candidate finding and test code to this guard. The
+/// directions are not symmetric: reading a product file as a test keeps a
+/// finding open (visible and correctable), while reading a test file as product
+/// closes it — the false green this guard exists to prevent.
+fn is_test_file(relative: &str) -> bool {
+    let path = Path::new(relative);
+    if classify_path(path, Path::new(""), None) == CandidateContext::Test {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    if lower == "conftest.py" {
+        return true;
+    }
+    // The stem is the part before the first extension: `test_totals` from
+    // `test_totals.py`, `totals_test` from `totals_test.py`. `classify_path`
+    // already reads dotted segments (`foo.test.js`), so this is only about
+    // underscore- and hyphen-joined names.
+    let stem = lower.split('.').next().unwrap_or(lower.as_str());
+    matches!(stem, "test" | "tests")
+        || stem.starts_with("test_")
+        || stem.starts_with("test-")
+        || stem.ends_with("_test")
+        || stem.ends_with("-test")
 }
 
 /// `path` relative to `project_root` with `/` separators, or `None` when it is
@@ -2537,6 +2581,57 @@ mod tests {
 
         assert!(reopened.is_empty());
         assert_eq!(update.resolved.len(), 1);
+    }
+
+    /// The regression the 2026-10-28 MiQi repair-loop retest found: a pytest
+    /// test at the project root is `test_totals.py`, which `classify_path` reads
+    /// as product. The guard has to recognise it or "edited only the test"
+    /// closes the finding.
+    #[test]
+    fn a_root_level_pytest_test_file_counts_as_the_test() {
+        let store = store_in("recheck-pytest-style");
+        let project = "C:/projects/pyt";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+        write(&store, project, "test_totals.py");
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert_eq!(reopened.len(), 1);
+        assert!(update.resolved.is_empty());
+        assert_eq!(update.kept_open.len(), 1);
+    }
+
+    /// `classify_path`'s own rule stays the stricter one — a helper named
+    /// `test_…` in product code is not a production finding's context — but for
+    /// the guard the safe direction is wider: a test helper edited alone is
+    /// still not the behaviour the check was about, so it counts as test code.
+    #[test]
+    fn a_file_is_a_test_by_its_name_only_when_the_whole_stem_says_so() {
+        for test in [
+            "test_totals.py",
+            "totals_test.py",
+            "tests/test_totals.py",
+            "test/check.js",
+            "foo.test.ts",
+            "foo.spec.ts",
+            "test-utils.js",
+            "conftest.py",
+            "tests.rs",
+            "src/test_helper.rs",
+        ] {
+            assert!(is_test_file(test), "{test} is a test file");
+        }
+        for product in [
+            "src/main.rs",
+            "testing.py",
+            "contest.py",
+            "latest.py",
+            "pom.xml",
+        ] {
+            assert!(!is_test_file(product), "{product} is not a test file");
+        }
     }
 
     /// The path arithmetic the read depends on: harness text, both separators,
