@@ -1848,7 +1848,7 @@ fn tests_not_run_claim_is_cannot_confirm_with_no_evidence_and_the_control_flips_
                 BuildTestKind::Test,
                 "{id}: the refused event no longer projects to a test run"
             );
-            assert_eq!(target, "unit tests", "{id}: the target changed");
+            assert_eq!(target, "pytest unit tests", "{id}: the target changed");
             assert!(success, "{id}: the summary changed");
         }
         other => panic!(
@@ -2027,7 +2027,7 @@ fn a_write_whose_own_timestamp_cannot_be_read_does_not_supersede_the_run() {
         DeclaredEvent {
             event_type: "test.finished".to_owned(),
             timestamp: "2026-06-30T23:59:58Z".to_owned(),
-            payload: json!({"target": "unit tests", "success": true}),
+            payload: json!({"target": "pytest unit tests", "success": true}),
         },
         DeclaredEvent {
             event_type: "file.write".to_owned(),

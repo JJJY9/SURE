@@ -348,6 +348,11 @@ pub fn start(
     // something having actually looked.
     let mut child_state;
 
+    // A browser that stopped with a *successful* status, kept so that the
+    // deadline can report the exit rather than an absence. See the arm below
+    // for why a clean exit is not treated as the end of the attempt.
+    let mut exited_cleanly: Option<std::process::ExitStatus> = None;
+
     loop {
         if cancellation.is_cancelled() {
             let mut child = child;
@@ -366,18 +371,39 @@ pub fn start(
                     profile,
                     port,
                     browser_path,
-                    reaped: false,
+                    // A starter that already exited was reaped by `try_wait`;
+                    // `Drop` must not signal a process identifier the operating
+                    // system may have handed to somebody else. The browser that
+                    // wrote the port is shut down over the debugging connection.
+                    reaped: exited_cleanly.is_some(),
                 });
             }
             None => {
-                // A browser that has already stopped will not write the file,
-                // and waiting out the whole budget to say so wastes the caller's
-                // time to learn something already known. **This is also the
-                // observation the deadline arm reports**: the three states are
-                // kept apart rather than collapsed, because "it had stopped" and
-                // "it was still running" and "the operating system would not say"
-                // are three different sentences about three different machines.
+                // A browser that stopped with a **failure** status will not
+                // write the file, and waiting out the whole budget to say so
+                // wastes the caller's time to learn something already known.
+                // **This is also the observation the deadline arm reports**: the
+                // three states are kept apart rather than collapsed, because
+                // "it had stopped" and "it was still running" and "the
+                // operating system would not say" are three different sentences
+                // about three different machines.
+                //
+                // **A clean exit is different, and measured.** Edge (and Chrome)
+                // on Windows can have the process SURE started hand the task to
+                // another one and exit 0 before that one writes
+                // `DevToolsActivePort`: measured on this fork's machine, the
+                // starter was reaped at 0.066 s while the port file appeared a
+                // moment later. Treating that exit as final is a launch failure
+                // on a browser that is in fact starting, so the wait continues
+                // until the port appears or the budget runs out; the status is
+                // kept and reported at the deadline when the file never comes.
+                // The debugging connection's own `Browser.close` is what shuts
+                // the handed-off browser down, not this child handle.
                 match child.try_wait() {
+                    Ok(Some(status)) if status.success() => {
+                        exited_cleanly = Some(status);
+                        child_state = ChildState::Running;
+                    }
                     Ok(Some(status)) => {
                         let complaint = complaint_text(&complaint);
                         let _ = std::fs::remove_dir_all(&profile);
@@ -393,6 +419,15 @@ pub fn start(
             }
         }
         if Instant::now() >= deadline {
+            if let Some(status) = exited_cleanly {
+                let complaint = complaint_text(&complaint);
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(LaunchError::Exited {
+                    program: program.to_path_buf(),
+                    status: status.to_string(),
+                    complaint,
+                });
+            }
             // **Everything reported below is read here, at the deadline, and
             // before anything is tidied up.** That ordering is the whole point:
             // stopping a browser takes most of a second on Windows, and a figure
@@ -774,6 +809,49 @@ mod tests {
             error.to_string().contains("stopped before reporting"),
             "{error}"
         );
+    }
+
+    /// **A clean exit is not the end of the attempt.** A browser on Windows can
+    /// hand the work to another process and exit 0 before that process writes
+    /// `DevToolsActivePort`; treating the exit as final fails a launch that is
+    /// still in progress. The program here exits 0 immediately and never writes
+    /// the file, so the launcher must spend the rest of its budget before
+    /// reporting the exit — the timing is the assertion.
+    #[test]
+    fn a_program_that_exits_cleanly_gets_the_rest_of_the_budget_for_a_handed_off_port() {
+        #[cfg(windows)]
+        let program = {
+            let directory =
+                std::env::temp_dir().join(format!("sure-exit-zero-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("exit-zero.cmd");
+            std::fs::write(&path, "@exit /b 0\r\n").expect("written");
+            path
+        };
+        #[cfg(not(windows))]
+        let program = std::path::PathBuf::from("/bin/true");
+
+        let budget = Duration::from_millis(600);
+        let started = std::time::Instant::now();
+        let error = start(&program, budget, &Cancellation::default())
+            .expect_err("a program that never writes a port is an error");
+        let waited = started.elapsed();
+
+        assert!(
+            matches!(error, LaunchError::Exited { .. }),
+            "a clean exit was reported as something else: {error:?}"
+        );
+        assert!(
+            waited >= Duration::from_millis(450),
+            "a clean exit was treated as final after {waited:?}; the process it handed \
+             the work to never got the rest of the budget"
+        );
+
+        #[cfg(windows)]
+        {
+            let _ =
+                std::fs::remove_dir_all(program.parent().expect("the program is in a directory"));
+        }
     }
 
     /// **The sentence for a wait that ran out reports what was observed and

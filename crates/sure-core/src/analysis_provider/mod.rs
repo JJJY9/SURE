@@ -320,6 +320,12 @@ pub struct OpenAiCompatibleAnalyzer {
     api_key: Option<String>,
     #[cfg(test)]
     transport: Option<Box<TransportFn>>,
+    /// Whether the environment is consulted for a key. A test that is about the
+    /// missing-key path must not depend on whether the machine running it has
+    /// `SURE_OPENAI_API_KEY` set: `std::env::remove_var` is `unsafe` in edition
+    /// 2024, so the fallback is turned off for one value instead.
+    #[cfg(test)]
+    read_environment_key: bool,
 }
 
 #[cfg(test)]
@@ -348,6 +354,8 @@ impl OpenAiCompatibleAnalyzer {
             api_key: None,
             #[cfg(test)]
             transport: None,
+            #[cfg(test)]
+            read_environment_key: true,
         }
     }
 
@@ -367,7 +375,30 @@ impl OpenAiCompatibleAnalyzer {
             model,
             api_key: Some(api_key),
             transport: Some(Box::new(transport)),
+            read_environment_key: true,
         }
+    }
+
+    /// Build a provider for the missing-key test, with no way to fall back to
+    /// the machine's environment.
+    #[cfg(test)]
+    fn without_an_environment_key(endpoint: String, model: Option<String>) -> Self {
+        Self {
+            endpoint,
+            model,
+            api_key: None,
+            transport: None,
+            read_environment_key: false,
+        }
+    }
+
+    /// The key the environment supplies, when this value reads one.
+    fn environment_key(&self) -> Option<String> {
+        #[cfg(test)]
+        if !self.read_environment_key {
+            return None;
+        }
+        std::env::var(OPENAI_API_KEY_VAR).ok()
     }
 
     fn send_request(
@@ -399,7 +430,7 @@ impl Analyzer for OpenAiCompatibleAnalyzer {
         let api_key = self
             .api_key
             .clone()
-            .or_else(|| std::env::var(OPENAI_API_KEY_VAR).ok())
+            .or_else(|| self.environment_key())
             .ok_or_else(|| {
                 openai_failed(
                     "API key is not configured; set SURE_OPENAI_API_KEY in the environment that \
@@ -940,7 +971,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_analyzer_reports_missing_api_key() {
-        let analyzer = OpenAiCompatibleAnalyzer::new(
+        let analyzer = OpenAiCompatibleAnalyzer::without_an_environment_key(
             "https://models.example.com/v1".to_owned(),
             Some("test-model".to_owned()),
         );
