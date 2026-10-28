@@ -16,6 +16,7 @@ use sure_domain::finding::{Finding, FindingStatus};
 use sure_domain::ids::{CheckId, FindingId, FingerprintId};
 use sure_domain::status::{CheckResult, CheckStatus};
 
+use crate::candidate_context::{CandidateContext, classify_path};
 use crate::paths::CaseSensitivity;
 use crate::store::{RecordKind, Store, StoreError};
 
@@ -629,6 +630,36 @@ pub fn previous_open_findings(
     project_root: &str,
     case: CaseSensitivity,
 ) -> Result<Vec<Finding>, HistoryReadError> {
+    Ok(
+        previous_open_findings_with_times(store, project_root, case)?
+            .into_iter()
+            .map(|(finding, _)| finding)
+            .collect(),
+    )
+}
+
+/// The same read as [`previous_open_findings`], with the moment each finding
+/// was written down.
+///
+/// The time is the `written_at_ms` of the **row the finding was read from** —
+/// under the deduplication [`previous_open_findings`] documents, the newest row
+/// for that finding — not the finding's own timestamp, which a stored document
+/// does not carry. It is what [`repair_writes_since`] measures from: a file
+/// written before that row was stored was written before the run that last saw
+/// this finding open, and is not part of any repair of it.
+///
+/// One time per finding, in the same order and with the same deduplication as
+/// [`previous_open_findings`], because the two are one read and must not be able
+/// to disagree about which rows exist.
+///
+/// # Errors
+///
+/// As [`previous_open_findings`].
+pub fn previous_open_findings_with_times(
+    store: &Store,
+    project_root: &str,
+    case: CaseSensitivity,
+) -> Result<Vec<(Finding, i64)>, HistoryReadError> {
     previous_open_findings_within(store, project_root, case, HISTORY_SCAN_LIMIT)
 }
 
@@ -651,7 +682,7 @@ fn previous_open_findings_within(
     project_root: &str,
     case: CaseSensitivity,
     limit: usize,
-) -> Result<Vec<Finding>, HistoryReadError> {
+) -> Result<Vec<(Finding, i64)>, HistoryReadError> {
     let filter = crate::store::HistoryFilter {
         project_fingerprint: None,
         kind: Some(RecordKind::Document(
@@ -702,9 +733,372 @@ fn previous_open_findings_within(
         {
             continue;
         }
-        findings.push(finding);
+        findings.push((finding, record.written_at_ms));
     }
     Ok(findings)
+}
+
+/// How many stored events one repair-write read walks.
+///
+/// A bound for the same reason [`HISTORY_SCAN_LIMIT`] has one: this is a read of
+/// a store that another project's sessions share, and the project filter runs in
+/// Rust after the limit. It is larger than `HISTORY_SCAN_LIMIT` because it counts
+/// *events*, and one AI session records far more events than findings — the MiQi
+/// acceptance runs of 2026-10-27 to 2026-10-28 recorded more than a thousand
+/// session events for a handful of findings.
+///
+/// **Reaching it turns the filter off rather than answering short.** A
+/// [`RepairWrites`] whose `complete` is false is never [`RepairWrites::is_test_only`],
+/// so a truncated scan leaves every finding's status exactly as the check results
+/// made it — the behaviour before this filter existed. It does not close
+/// anything the evidence in hand does not cover, and it does not invent a
+/// refusal either.
+pub const REPAIR_WRITE_SCAN_LIMIT: usize = 10_000;
+
+/// What SURE recorded as written for a project since a finding was stored.
+///
+/// `files` holds the project-relative paths of the writes and deletions SURE
+/// could place inside the project, oldest first. `tests_only` is whether every
+/// one of those paths is a test file by [`classify_path`]'s reading — the clause
+/// in a repair contract is about changing the *test*, so a write SURE reads as
+/// anything else counts against it. `complete` is whether the read could account
+/// for every event it examined: a malformed event document or a scan that
+/// stopped at [`REPAIR_WRITE_SCAN_LIMIT`] leaves it false, because a list that
+/// may be short cannot support the statement "only tests changed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairWrites {
+    /// Project-relative paths of files written or deleted, oldest first.
+    pub files: Vec<String>,
+    /// Whether every recorded change is a test file.
+    pub tests_only: bool,
+    /// Whether the read could account for every event in the window.
+    pub complete: bool,
+}
+
+impl RepairWrites {
+    /// Whether SURE positively saw test files changed and nothing else — at
+    /// least one write, every one of them a test, and a complete read.
+    ///
+    /// An empty list is not this: with nothing recorded, SURE cannot tell a real
+    /// fix from one that was never observed, and this filter says nothing about
+    /// it. `complete` has to be true for the same reason in the other direction:
+    /// a list that may be missing the production write must not be read as one
+    /// that contains none.
+    #[must_use]
+    pub fn is_test_only(&self) -> bool {
+        self.complete && self.tests_only && !self.files.is_empty()
+    }
+}
+
+/// Read the file changes SURE recorded for `project_root` since each earlier
+/// finding was stored.
+///
+/// The changes are `file.*` events — writes, edits and deletions as the
+/// normalizers name them (`file.write`, `file.written`) — because those are the
+/// only recorded facts that say which files a repair touched. A file *read* is
+/// not a change, and an event that names no path cannot be placed and makes that
+/// finding's entry incomplete rather than being guessed at.
+///
+/// Events are matched to this project by the record's own `project_root`, the
+/// same rule [`crate::claim_checker`] uses when it asks which events support a
+/// claim, and the same `case`. A finding's window opens at the moment its row was
+/// stored ([`previous_open_findings_with_times`]): a write recorded before that
+/// was made before the run that last saw the finding open, and is not part of a
+/// repair of it. The window is inclusive at the bound because nothing in the
+/// store orders two rows within one millisecond.
+///
+/// # Errors
+///
+/// [`HistoryReadError::Store`] when the store cannot answer the query. Malformed
+/// event documents are not an error here: they set `complete = false` for the
+/// findings whose window contains them, which turns the filter off for exactly
+/// the findings whose evidence could not be read.
+pub fn repair_writes_since(
+    store: &Store,
+    project_root: &str,
+    case: CaseSensitivity,
+    previous_open: &[(Finding, i64)],
+) -> Result<HashMap<FindingKey, RepairWrites>, HistoryReadError> {
+    repair_writes_since_within(
+        store,
+        project_root,
+        case,
+        previous_open,
+        REPAIR_WRITE_SCAN_LIMIT,
+    )
+}
+
+/// The same read, with the bound supplied instead of the constant.
+///
+/// Private, and the bound is the only reason it exists — the same arrangement
+/// [`previous_open_findings_within`] documents: the branch this read has to get
+/// right is *reaching* the bound, a test cannot reach 10 000 events cheaply, and
+/// a test that drove a copy of this code instead of the code itself could agree
+/// with the copy and not with production.
+fn repair_writes_since_within(
+    store: &Store,
+    project_root: &str,
+    case: CaseSensitivity,
+    previous_open: &[(Finding, i64)],
+    limit: usize,
+) -> Result<HashMap<FindingKey, RepairWrites>, HistoryReadError> {
+    let mut writes: HashMap<FindingKey, RepairWrites> = HashMap::new();
+    for (finding, _) in previous_open {
+        if let Some(key) = FindingKey::from_finding(finding, case) {
+            writes.insert(
+                key,
+                RepairWrites {
+                    files: Vec::new(),
+                    tests_only: true,
+                    complete: true,
+                },
+            );
+        }
+    }
+    let Some(earliest) = previous_open.iter().map(|(_, time)| *time).min() else {
+        return Ok(writes);
+    };
+    if writes.is_empty() {
+        // No earlier finding has an anchor, so no finding could be resolved or
+        // could be kept open for this reason either. Do not spend the read.
+        return Ok(writes);
+    }
+
+    let filter = crate::store::HistoryFilter {
+        project_fingerprint: None,
+        kind: Some(RecordKind::Document(
+            sure_protocol::documents::DocumentKind::Event,
+        )),
+        include_recordings: false,
+    };
+    let records = store.history_since(&filter, earliest, limit)?;
+    let truncated = records.len() >= limit;
+
+    for record in &records {
+        if !record
+            .project_root
+            .as_deref()
+            .is_some_and(|recorded| same_project_root(recorded, project_root, case))
+        {
+            continue;
+        }
+        let change = match record.decode::<sure_protocol::event::EventEnvelope>() {
+            Ok(envelope) => change_of(&envelope, project_root, case),
+            // An event this build cannot read may name any file. Mark the
+            // windows it falls in as incomplete rather than skipping it: a
+            // skipped write could be the production change that makes a test-only
+            // list read as test-only.
+            Err(_) => FileChange::Unknown,
+        };
+        for (finding, since_ms) in previous_open {
+            if record.written_at_ms < *since_ms {
+                continue;
+            }
+            let Some(key) = FindingKey::from_finding(finding, case) else {
+                continue;
+            };
+            let Some(writes) = writes.get_mut(&key) else {
+                continue;
+            };
+            match &change {
+                FileChange::Ignored | FileChange::Outside => {}
+                FileChange::Unknown => writes.complete = false,
+                FileChange::InProject(relative) => {
+                    writes.files.push(relative.clone());
+                    if classify_path(Path::new(relative), Path::new(""), None)
+                        != CandidateContext::Test
+                    {
+                        writes.tests_only = false;
+                    }
+                }
+            }
+        }
+    }
+
+    if truncated {
+        for writes in writes.values_mut() {
+            writes.complete = false;
+        }
+    }
+    Ok(writes)
+}
+
+/// One event's answer to *did this change a file, and which one*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileChange {
+    /// Not a file event, or a file event that reports a read.
+    Ignored,
+    /// The event names no path, so its change cannot be placed.
+    Unknown,
+    /// A change to a path outside the project.
+    Outside,
+    /// A change to this project-relative path, with `/` separators.
+    InProject(String),
+}
+
+fn change_of(
+    envelope: &sure_protocol::event::EventEnvelope,
+    project_root: &str,
+    case: CaseSensitivity,
+) -> FileChange {
+    let event_type = envelope.event_type.as_str();
+    if !event_type.contains("file") {
+        return FileChange::Ignored;
+    }
+    // The same reading `recording_projection::project_file` applies to a file
+    // event, widened with the names the normalizers actually produce for a
+    // change: MiQi writes `file.written` and Cursor writes `file.edited`, and an
+    // edit is as much a change as a write. `file.read` and the other file events
+    // a harness may send stay reads.
+    let payload = &envelope.payload;
+    let deleted = payload.get("deleted").and_then(serde_json::Value::as_bool) == Some(true)
+        || event_type.contains("delete");
+    let written = payload.get("written").and_then(serde_json::Value::as_bool) == Some(true)
+        || payload.get("operation").and_then(serde_json::Value::as_str) == Some("write")
+        || ["write", "edit", "creat", "modif", "chang"]
+            .iter()
+            .any(|marker| event_type.contains(marker));
+    if !deleted && !written {
+        return FileChange::Ignored;
+    }
+    let Some(path) = payload.get("path").and_then(serde_json::Value::as_str) else {
+        return FileChange::Unknown;
+    };
+    match relative_to_project(path, project_root, case) {
+        Some(relative) => FileChange::InProject(relative),
+        None => FileChange::Outside,
+    }
+}
+
+/// `path` relative to `project_root` with `/` separators, or `None` when it is
+/// outside the project or cannot be placed inside it.
+///
+/// The path arrives as text from a harness, so both separators may appear and
+/// the harness's drive and folder names may be spelt with different case than
+/// the root's. Case is compared by the same [`CaseSensitivity`] rule the rest of
+/// this module matches paths by, except that a drive letter is always compared
+/// without case — Windows has no `D:` distinct from `d:` and that is not a
+/// case-sensitivity fact. `..` segments are folded where they can be; a path
+/// that climbs out of the root is outside the project, because a write there
+/// cannot be a change to this project's product code.
+fn relative_to_project(path: &str, project_root: &str, case: CaseSensitivity) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let root = project_root.replace('\\', "/");
+    let mut rest = path_components(&path);
+    if is_absolute(&path) {
+        if !is_absolute(&root) {
+            return None;
+        }
+        let root_parts = path_components(&root);
+        if root_parts.is_empty() || rest.len() < root_parts.len() {
+            return None;
+        }
+        if !root_parts
+            .iter()
+            .zip(rest.iter())
+            .all(|(a, b)| same_component(a, b, case))
+        {
+            return None;
+        }
+        rest = rest[root_parts.len()..].to_vec();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest {
+        if part == ".." {
+            parts.pop()?;
+        } else {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+fn path_components(text: &str) -> Vec<&str> {
+    text.split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect()
+}
+
+fn is_absolute(text: &str) -> bool {
+    text.starts_with('/')
+        || text
+            .split('/')
+            .next()
+            .is_some_and(|first| first.len() == 2 && first.ends_with(':'))
+}
+
+fn same_component(a: &str, b: &str, case: CaseSensitivity) -> bool {
+    if a.len() == 2 && b.len() == 2 && a.ends_with(':') && b.ends_with(':') {
+        return a.eq_ignore_ascii_case(b);
+    }
+    match case {
+        CaseSensitivity::Sensitive => a == b,
+        CaseSensitivity::Insensitive => a.to_lowercase() == b.to_lowercase(),
+    }
+}
+
+/// Keep a finding open when the only repair SURE saw was to its test.
+///
+/// [`reconcile`] closes a finding when every check its repair contract named
+/// passed. For a finding whose strongest evidence is a deterministic check, a
+/// passing check is not enough on its own when every file SURE recorded as
+/// written since the earlier run is a test file: the contract forbids changing
+/// the test rather than the behaviour, and a re-check that accepted that would
+/// green a repair which changed nothing the check was about. This is where that
+/// contract clause is enforced rather than stated.
+///
+/// The move is deliberately narrow:
+///
+/// - only findings whose contract carries that clause
+///   ([`sure_domain::repair::requires_production_change`]) are considered;
+/// - only when [`RepairWrites::is_test_only`] holds — SURE saw at least one
+///   write, every write it saw is a test file, and it read every event it
+///   looked at. With no recorded change, or with a write it could not place,
+///   SURE has no basis to contradict the check result and the close stands;
+/// - a single recorded write SURE reads as anything other than a test is enough
+///   for the close to stand, so a real fix is never held open by an
+///   accompanying test edit.
+///
+/// Returns the update with the affected findings reopened (their status is the
+/// only field changed) and the reopened findings themselves, so the stage can
+/// say how many there were and why.
+#[must_use]
+pub fn keep_test_only_fixes_open(
+    mut update: LifecycleUpdate,
+    writes: &HashMap<FindingKey, RepairWrites>,
+    case: CaseSensitivity,
+) -> (LifecycleUpdate, Vec<Finding>) {
+    let mut reopened = Vec::new();
+    let mut still_resolved = Vec::new();
+    for finding in std::mem::take(&mut update.resolved) {
+        let test_only = sure_domain::repair::requires_production_change(&finding)
+            && FindingKey::from_finding(&finding, case)
+                .and_then(|key| writes.get(&key))
+                .is_some_and(RepairWrites::is_test_only);
+        if !test_only {
+            still_resolved.push(finding);
+            continue;
+        }
+        if let Some(slot) = update.findings.iter_mut().find(|f| f.id == finding.id) {
+            slot.status = FindingStatus::Open;
+        }
+        let open = Finding {
+            status: FindingStatus::Open,
+            ..finding
+        };
+        update.kept_open.push(open.clone());
+        reopened.push(open);
+    }
+    update.resolved = still_resolved;
+
+    let by_severity = |finding: &Finding| std::cmp::Reverse(finding.severity);
+    update.findings.sort_by_key(by_severity);
+    update.kept_open.sort_by_key(by_severity);
+    update.resolved.sort_by_key(by_severity);
+    (update, reopened)
 }
 
 /// Persist a run's findings and check results so later runs can compare.
@@ -1770,7 +2164,7 @@ mod tests {
             1,
             "the project's open finding is in the store, beyond the two newer rows"
         );
-        assert_eq!(read_to_the_end[0].title, "Email not sent");
+        assert_eq!(read_to_the_end[0].0.title, "Email not sent");
 
         for limit in [2, 3] {
             match read(limit) {
@@ -1868,6 +2262,332 @@ mod tests {
         )
         .expect("a bound past the end of the store is not a stop");
         assert_eq!(read_to_the_end.len(), 1);
-        assert_eq!(read_to_the_end[0].title, "Email not sent");
+        assert_eq!(read_to_the_end[0].0.title, "Email not sent");
+    }
+
+    // ---- What a repair wrote since the earlier run -------------------------
+
+    use crate::harness_event::IngestedEvent;
+    use crate::session_event_store::SessionEventStore;
+    use sure_domain::ids::EventId;
+    use sure_protocol::PROTOCOL_VERSION;
+    use sure_protocol::documents::DocumentKind;
+    use sure_protocol::event::EventEnvelope;
+
+    /// Store one harness event for `project`, the way a plugin's hook does.
+    fn record_event(store: &Store, project: &str, event_type: &str, payload: serde_json::Value) {
+        let envelope = EventEnvelope::new("miqi", event_type, "2026-10-28T09:10:56.827Z")
+            .with_session_id("session-42")
+            .with_project_root(project)
+            .with_payload(payload);
+        let ingested = IngestedEvent {
+            envelope,
+            protocol_version: PROTOCOL_VERSION,
+            document_kind: DocumentKind::Event,
+        };
+        SessionEventStore::new(store)
+            .persist(&ingested, project, &fingerprint(), &EventId::generate())
+            .expect("the event is stored");
+    }
+
+    fn write(store: &Store, project: &str, path: &str) {
+        record_event(
+            store,
+            project,
+            "file.written",
+            serde_json::json!({"path": path, "written": true}),
+        );
+    }
+
+    /// Store an earlier run with one open finding, read it back the way stage 12
+    /// does, and reconcile it against a re-check that now passes.
+    ///
+    /// The caller records the repair's events after this returns.
+    fn earlier_finding_with_a_passing_recheck(
+        store: &Store,
+        project: &str,
+    ) -> (Vec<(Finding, i64)>, LifecycleUpdate) {
+        let previous = finding_with("run the Java tests", "pom.xml", FindingStatus::Open);
+        store_run(
+            store,
+            project,
+            &fingerprint(),
+            std::slice::from_ref(&previous),
+            &[],
+        )
+        .expect("the earlier run is stored");
+        let dated = previous_open_findings_with_times(store, project, CaseSensitivity::Sensitive)
+            .expect("the earlier findings are read");
+        let earlier: Vec<Finding> = dated.iter().map(|(f, _)| f.clone()).collect();
+        let recheck = CheckId::generate();
+        let update = reconcile(
+            LifecycleInputs {
+                previous_open: &earlier,
+                current_findings: &[],
+                check_results: &[CheckResult::pass(
+                    recheck.clone(),
+                    "run the Java tests",
+                    Severity::MustFix,
+                    true,
+                    EvidenceClass::DeterministicCheck,
+                    another_fingerprint(),
+                )],
+                rechecks: &[(earlier[0].id.clone(), vec![recheck])],
+                planned: &[],
+                case: CaseSensitivity::Sensitive,
+            },
+            another_fingerprint(),
+        );
+        (dated, update)
+    }
+
+    /// The measured 2026-10-28 MiQi case: a failing Maven test, a repair that
+    /// changed only `AppTest.java`, and a re-check the changed assertion made
+    /// pass. The check passing is not enough; the finding stays open because
+    /// nothing but the test was changed.
+    #[test]
+    fn a_check_failure_is_not_closed_by_editing_only_its_test() {
+        let store = store_in("recheck-test-only-repair");
+        let project = "C:/projects/maven";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+        assert_eq!(
+            update.resolved.len(),
+            1,
+            "without the write evidence, a passing check closes the finding"
+        );
+
+        write(&store, project, "src/test/java/com/example/AppTest.java");
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert_eq!(reopened.len(), 1);
+        assert!(update.resolved.is_empty());
+        assert_eq!(update.kept_open.len(), 1);
+        assert_eq!(update.kept_open[0].title, "run the Java tests");
+        assert_eq!(update.findings.len(), 1);
+        assert_eq!(update.findings[0].status, FindingStatus::Open);
+    }
+
+    /// The control: as soon as one recorded write is not a test file, the check
+    /// result is enough again. An accompanying test edit must not hold a real
+    /// fix open.
+    ///
+    /// `src/main/java/com/example/App.java` is deliberately the Maven archetype
+    /// path: `classify_path` reads the `example` package directory as example
+    /// material, so this test also pins that the guard only fires on a *test*
+    /// file and does not claim a production path is a test.
+    #[test]
+    fn a_recorded_write_outside_the_test_lets_the_check_close_the_finding() {
+        let store = store_in("recheck-production-repair");
+        let project = "C:/projects/maven";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+
+        write(&store, project, "src/test/java/com/example/AppTest.java");
+        write(&store, project, "src/main/java/com/example/App.java");
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert!(reopened.is_empty(), "{writes:?}");
+        assert_eq!(update.resolved.len(), 1);
+        assert!(update.kept_open.is_empty());
+    }
+
+    /// A file write recorded before the earlier run wrote its finding down is not
+    /// part of any repair: the window opens at the finding's own row.
+    #[test]
+    fn writes_from_before_the_earlier_run_are_not_part_of_the_repair() {
+        let store = store_in("recheck-writes-before");
+        let project = "C:/projects/maven";
+        write(&store, project, "src/test/java/com/example/AppTest.java");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert!(reopened.is_empty());
+        assert_eq!(
+            update.resolved.len(),
+            1,
+            "a write made before the finding was stored cannot explain its repair"
+        );
+    }
+
+    /// Reading a test file is not changing it.
+    #[test]
+    fn a_recorded_read_is_not_a_repair() {
+        let store = store_in("recheck-read-only");
+        let project = "C:/projects/maven";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+
+        record_event(
+            &store,
+            project,
+            "file.read",
+            serde_json::json!({"path": "src/test/java/com/example/AppTest.java"}),
+        );
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert!(reopened.is_empty());
+        assert_eq!(update.resolved.len(), 1);
+    }
+
+    /// Another project's write is not this project's repair, however much of the
+    /// store it shares.
+    #[test]
+    fn an_event_for_another_project_does_not_hold_this_finding_open() {
+        let store = store_in("recheck-other-project-write");
+        let project = "C:/projects/maven";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+
+        write(
+            &store,
+            "C:/projects/other",
+            "src/test/java/com/example/AppTest.java",
+        );
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert!(reopened.is_empty());
+        assert_eq!(update.resolved.len(), 1);
+    }
+
+    /// A scan that reached its bound may be missing the production write, so it
+    /// must not be read as proof that no product file changed.
+    #[test]
+    fn a_scan_that_stops_at_its_bound_does_not_rule_out_a_production_write() {
+        let store = store_in("recheck-write-scan-bound");
+        let project = "C:/projects/maven";
+        let (dated, update) = earlier_finding_with_a_passing_recheck(&store, project);
+        write(&store, project, "src/test/java/com/example/AppTest.java");
+
+        let writes =
+            repair_writes_since_within(&store, project, CaseSensitivity::Sensitive, &dated, 1)
+                .expect("the read answers");
+        let entry = writes
+            .get(&FindingKey::from_finding(&dated[0].0, CaseSensitivity::Sensitive).expect("key"))
+            .expect("the finding is in the map");
+        assert!(
+            !entry.complete,
+            "a scan that stopped at its bound is incomplete"
+        );
+
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+        assert!(reopened.is_empty());
+        assert_eq!(update.resolved.len(), 1);
+    }
+
+    /// A finding whose strongest evidence is not a deterministic check does not
+    /// carry the "do not change the test" clause, and the guard must not invent
+    /// one for it.
+    #[test]
+    fn a_finding_that_is_not_a_check_failure_is_not_held_open_this_way() {
+        let store = store_in("recheck-observed-fact");
+        let project = "C:/projects/maven";
+        let mut previous = finding_with("run the Java tests", "pom.xml", FindingStatus::Open);
+        previous.evidence[0].class = EvidenceClass::ObservedFact;
+        store_run(
+            &store,
+            project,
+            &fingerprint(),
+            std::slice::from_ref(&previous),
+            &[],
+        )
+        .expect("the earlier run is stored");
+        let dated = previous_open_findings_with_times(&store, project, CaseSensitivity::Sensitive)
+            .expect("the earlier findings are read");
+        let earlier: Vec<Finding> = dated.iter().map(|(f, _)| f.clone()).collect();
+        let recheck = CheckId::generate();
+        let update = reconcile(
+            LifecycleInputs {
+                previous_open: &earlier,
+                current_findings: &[],
+                check_results: &[CheckResult::pass(
+                    recheck.clone(),
+                    "run the Java tests",
+                    Severity::MustFix,
+                    true,
+                    EvidenceClass::ObservedFact,
+                    another_fingerprint(),
+                )],
+                rechecks: &[(earlier[0].id.clone(), vec![recheck])],
+                planned: &[],
+                case: CaseSensitivity::Sensitive,
+            },
+            another_fingerprint(),
+        );
+
+        write(&store, project, "src/test/java/com/example/AppTest.java");
+        let writes = repair_writes_since(&store, project, CaseSensitivity::Sensitive, &dated)
+            .expect("the writes are read");
+        let (update, reopened) =
+            keep_test_only_fixes_open(update, &writes, CaseSensitivity::Sensitive);
+
+        assert!(reopened.is_empty());
+        assert_eq!(update.resolved.len(), 1);
+    }
+
+    /// The path arithmetic the read depends on: harness text, both separators,
+    /// and the project root's own spelling.
+    #[test]
+    fn a_recorded_path_is_placed_against_the_project_root() {
+        let case = CaseSensitivity::Sensitive;
+        assert_eq!(
+            relative_to_project(
+                r"D:\Code\maven\src\test\java\AppTest.java",
+                "D:/Code/maven",
+                case
+            ),
+            Some(String::from("src/test/java/AppTest.java"))
+        );
+        assert_eq!(
+            relative_to_project("./src/main/java/App.java", "D:/Code/maven", case),
+            Some(String::from("src/main/java/App.java"))
+        );
+        assert_eq!(
+            relative_to_project("/home/me/maven/src/x.py", "/home/me/maven", case),
+            Some(String::from("src/x.py"))
+        );
+        assert_eq!(
+            relative_to_project("D:/Somewhere/else/x.rs", "D:/Code/maven", case),
+            None,
+            "another project's path is not this project's file"
+        );
+        assert_eq!(
+            relative_to_project("../outside/x.rs", "D:/Code/maven", case),
+            None,
+            "a path that climbs out of the project is outside it"
+        );
+        assert_eq!(
+            relative_to_project("D:/Code/maven", "D:/Code/maven", case),
+            None,
+            "the project root is not a file inside it"
+        );
+        assert_eq!(
+            relative_to_project("d:/code/maven/src/x.rs", "D:/Code/maven", case),
+            None,
+            "on a volume that keeps case, the folder's spelling is part of the path; \
+             only the drive letter is always compared without case"
+        );
+        assert_eq!(
+            relative_to_project(
+                "d:/code/maven/src/x.rs",
+                "D:/Code/maven",
+                CaseSensitivity::Insensitive
+            ),
+            Some(String::from("src/x.rs"))
+        );
     }
 }
