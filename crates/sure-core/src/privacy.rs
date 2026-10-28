@@ -69,9 +69,9 @@ pub struct PrivacyStatement {
     pub project_mode: PrivacyMode,
     /// The analysis provider this run's configuration names.
     ///
-    /// Read from the settings the run consults, which is the project's own
-    /// `sure.yaml` in this build — `crate::pipeline::Pipeline::config` is that
-    /// file and nothing else. It is what the run *names*, not a statement that
+    /// [`Authority::analysis`]'s provider: a provider the project's own file
+    /// names is the one in force, and when the project names none the user's
+    /// own file's is. It is what the run *names*, not a statement that
     /// anything was sent, and not a statement about a model.
     pub provider: AnalysisProvider,
 }
@@ -85,7 +85,7 @@ impl PrivacyStatement {
             mode: mode.value,
             mode_set_by: mode.by,
             project_mode: authority.project().privacy.mode,
-            provider: authority.project().analysis.provider,
+            provider: authority.analysis().value.provider,
         }
     }
 
@@ -530,6 +530,8 @@ mod tests {
             execution: ExecutionSettings::inspect_only(),
             store: None,
             goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run()

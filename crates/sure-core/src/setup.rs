@@ -705,7 +705,11 @@ fn governs(directory: &Path, from: &Path, case: CaseSensitivity) -> bool {
 fn node_of(discovery: &Discovery) -> Option<&NodeProject> {
     match &discovery.report(Ecosystem::Node)?.findings {
         Findings::Node(project) => Some(project),
-        Findings::Python(_) | Findings::Rust(_) => None,
+        Findings::Python(_)
+        | Findings::Rust(_)
+        | Findings::Go(_)
+        | Findings::Dotnet(_)
+        | Findings::Java(_) => None,
     }
 }
 

@@ -64,6 +64,42 @@ pub fn build_verdict(
 /// regardless of what [`ProjectVerdict::is_ready_for_hand_off`] claims.
 #[must_use]
 pub fn render_summary(verdict: &ProjectVerdict) -> String {
+    render_summary_with_completeness(verdict, true)
+}
+
+/// The same summary, with the run's own answer about whether every stage ran.
+///
+/// [`render_summary`] is for a verdict read on its own, where the stages are not
+/// available. A caller that holds a [`PipelineOutcome`](crate::pipeline::PipelineOutcome)
+/// passes [`PipelineOutcome::every_stage_ran`](crate::pipeline::PipelineOutcome::every_stage_ran)
+/// here: a green aggregate with a stage that did not run is not a clean result,
+/// and the summary must not call it ready to hand off while the run's own exit
+/// status says it is not.
+#[must_use]
+pub fn render_summary_with_completeness(verdict: &ProjectVerdict, every_stage_ran: bool) -> String {
+    render_summary_with_run_facts(verdict, every_stage_ran, false)
+}
+
+/// The same summary, with the run's own answer about whether every stage ran
+/// and whether SURE recognised a project at all.
+///
+/// [`render_summary`] is for a verdict read on its own, where the stages are not
+/// available. A caller that holds a [`PipelineOutcome`](crate::pipeline::PipelineOutcome)
+/// passes [`PipelineOutcome::every_stage_ran`](crate::pipeline::PipelineOutcome::every_stage_ran)
+/// here: a green aggregate with a stage that did not run is not a clean result,
+/// and the summary must not call it ready to hand off while the run's own exit
+/// status says it is not.
+///
+/// `no_project_found` is true when discovery found no stack and the run held no
+/// check results. That is a wrong path or a directory with no manifest, not a
+/// project with problems, and the summary says so rather than calling it
+/// "not ready" and leaving the reader to infer it from a stage line.
+#[must_use]
+pub fn render_summary_with_run_facts(
+    verdict: &ProjectVerdict,
+    every_stage_ran: bool,
+    no_project_found: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     // Aggregate headline — this is SURE's own frozen text, so it is safe.
@@ -76,8 +112,20 @@ pub fn render_summary(verdict: &ProjectVerdict) -> String {
         .any(|f| f.status.needs_attention() && f.severity.blocks_hand_off());
     let aggregate_is_green = verdict.aggregate.is_green();
 
-    if aggregate_is_green && !blocked_by_finding {
+    if no_project_found {
+        parts.push(
+            "This does not look like a project SURE can check. Check the path and the project's \
+             manifest."
+                .to_owned(),
+        );
+    } else if aggregate_is_green && !blocked_by_finding && every_stage_ran {
         parts.push("This project looks ready to hand off.".to_owned());
+    } else if aggregate_is_green && !blocked_by_finding {
+        parts.push(
+            "No blocking problem was found in what ran, but this run did not check everything, \
+             so it is not a clean result."
+                .to_owned(),
+        );
     } else {
         parts.push("This project is not ready to hand off.".to_owned());
     }
@@ -99,10 +147,21 @@ pub fn render_summary(verdict: &ProjectVerdict) -> String {
     // Capability / support level.
     parts.push(verdict.capability.summary());
 
-    // Open findings — count by severity, most serious first.
+    // Unresolved findings — count by severity, most serious first.
+    //
+    // "Unresolved" is the word the status enum means: `open_findings()` keeps
+    // `Open` and `CannotConfirm`, and calling the second kind "open" made a
+    // candidate read as a confirmed defect. When not every declared check ran,
+    // the empty sentence says which checks it is talking about, so "no
+    // findings" cannot be read as "the project is clean".
+    let not_checked_count = verdict.not_checked.len();
     let open = verdict.open_findings();
     if open.is_empty() {
-        parts.push("No open findings.".to_owned());
+        if not_checked_count > 0 {
+            parts.push("No unresolved findings from the checks that ran.".to_owned());
+        } else {
+            parts.push("No unresolved findings.".to_owned());
+        }
     } else {
         let counts = count_open_findings_by_severity(&open);
         let mut phrases: Vec<String> = Vec::new();
@@ -113,11 +172,10 @@ pub fn render_summary(verdict: &ProjectVerdict) -> String {
                 phrases.push(format!("{count} {label}"));
             }
         }
-        parts.push(format!("Open findings: {}.", phrases.join(", ")));
+        parts.push(format!("Unresolved findings: {}.", phrases.join(", ")));
     }
 
     // Not-checked checks.
-    let not_checked_count = verdict.not_checked.len();
     let critical_not_checked: Vec<&CheckResult> =
         verdict.not_checked.iter().filter(|r| r.critical).collect();
     if not_checked_count > 0 {
@@ -319,7 +377,7 @@ mod tests {
             Vec::new(),
         );
         let summary = render_summary(&verdict);
-        assert!(summary.contains("Open findings:"), "{summary}");
+        assert!(summary.contains("Unresolved findings:"), "{summary}");
         assert!(summary.contains("1 Should fix first"), "{summary}");
     }
 

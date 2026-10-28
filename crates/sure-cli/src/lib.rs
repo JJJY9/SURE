@@ -3,7 +3,9 @@
 pub mod check;
 pub mod cli;
 pub mod commands;
+pub mod config_show;
 pub mod doctor;
+pub mod explain;
 pub mod grants;
 pub mod history;
 pub mod hook;

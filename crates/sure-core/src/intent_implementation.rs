@@ -273,6 +273,22 @@ fn command_anchors(discovery: &Discovery) -> Vec<IntentMatchAnchor> {
                 }
             }
             Findings::Python(_) => {}
+            Findings::Go(project) => {
+                // A Go project's declared module path is not a source tree SURE
+                // reads for complete/partial implementation markers; the
+                // completeness scanners still run over the files.
+                let _ = project;
+            }
+            Findings::Dotnet(project) => {
+                // The solution/project graph is not a source tree SURE reads for
+                // implementation markers; the completeness scanners still run.
+                let _ = project;
+            }
+            Findings::Java(project) => {
+                // A Maven POM names no source tree SURE reads for implementation
+                // markers; the completeness scanners still run.
+                let _ = project;
+            }
         }
     }
     anchors

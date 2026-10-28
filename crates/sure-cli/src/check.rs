@@ -79,6 +79,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use sure_core::config::Authority;
+use sure_core::external_commands;
 use sure_core::finding::Finding;
 use sure_core::fingerprint::{FingerprintOptions, project_fingerprint};
 use sure_core::intent::IntentSource;
@@ -167,7 +168,7 @@ pub fn run(
         Err(detail) => return failed(purpose, NOTHING_RECORDED, detail),
     };
     match Paths::discover_with(named.store, named.settings_file) {
-        Ok(paths) => run_with(purpose, &paths, &project, goal),
+        Ok(paths) => run_with_commands(purpose, &paths, &project, goal, named.commands_file),
         // Not `Unavailable`: SURE has somewhere to keep its files or it does
         // not, and a machine where it does not is a machine to fix rather than a
         // build to update.
@@ -216,6 +217,23 @@ fn project_of(project: Option<&Path>) -> Result<PathBuf, String> {
 /// own. Nothing about a project is consulted either way.
 #[must_use]
 pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&str>) -> Report {
+    run_with_commands(purpose, paths, project, goal, None)
+}
+
+/// The same, with an optional user-declared commands file.
+///
+/// The commands file is a path from this process's argument vector, like
+/// `--settings-file`; nothing in the checked project can reach it. A caller that
+/// does not name one passes `None` and plans the discovered stack exactly as
+/// before.
+#[must_use]
+pub fn run_with_commands(
+    purpose: Purpose,
+    paths: &Paths,
+    project: &Path,
+    goal: Option<&str>,
+    commands_file: Option<&Path>,
+) -> Report {
     // Where this run's settings come from, refused if the project could write
     // it. First, before the goal goes into the history and before any settings
     // are read, because both of those would be a run that acted on a file the
@@ -268,6 +286,46 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
     };
     let loaded = authority.project_file();
     let privacy = PrivacyStatement::of(&authority);
+
+    // User-declared commands, if the caller named a file. The file is a
+    // command-line argument and is refused when it lives inside the project:
+    // the project is the thing being judged, and a commands file it can edit is
+    // a plan the AI can write for its own verdict.
+    let external_commands = match commands_file {
+        Some(path) => {
+            let outside = match (std::fs::canonicalize(path), std::fs::canonicalize(project)) {
+                (Ok(commands), Ok(root)) => !commands.starts_with(root),
+                _ => true,
+            };
+            if !outside {
+                let what = if recorded.is_some() {
+                    RECORDED_AND_UNCHECKED
+                } else {
+                    NOTHING_RECORDED
+                };
+                return failed(
+                    purpose,
+                    what,
+                    format!(
+                        "the commands file {} is inside the project being checked; name a file outside it",
+                        path.display()
+                    ),
+                );
+            }
+            match external_commands::load(path) {
+                Ok(commands) => commands,
+                Err(detail) => {
+                    let what = if recorded.is_some() {
+                        RECORDED_AND_UNCHECKED
+                    } else {
+                        NOTHING_RECORDED
+                    };
+                    return failed(purpose, what, detail);
+                }
+            }
+        }
+        None => Vec::new(),
+    };
 
     // The history — see `open_for` for which commands create one and why.
     if store.is_none() {
@@ -333,12 +391,19 @@ pub fn run_with(purpose: Purpose, paths: &Paths, project: &Path, goal: Option<&s
     // one invocation was authorised to do — and a door that is only opened on the
     // runs that need it is a door nobody has tested on the runs that do.
     let runner = ProcessRunner::new(Cancellation::new())
-        .with_page_driver(Box::new(sure_core::browser_driver::Browser::system()));
+        .with_page_driver(Box::new(sure_core::browser_driver::Browser::system()))
+        // Windows installs npm/pnpm/yarn as batch shims, which SURE refuses to
+        // start. The launcher starts what npm's shim itself runs — `node` and
+        // npm's shipped JavaScript entry — for the names it can prove; every
+        // other program is left exactly as the plan holds it.
+        .with_package_launchers(sure_core::package_launcher::PackageLaunchers::of_this_machine());
     let run = Pipeline {
         project,
         purpose,
         config: &loaded.config,
         execution: authority.execution(),
+        analysis: authority.analysis().value,
+        external_commands: &external_commands,
         store: store.as_ref(),
         goal: goal_as_recorded,
         runner: &runner,
@@ -438,12 +503,10 @@ fn record_goal(
     let rows = record(&store, root, &state.id, &intent)
         .map_err(|error| Failure::new(NOTHING_RECORDED, error.to_string()))?;
 
-    // One row, because the intent this builds has one requirement and the schema
-    // stores one requirement per row. Written as a match rather than as
-    // `rows[0]` so that a later version of `explicit_goal` producing several is a
-    // refusal here rather than a report naming the first of them as *the* record
-    // — and so that a store that returned nothing is not reported as record #0.
-    let Some(row) = rows.first().copied() else {
+    // One row per non-empty goal line (a one-line goal is one row). Written as a
+    // check rather than as `rows[0]` so that a store that returned nothing is not
+    // reported as record #0.
+    let Some(first_row) = rows.first().copied() else {
         return Err(Failure::new(
             RECORDED_WITHOUT_A_ROW,
             "The store accepted the goal and returned no row identifier for it. The goal is in \
@@ -462,7 +525,11 @@ fn record_goal(
     // read-back is for. Read back rather than redacted a second time here, so
     // that the report and the row agree by construction instead of by two
     // implementations staying in step.
-    let text = held_text(&store, row)?;
+    let mut texts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        texts.push(held_text(&store, *row)?);
+    }
+    let text = texts.join("\n");
 
     Ok((
         GoalRecorded {
@@ -471,7 +538,7 @@ fn record_goal(
             source: IntentSource::ExplicitUserGoal,
             project_root: root.to_owned(),
             project_state: state,
-            record: row,
+            record: first_row,
         },
         store,
     ))
@@ -619,6 +686,10 @@ fn finished(
     writeln!(out, "SURE checked {}.", report.project)?;
     writeln!(out)?;
 
+    let no_project_found = run.support.level == sure_core::vocabulary::SupportLevel::InspectOnly
+        && run.report.results().is_empty()
+        && run.verdict.findings.is_empty();
+
     // Everything the verdict is made of, in the words this repository already
     // uses for it. Rendering it here a second time would be a second explanation
     // of one result, and the two would drift the first time either was improved.
@@ -628,13 +699,15 @@ fn finished(
             color: false,
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
+            every_stage_ran: outcome.every_stage_ran(),
+            no_project_found,
         },
         out,
     )?;
     writeln!(out)?;
     checks_that_passed(run, out)?;
 
-    repairs(run, out)?;
+    repairs(run, outcome.purpose, out)?;
     lifecycle(run, out)?;
     stages(outcome, out)?;
     privacy(&report.privacy, report.model_use, out)?;
@@ -732,8 +805,16 @@ fn checks_that_passed(run: &RunOutcome, out: &mut impl Write) -> io::Result<()> 
 /// this location could break. It is the selection that has to pass before the
 /// finding closes, so it is the selection a reader is owed; the function is the
 /// one the pipeline calls rather than a second rule written here.
-fn repairs(run: &RunOutcome, out: &mut impl Write) -> io::Result<()> {
+fn repairs(run: &RunOutcome, purpose: Purpose, out: &mut impl Write) -> io::Result<()> {
     if run.repairs.is_empty() {
+        if purpose == Purpose::Repair && run.verdict.findings.is_empty() {
+            writeln!(
+                out,
+                "There is nothing to repair: this run produced no findings. The exit status still \
+                 reports the project's check status; it is not a failure to write instructions."
+            )?;
+            writeln!(out)?;
+        }
         return Ok(());
     }
     writeln!(
@@ -1329,13 +1410,17 @@ mod tests {
     }
 
     /// The one project-intent row in a store, or a panic naming what was there.
-    fn the_intent_row(store: &Store) -> StoredRecord {
-        let mut intents: Vec<StoredRecord> = store
+    fn intent_rows(store: &Store) -> Vec<StoredRecord> {
+        store
             .history(&HistoryFilter::default(), 100)
             .unwrap_or_else(|error| panic!("cannot read the history: {error}"))
             .into_iter()
             .filter(|row| row.kind == intent_kind())
-            .collect();
+            .collect()
+    }
+
+    fn the_intent_row(store: &Store) -> StoredRecord {
+        let mut intents = intent_rows(store);
         assert_eq!(
             intents.len(),
             1,
@@ -2409,7 +2494,13 @@ privacy:
         a_project(&fixture);
         let paths = fixture.paths();
 
-        let goal = "  keep the two-space indent\nand do not trim the trailing tab\t";
+        // A multi-line goal is one requirement per line; whitespace around each
+        // line is trimmed (the one-line case keeps its text exactly, measured by
+        // `project_intent`'s own test).
+        let goal = "  keep the two-space indent
+and do not trim the trailing tab	";
+        let expected = "keep the two-space indent
+and do not trim the trailing tab";
         let report = run_with(Purpose::Check, &paths, &fixture.project(), Some(goal));
         assert_eq!(
             checked(&report)
@@ -2417,7 +2508,7 @@ privacy:
                 .as_ref()
                 .expect("recorded")
                 .goal,
-            goal,
+            expected,
             "the goal was edited on the way in"
         );
 
@@ -2436,7 +2527,14 @@ privacy:
                 row.document
             );
         }
-        assert_eq!(the_intent_row(&store).document["text"], json!(goal));
+        let mut rows = intent_rows(&store);
+        assert_eq!(rows.len(), 2);
+        rows.sort_by_key(|row| row.document["id"].as_str().unwrap_or("").to_owned());
+        assert_eq!(rows[0].document["text"], json!("keep the two-space indent"));
+        assert_eq!(
+            rows[1].document["text"],
+            json!("and do not trim the trailing tab")
+        );
     }
 
     #[test]

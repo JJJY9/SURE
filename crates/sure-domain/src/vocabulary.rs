@@ -133,7 +133,9 @@ impl SupportLevel {
                 "SURE understands this kind of project well and can check it properly."
             }
             Self::Generic => {
-                "SURE can find how this project is built and run, but does not understand everything about it."
+                "SURE can find how this project is built and run when you allow it, and can run \
+                 approved generic checks, but does not understand everything about it. A check \
+                 whose command cannot be started is reported as not checked, not passed."
             }
             Self::InspectOnly => "SURE can look at this project's files, but cannot safely run it.",
         }

@@ -224,6 +224,16 @@ pub struct LifecycleInputs<'a> {
     /// fixed. When a finding has no entry here, its re-check is treated as
     /// absent and the finding stays open unless a current finding matches it.
     pub rechecks: &'a [(FindingId, Vec<CheckId>)],
+    /// The checks this run planned, whatever their results.
+    ///
+    /// Needed to tell a contract check whose subject has disappeared from one
+    /// that was planned and not observed: a candidate-driven check
+    /// ([`crate::candidate_scanner::is_candidate_check`]) is proposed only
+    /// while the marker it was built from is in the project, so "a candidate
+    /// check this run did not plan" is the scanner saying the marker is gone —
+    /// and that is the one absence that resolves a finding rather than keeping
+    /// it open.
+    pub planned: &'a [CheckId],
     /// The rule this project's volume applies to two spellings of one path.
     ///
     /// Asked once per run by [`case_rule_for`] and passed in, rather than worked
@@ -249,7 +259,10 @@ pub struct LifecycleInputs<'a> {
 /// A previous finding that matches a current finding by key is considered the
 /// same issue; the current finding is reported and the previous one is not
 /// duplicated. A previous finding with no matching current finding and no
-/// passing re-check stays open, because SURE cannot honestly say it was fixed.
+/// passing re-check stays open, because SURE cannot honestly say it was fixed
+/// — except when its re-check is a candidate-driven check the current run no
+/// longer plans, which is the scanner itself reporting that the marker the
+/// finding was about is gone (see [`LifecycleInputs::planned`]).
 #[must_use]
 pub fn reconcile(
     inputs: LifecycleInputs<'_>,
@@ -297,7 +310,7 @@ pub fn reconcile(
             continue;
         }
 
-        if recheck_passed(&recheck_map, &result_by_id, &previous.id) {
+        if recheck_passed(&recheck_map, &result_by_id, inputs.planned, &previous.id) {
             let closed = clone_for_state(
                 previous,
                 current_fingerprint.clone(),
@@ -327,6 +340,7 @@ pub fn reconcile(
 fn recheck_passed(
     recheck_map: &HashMap<FindingId, &[CheckId]>,
     result_by_id: &HashMap<CheckId, CheckStatus>,
+    planned: &[CheckId],
     finding_id: &FindingId,
 ) -> bool {
     let Some(checks) = recheck_map.get(finding_id) else {
@@ -336,9 +350,21 @@ fn recheck_passed(
     if checks.is_empty() {
         return false;
     }
-    checks
-        .iter()
-        .all(|id| result_by_id.get(id) == Some(&CheckStatus::Pass))
+    checks.iter().all(|id| {
+        if result_by_id.get(id) == Some(&CheckStatus::Pass) {
+            return true;
+        }
+        // A candidate-driven check this run did not plan is the scanner no
+        // longer finding the marker the check was built from: the finding's
+        // subject has disappeared, which is a resolution and not an absence
+        // of evidence (2026-10-14:修复把候选修没后,契约点名的候选检查因
+        // 不再被排程而永不可"运行且通过" — the repair loop could otherwise
+        // never close a finding the fix genuinely removed). Every other
+        // missing check — planned but unobserved, or a fixed check the
+        // schedule no longer holds — keeps the finding open, because nothing
+        // here observed a fix.
+        crate::candidate_scanner::is_candidate_check(id) && !planned.contains(id)
+    })
 }
 
 fn clone_for_state(
@@ -822,6 +848,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&new),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -843,6 +870,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -853,6 +881,75 @@ mod tests {
         assert_eq!(update.kept_open.len(), 1);
         assert_eq!(update.kept_open[0].id, previous.id);
         assert!(update.resolved.is_empty());
+    }
+
+    /// 2026-10-14:修复把候选修没后,契约点名的候选检查(以候选所在文件为
+    /// 构造输入)不再被排程——"这个候选检查本轮没被计划"正是扫描器在说
+    /// "标记已消失",是解决而非证据缺席;否则"真修好了"永远无法关闭发现项。
+    #[test]
+    fn a_candidate_check_the_run_no_longer_plans_resolves_the_finding() {
+        let previous = finding_with("TODO left in code", "src/pay.py", FindingStatus::Open);
+        let candidate_check = crate::checks::check_id("src/pay.py", "candidatetodo");
+        let rechecks = vec![(previous.id.clone(), vec![candidate_check])];
+        let update = reconcile(
+            LifecycleInputs {
+                previous_open: std::slice::from_ref(&previous),
+                current_findings: &[],
+                check_results: &[],
+                rechecks: &rechecks,
+                planned: &[],
+                case: CaseSensitivity::Sensitive,
+            },
+            another_fingerprint(),
+        );
+        assert_eq!(update.resolved.len(), 1);
+        assert_eq!(update.resolved[0].status, FindingStatus::Resolved);
+        assert_eq!(update.resolved[0].title, previous.title);
+        assert!(update.kept_open.is_empty());
+    }
+
+    /// 对照组:候选检查被排程了却没有结果(计划了、没观测到)——不是"目标
+    /// 消失",必须保持打开,防止把"没跑"当成"过了"。
+    #[test]
+    fn a_planned_candidate_check_without_a_result_keeps_the_finding_open() {
+        let previous = finding_with("TODO left in code", "src/pay.py", FindingStatus::Open);
+        let candidate_check = crate::checks::check_id("src/pay.py", "candidatetodo");
+        let rechecks = vec![(previous.id.clone(), vec![candidate_check.clone()])];
+        let update = reconcile(
+            LifecycleInputs {
+                previous_open: std::slice::from_ref(&previous),
+                current_findings: &[],
+                check_results: &[],
+                rechecks: &rechecks,
+                planned: std::slice::from_ref(&candidate_check),
+                case: CaseSensitivity::Sensitive,
+            },
+            another_fingerprint(),
+        );
+        assert!(update.resolved.is_empty());
+        assert_eq!(update.kept_open.len(), 1);
+    }
+
+    /// 对照组:缺席的不是候选检查(普通固定检查不在计划里)——老规矩,保持
+    /// 打开;本次改动不放松其它检查的缺席语义。
+    #[test]
+    fn an_unplanned_check_that_is_not_a_candidate_keeps_the_finding_open() {
+        let previous = finding_with("Email not sent", "src/email/send.rs", FindingStatus::Open);
+        let other_check = crate::checks::check_id("src/email/send.rs", "tests");
+        let rechecks = vec![(previous.id.clone(), vec![other_check])];
+        let update = reconcile(
+            LifecycleInputs {
+                previous_open: std::slice::from_ref(&previous),
+                current_findings: &[],
+                check_results: &[],
+                rechecks: &rechecks,
+                planned: &[],
+                case: CaseSensitivity::Sensitive,
+            },
+            another_fingerprint(),
+        );
+        assert!(update.resolved.is_empty());
+        assert_eq!(update.kept_open.len(), 1);
     }
 
     #[test]
@@ -873,6 +970,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[check_result],
                 rechecks: &[(previous.id.clone(), vec![recheck])],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -893,6 +991,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[],
                 rechecks: &[(previous.id.clone(), vec![recheck])],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -921,6 +1020,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[check_result],
                 rechecks: &[(previous.id.clone(), vec![recheck])],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -949,6 +1049,7 @@ mod tests {
                     another_fingerprint(),
                 )],
                 rechecks: &[(previous.id.clone(), vec![first, second])],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -966,6 +1067,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -988,6 +1090,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1021,6 +1124,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Insensitive,
             },
             another_fingerprint(),
@@ -1060,6 +1164,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1142,6 +1247,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case,
             },
             another_fingerprint(),
@@ -1183,6 +1289,7 @@ mod tests {
                 current_findings: std::slice::from_ref(&current),
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1238,6 +1345,7 @@ mod tests {
                 current_findings: &[note.clone(), must_fix.clone()],
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1259,6 +1367,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1294,6 +1403,7 @@ mod tests {
                 current_findings: &[],
                 check_results: &[],
                 rechecks: &[],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),
@@ -1320,6 +1430,7 @@ mod tests {
                     another_fingerprint(),
                 )],
                 rechecks: &[(previous.id.clone(), vec![recheck])],
+                planned: &[],
                 case: CaseSensitivity::Sensitive,
             },
             another_fingerprint(),

@@ -14,13 +14,13 @@ use std::io::{self, Write};
 use sure_core::claim_report::render_claim_section;
 use sure_core::coverage_summary::{CoverageNotCheckedSummary, summarize};
 use sure_core::plain_language_finding::{PlainLanguageFinding, render_findings};
-use sure_core::project_verdict::render_summary;
+use sure_core::project_verdict::render_summary_with_run_facts;
 use sure_core::redact::escape_control_characters;
 use sure_core::status::CheckResult;
 use sure_core::vocabulary::ProjectVerdict;
 
 /// Settings for the human report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HumanReportSettings<'a> {
     /// Whether to emit ANSI colour codes.
     pub color: bool,
@@ -28,6 +28,30 @@ pub struct HumanReportSettings<'a> {
     pub schedule: Option<&'a sure_core::schedule::CheckSchedule>,
     /// The report the run produced, if available.
     pub run_report: Option<&'a sure_core::aggregation::RunReport>,
+    /// Whether every stage this run asked for did its work.
+    ///
+    /// A synthetic verdict (a test, a stored report read without its run) has
+    /// no stages to consult, and defaults to `true` so its summary keeps the
+    /// wording it had before this field existed. The CLI sets it from the run.
+    pub every_stage_ran: bool,
+    /// Whether discovery found no stack and the run held no check results.
+    ///
+    /// A wrong path or a directory with no manifest is not a project with
+    /// problems; the summary says so instead of "not ready". Synthetic reports
+    /// default to `false`.
+    pub no_project_found: bool,
+}
+
+impl Default for HumanReportSettings<'_> {
+    fn default() -> Self {
+        Self {
+            color: false,
+            schedule: None,
+            run_report: None,
+            every_stage_ran: true,
+            no_project_found: false,
+        }
+    }
 }
 
 /// Render a [`ProjectVerdict`] as plain text for a terminal.
@@ -42,7 +66,11 @@ pub fn render_verdict(verdict: &ProjectVerdict, settings: HumanReportSettings<'_
     // here as well printed the verdict sentence twice at the top of every human
     // report, with nothing between the copies but a blank line; the summary is
     // the one that stays, because it is also the form that is read on its own.
-    out.push_str(&render_summary(verdict));
+    out.push_str(&render_summary_with_run_facts(
+        verdict,
+        settings.every_stage_ran,
+        settings.no_project_found,
+    ));
     out.push('\n');
 
     // AI-claim checks
@@ -288,6 +316,26 @@ mod tests {
         assert!(
             text.contains(AggregateSeverity::Green.headline()),
             "report should contain headline: {text}"
+        );
+    }
+
+    #[test]
+    fn incomplete_run_does_not_call_a_green_aggregate_ready() {
+        let verdict = build_verdict(green_aggregate(), Vec::new(), Vec::new());
+        let text = render_verdict(
+            &verdict,
+            HumanReportSettings {
+                every_stage_ran: false,
+                ..HumanReportSettings::default()
+            },
+        );
+        assert!(
+            text.contains("did not check everything"),
+            "an incomplete run should say what it could not check: {text}"
+        );
+        assert!(
+            !text.contains("ready to hand off"),
+            "an incomplete run must not read as ready: {text}"
         );
     }
 

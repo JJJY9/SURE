@@ -618,6 +618,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "rusqlite"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -786,7 +792,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sure-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "serde",
@@ -799,10 +805,11 @@ dependencies = [
 
 [[package]]
 name = "sure-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dirs",
  "regex",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
@@ -817,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "sure-domain"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -825,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "sure-protocol"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -834,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "sure-testkit"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde_json",
  "sha2",

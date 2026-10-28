@@ -893,6 +893,15 @@ fn a_directory_that_is_every_ecosystem_at_once_is_reported_as_all_of_them() {
     fixture.write("package.json", "{\"name\":\"js\"}\n");
     fixture.write("pyproject.toml", "[project]\nname = \"py\"\n");
     fixture.write("Cargo.toml", MINIMAL);
+    fixture.write("go.mod", "module example.com/everything\n\ngo 1.21\n");
+    fixture.write(
+        "Everything.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
+    );
+    fixture.write(
+        "pom.xml",
+        "<project><artifactId>everything</artifactId></project>\n",
+    );
 
     let found = fixture.discover();
     let ecosystems: Vec<Ecosystem> = found
@@ -902,7 +911,14 @@ fn a_directory_that_is_every_ecosystem_at_once_is_reported_as_all_of_them() {
         .collect();
     assert_eq!(
         ecosystems,
-        vec![Ecosystem::Node, Ecosystem::Python, Ecosystem::Rust],
+        vec![
+            Ecosystem::Node,
+            Ecosystem::Python,
+            Ecosystem::Rust,
+            Ecosystem::Go,
+            Ecosystem::Dotnet,
+            Ecosystem::Java,
+        ],
         "the reports are in the order of the list that says what was looked for"
     );
     assert_eq!(ecosystems, found.looked_for());
@@ -912,7 +928,7 @@ fn a_directory_that_is_every_ecosystem_at_once_is_reported_as_all_of_them() {
             .iter()
             .map(|stack| stack.stack.as_str())
             .collect::<Vec<_>>(),
-        vec!["node", "python", "rust"]
+        vec!["node", "python", "rust", "go", "dotnet", "java"]
     );
     for stack in &stacks {
         assert!(!stack.reason.is_empty());

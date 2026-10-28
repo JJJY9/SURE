@@ -57,6 +57,7 @@ fn run(cli: &Cli) -> u8 {
     let named = Named {
         store: cli.store_dir.as_deref(),
         settings_file: cli.settings_file.as_deref(),
+        commands_file: cli.commands_file.as_deref(),
     };
     let report = cli.command.report(named);
     match cli.format.emit(&report) {

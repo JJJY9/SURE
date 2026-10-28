@@ -39,7 +39,7 @@
         "Nothing blocking, but a few things need your attention.",
         "This project is not ready to hand off.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "Open findings: 1 Note."
+        "Unresolved findings: 1 Note."
       ]
     },
     "control": {
@@ -77,7 +77,7 @@
           "Not enough could be checked to say whether this is ready.",
           "This project is not ready to hand off.",
           "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-          "No open findings."
+          "No unresolved findings."
         ]
       }
     }
@@ -113,7 +113,7 @@
         "Nothing blocking, but a few things need your attention.",
         "This project is not ready to hand off.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "Open findings: 1 Note."
+        "Unresolved findings: 1 Note."
       ],
       "why": "The acceptance sentence is *explicit intent mismatch can yield grounded finding*, and what this outcome records is how far that reaches today, by equality rather than by paraphrase. One requirement was checked and exactly one came back unmatched; `limitation` is `None`, which is what separates this fixture from `missing-user-intent` — SURE had a request and compared against it. The one proposal is `Severity::Note`, non-critical and `EvidenceClass::Inference`, which `false_completion_aggregator`'s `is_style_noise` rule files in `style_noise()`, so the report shows it in the noise bucket while `material()` is empty. Both buckets are asserted, because `style_noise == 1` alone would be satisfied by a proposal that also appeared in `material()`. The title, the identifier and the sentence a reader is shown are compared whole: the identifier is `check_id(\"goal\", \"intentunmatched\")`, so a change to how a requirement is named changes it and this test goes red. `not_checked` is asserted at zero and the summary's last line is the open-findings line, and that is `P18-T007`'s re-making of this declaration rather than a number left over: the proposal is surfaced as a planned check, that check is a `CheckOperation::Precomputed` — a reading taken from the source, not a command — and with `crates/sure-core/src/pipeline.rs` wired to `planned_check_runner` a precomputed candidate now produces a real result, a `Warning` at `Severity::Note`. A result is not a gap, so the count of checks that could not run is zero and the `1 check(s) could not run or were skipped.` line is gone; the run is not a pass either, and the aggregate is `NeedsAttention` rather than green because a `Warning` is never a pass. Two things are worth separating here, because a reader of this entry will otherwise conflate them. The `Warning` is the honest status for this proposal: what SURE has is a candidate read from the source, and `Candidate` maps to `Warning` rather than to a pass. The *finding* `sure_core::findings_from_checks` raises for that `Warning` is not honest in the same way — it is `open`, its explanation says SURE ran this check against the project and it was not satisfied, and its next step says to fix what the check found — which is a claim about the project that a `Severity::Note` candidate on an `Inference` class cannot support, and which that module's own doc comment refuses in as many words: *\"A candidate. … Candidates stay candidates.\"* That is a defect this declaration measured and this task reports rather than a claim the fixture makes, and the third forbidden outcome below is where it is written down as a defect."
     },
@@ -162,7 +162,7 @@
         "Not enough could be checked to say whether this is ready.",
         "This project is not ready to hand off.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "No open findings."
+        "No unresolved findings."
       ],
       "why": "The control the fixture cannot do without. A reporter that called every stated requirement unimplemented would satisfy the outcome above; with the file present the answer must flip — one requirement matched, nothing unmatched, no proposal at all, and the rendered summary losing exactly the `1 check(s) could not run or were skipped.` line and gaining nothing. The file is added to a copy of the fixture's own two sources rather than to a project written out here, and the test asserts that copy differs from the fixture by that one path before it reads either answer."
     }
@@ -170,7 +170,7 @@
   "forbidden_outcomes": [
     {
       "kind": "false_green",
-      "description": "SURE stays silent about a requirement the user stated and nothing implements. The goal is a fact of the session, not a hint: a report that shows the capability line and `No open findings.` while saying nothing about the requested CSV export leaves the reader to conclude the request was met."
+      "description": "SURE stays silent about a requirement the user stated and nothing implements. The goal is a fact of the session, not a hint: a report that shows the capability line and `No unresolved findings.` while saying nothing about the requested CSV export leaves the reader to conclude the request was met."
     },
     {
       "kind": "false_green",

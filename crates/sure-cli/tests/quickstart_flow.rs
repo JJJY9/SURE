@@ -516,7 +516,7 @@ fn the_whole_documented_journey_installs_the_cli_an_integration_and_answers_a_ch
         );
         for sentence in [
             "SURE checked ",
-            "No open findings.",
+            "No unresolved findings from the checks that ran.",
             "SURE exited with status 1.",
         ] {
             assert!(
@@ -1536,7 +1536,7 @@ const BREAKS: &[Break] = &[
     Break {
         what: "the install command stops being named",
         file: QUICKSTART,
-        from: "& .\\scripts\\Install-Sure.ps1 -Archive .\\target\\tmp\\release\\sure-0.1.2-x86_64-pc-windows-msvc.zip",
+        from: "& .\\scripts\\Install-Sure.ps1 -Archive .\\target\\tmp\\release\\sure-0.1.3-x86_64-pc-windows-msvc.zip",
         to: "Run the installer, naming the archive.",
         wanted: "Install-Sure.ps1 -Archive",
     },

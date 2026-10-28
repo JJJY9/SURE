@@ -93,6 +93,19 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", global = true, value_parser = a_settings_file)]
     pub settings_file: Option<PathBuf>,
 
+    /// Read user-declared check commands from FILE instead of planning a
+    /// discovered stack's checks. FILE must be an absolute path outside the
+    /// project.
+    ///
+    /// The file names a program and its arguments per role (`test`, `build`,
+    /// `lint`, `typecheck`); SURE never splits a shell string. This is for a
+    /// project whose build system SURE does not discover — a Makefile, a shell
+    /// script — where the person running SURE is the only one who can say what
+    /// command answers a role. A role the file omits is recorded as not
+    /// declared rather than silently dropped.
+    #[arg(long, value_name = "FILE", global = true, value_parser = a_commands_file)]
+    pub commands_file: Option<PathBuf>,
+
     /// The command to run.
     #[command(subcommand)]
     pub command: Command,
@@ -124,6 +137,15 @@ fn a_store_directory(text: &str) -> Result<PathBuf, String> {
 /// here: the project is not known until a command knows it, and it is
 /// [`sure_core::paths::Paths::ensure_settings_outside`]'s, called where it is.
 fn a_settings_file(text: &str) -> Result<PathBuf, String> {
+    sure_core::paths::settings_file(Path::new(text)).map_err(|error| error.to_string())
+}
+
+/// A commands file as a caller names it: absolute, or refused here.
+///
+/// The same location rule as a settings file, and the same reason: SURE cannot
+/// decide whether a relative path is inside the project until it has the
+/// project, so it refuses the relative path at the grammar.
+fn a_commands_file(text: &str) -> Result<PathBuf, String> {
     sure_core::paths::settings_file(Path::new(text)).map_err(|error| error.to_string())
 }
 
@@ -191,9 +213,10 @@ pub enum Command {
         action: HookAction,
     },
 
-    /// Explain one recorded result in plain language.
+    /// Explain one recorded finding or check result in plain language.
     Explain {
-        /// The result to explain.
+        /// The finding id, check-result id, or store row. Default: the most
+        /// recent recorded finding; if none, the most recent check result.
         id: Option<String>,
     },
 
@@ -282,18 +305,22 @@ pub enum HistoryAction {
         #[arg(long, value_name = "PROJECT_ROOT")]
         project: Option<String>,
     },
-    /// Write the history out as JSON.
+    /// Write the history out as JSON (not implemented in this build).
     Export,
 }
 
 /// What `sure config` can be asked to do.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Show where SURE keeps its files on this machine.
+    /// Show where SURE keeps its files on this machine (not implemented in this build).
     Paths,
     /// Show the settings in effect and which layer each came from.
-    Show,
-    /// Report problems in the configuration without checking the project.
+    Show {
+        /// The project whose `sure.yaml` is read. Default: the user's own
+        /// settings only; the project layer is not read.
+        path: Option<PathBuf>,
+    },
+    /// Report problems in the configuration without checking the project (not implemented in this build).
     Validate,
     /// Write one setting into your own settings file, outside every project.
     ///

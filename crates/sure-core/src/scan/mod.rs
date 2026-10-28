@@ -47,6 +47,14 @@
 //! ignore is not made uninteresting by being tracked. Reading those rules is a
 //! decision for a task that needs it, with its own evidence.
 //!
+//! **A nested checkout is not this project's content.** A directory carrying a
+//! `.git` entry is a repository or linked worktree of its own: a submodule, a
+//! nested clone, or an agent's `.claude/worktrees/<name>`. The walk records it
+//! as a [`SkipReason::VersionControl`] scope skip instead of scanning a second
+//! copy of the same source under a second path, which is how a real project's
+//! findings appeared twice on 2026-10-23. The root is never asked — the caller
+//! named it, and its own `.git` is the repository the scan is of.
+//!
 //! **It does not decide what anything is.** Finding `package.json` here does
 //! not mean the project is a Node project; that is P2-T004 onwards.
 //!
@@ -380,6 +388,26 @@ fn open_root(root: &Path) -> Result<PathBuf, ScanError> {
     }
 }
 
+/// Whether `dir` is a repository or linked worktree of its own.
+///
+/// A directory that carries a `.git` entry is a checkout, not content of the
+/// project above it: a nested clone, a submodule, or an agent's linked
+/// worktree (`.claude/worktrees/<name>` is the one that produced duplicate
+/// findings in a real project on 2026-10-23). Walking into it would scan a
+/// second copy of the same source as if it belonged here, and every finding
+/// would appear twice under two paths.
+///
+/// The root itself is never asked: the caller named it, and its own `.git` is
+/// the repository the scan is of.
+fn nested_checkout(dir: &Path) -> Option<String> {
+    match fs::symlink_metadata(dir.join(".git")) {
+        Ok(_) => {
+            Some("a nested repository or linked worktree is not this project's content".to_owned())
+        }
+        Err(_) => None,
+    }
+}
+
 /// The walk's own state. Separate from [`Scan`] so that the result type has no
 /// field a caller could reach mid-scan.
 struct Walk {
@@ -500,6 +528,15 @@ impl Walk {
                     if self.ignored_by_name(&name, child_relative.clone(), EntryKind::Directory) {
                         continue;
                     }
+                    let child = dir.join(&name);
+                    if let Some(detail) = nested_checkout(&child) {
+                        self.skipped.push(Skipped {
+                            path: child_relative,
+                            reason: SkipReason::VersionControl,
+                            detail: Some(detail),
+                        });
+                        continue;
+                    }
                     self.entries.push(Entry {
                         path: child_relative.clone(),
                         kind: EntryKind::Directory,
@@ -511,7 +548,6 @@ impl Walk {
                             detail: None,
                         });
                     } else {
-                        let child = dir.join(&name);
                         self.visit(&child, &child_relative, depth + 1);
                     }
                 }
@@ -652,5 +688,51 @@ mod tests {
                 entry.path.display()
             );
         }
+    }
+
+    #[test]
+    fn a_nested_checkout_is_skipped_as_version_control_and_not_scanned() {
+        let root = sure_testkit::scratch::directory("scan nested checkout", "nested worktree");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/main.rs"), b"").expect("main");
+        // A linked worktree: `.git` is a file pointing at the real repository.
+        fs::create_dir_all(root.join(".claude/worktrees/wt/src")).expect("worktree src");
+        fs::write(
+            root.join(".claude/worktrees/wt/.git"),
+            b"gitdir: ../../.git/worktrees/wt",
+        )
+        .expect("worktree .git");
+        fs::write(root.join(".claude/worktrees/wt/src/dup.rs"), b"").expect("dup");
+        // A nested clone: `.git` is a directory.
+        fs::create_dir_all(root.join("nested/.git")).expect("nested .git");
+        fs::write(root.join("nested/file.rs"), b"").expect("nested file");
+
+        let scan = scan(&root, ScanOptions::default()).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/main.rs"), "{paths:?}");
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(".claude/worktrees/wt")),
+            "the linked worktree was scanned: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("nested")),
+            "the nested clone was scanned: {paths:?}"
+        );
+
+        for path in [".claude/worktrees/wt", "nested"] {
+            let skip = scan
+                .skipped()
+                .iter()
+                .find(|skip| skip.path == Path::new(path))
+                .unwrap_or_else(|| panic!("{path} was not recorded: {:?}", scan.skipped()));
+            assert_eq!(skip.reason, SkipReason::VersionControl, "{path}");
+            assert!(skip.detail.is_some(), "{path}");
+        }
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
     }
 }

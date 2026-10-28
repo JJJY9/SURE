@@ -1365,7 +1365,7 @@ fn read_recording(what: &str, scratch: &str, claim: &Value, events: &[DeclaredEv
         ingested.push(stored);
     }
 
-    let through_the_store = check_claims_in_store(&store, &fingerprint)
+    let through_the_store = check_claims_in_store(&store, CLAIM_PROJECT_ROOT, &fingerprint)
         .unwrap_or_else(|error| panic!("{what}: the claim check failed: {error}"));
     assert_eq!(
         through_the_store.len(),
@@ -1848,7 +1848,7 @@ fn tests_not_run_claim_is_cannot_confirm_with_no_evidence_and_the_control_flips_
                 BuildTestKind::Test,
                 "{id}: the refused event no longer projects to a test run"
             );
-            assert_eq!(target, "unit tests", "{id}: the target changed");
+            assert_eq!(target, "pytest unit tests", "{id}: the target changed");
             assert!(success, "{id}: the summary changed");
         }
         other => panic!(
@@ -2027,7 +2027,7 @@ fn a_write_whose_own_timestamp_cannot_be_read_does_not_supersede_the_run() {
         DeclaredEvent {
             event_type: "test.finished".to_owned(),
             timestamp: "2026-06-30T23:59:58Z".to_owned(),
-            payload: json!({"target": "unit tests", "success": true}),
+            payload: json!({"target": "pytest unit tests", "success": true}),
         },
         DeclaredEvent {
             event_type: "file.write".to_owned(),
@@ -2213,6 +2213,8 @@ fn pipelined_with(
         execution,
         store: None,
         goal,
+        analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run()
@@ -3107,7 +3109,7 @@ fn an_explicit_intent_mismatch_reaches_one_note_and_no_further_and_the_control_f
     // headline — `NeedsAttention` for a run that warned once, `NotEnoughChecked` for
     // the control, which checked nothing at all, a difference that comes from
     // `sure_domain::status::aggregate`'s ordering rather than from the finding
-    // producer — and the findings line, `Open findings: 1 Note.` against `No open
+    // producer — and the findings line, `Unresolved findings: 1 Note.` against `No open
     // findings.`. The two lines that are neither are asserted equal, so a control
     // that moved one of them is red here rather than left to a reader.
     let fixture_lines = rendered_summary(&outcome);
@@ -3125,7 +3127,7 @@ fn an_explicit_intent_mismatch_reaches_one_note_and_no_further_and_the_control_f
     // **This is still the assertion the finding producer is measured by**, in the
     // direction that matters here: a mutation that made
     // `crate::findings_from_checks` raise nothing would take `fixture_lines[3]` back
-    // to `No open findings.` — which reddens the declared summary above, and reddens
+    // to `No unresolved findings.` — which reddens the declared summary above, and reddens
     // `differing` here as well, because the two summaries would then differ at the
     // headline alone. A mutation that made the *control* raise a finding
     // (for instance one that stopped the added file from matching the requirement)
@@ -3137,7 +3139,7 @@ fn an_explicit_intent_mismatch_reaches_one_note_and_no_further_and_the_control_f
          line: {control_lines:?}"
     );
     assert_eq!(
-        control_lines[3], "No open findings.",
+        control_lines[3], "No unresolved findings.",
         "{id}: the control's project answers the request and plans nothing, so it has nothing to \
          leave open"
     );
@@ -4143,8 +4145,8 @@ fn an_unauthorised_dynamic_check_stays_visible_and_the_control_moves_the_users_o
 
     // The whole of what a person reads, by equality rather than by substring.
     // The count of checks that could not run is one of these lines, and so is the
-    // findings line above it — `Open findings: 1 Must fix.` since `P7-T012`,
-    // where it used to read `No open findings.`, and that line is the finding
+    // findings line above it — `Unresolved findings: 1 Must fix.` since `P7-T012`,
+    // where it used to read `No unresolved findings.`, and that line is the finding
     // asserted above rather than a second statement about it. Both have to be
     // there, or a reader takes the report for a project with nothing outstanding
     // when the one thing SURE could not do is the one thing it was asked to do.
@@ -4423,7 +4425,7 @@ fn an_unauthorised_dynamic_check_stays_visible_and_the_control_moves_the_users_o
     // panics in the `find`. M5 additionally reddens the intent-mismatch fixture,
     // which is the direction worth knowing: `Resolved` leaves
     // `FindingStatus::needs_attention`, so the finding drops out of
-    // `open_findings()` and the summary goes back to `No open findings.` on a
+    // `open_findings()` and the summary goes back to `No unresolved findings.` on a
     // run that refused a check.
     //
     // Nothing here asserts that the two findings are equal, and that is

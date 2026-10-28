@@ -13,7 +13,7 @@
     },
     "claim": {
       "id": "claim-tests-not-run",
-      "claim_text": "All 12 unit tests pass.",
+      "claim_text": "All 12 pytest unit tests pass.",
       "claim_type": "test_ran",
       "timestamp": "2026-09-14T09:11:04.000Z"
     },
@@ -33,7 +33,7 @@
         "event_type": "mytest.finished",
         "timestamp": "2026-09-14T09:10:57.000Z",
         "payload": {
-          "target": "unit tests",
+          "target": "pytest unit tests",
           "success": true,
           "counts": {
             "passed": 12,
@@ -44,7 +44,7 @@
     ],
     "expect": {
       "assessment": "cannot_confirm",
-      "reason": "SURE has no recorded event that supports this claim.",
+      "reason": "SURE has no recorded event that supports this claim: the claim names 'pytest', but no recorded test event for that runner was found.",
       "staleness_reason": null,
       "evidence_count": 0,
       "evidence_class": "unknown",
@@ -73,7 +73,7 @@
           "event_type": "test.finished",
           "timestamp": "2026-09-14T09:10:57.000Z",
           "payload": {
-            "target": "unit tests",
+            "target": "pytest unit tests",
             "success": true,
             "counts": {
               "passed": 12,
@@ -106,13 +106,13 @@
       "module": "crates/sure-core/src/claim_checker.rs",
       "reading_module": "crates/sure-core/src/claim_report.rs",
       "detector": "check_claim; the arm reached when no event in the stream matches the claim's family",
-      "title": "AI claim `All 12 unit tests pass.` is assessed cannot_confirm with no evidence attached",
+      "title": "AI claim `All 12 pytest unit tests pass.` is assessed cannot_confirm with no evidence attached",
       "anchor": "none: with no matching event there is no anchor, and SURE names none",
       "status": "reported",
       "assessment": "cannot_confirm",
       "evidence_class": "unknown",
       "evidence_count": 0,
-      "why": "The recording holds two events: a file write at 09:10:56.000Z and `mytest.finished` at 09:10:57.000Z. A `test_ran` claim is matched only against event types starting with `test.`, so neither event is a candidate and the checker attaches nothing. The reason a reader is shown is the sentence that says so, and it is asserted as a string rather than as a substring: `SURE has no recorded event that supports this claim.` The reading a person sees is the rendered claim section, which this fixture asserts in full — one entry, the claim text, the label `Cannot confirm` and that sentence. Measured, and deliberately so: `mytest.finished` projects to `BuildTest { kind: Test, target: \"unit tests\", success: true }` — a test run in every layer except the one that decides — and the fixture asserts both halves, so nobody reads the refusal as SURE failing to understand the event."
+      "why": "The recording holds two events: a file write at 09:10:56.000Z and `mytest.finished` at 09:10:57.000Z. A `test_ran` claim is matched only against event types starting with `test.`, so neither event is a candidate and the checker attaches nothing. The reason a reader is shown is the sentence that says so, and it is asserted as a string rather than as a substring: `SURE has no recorded event that supports this claim: the claim names 'pytest', but no recorded test event for that runner was found.` The reading a person sees is the rendered claim section, which this fixture asserts in full — one entry, the claim text, the label `Cannot confirm` and that sentence. Measured, and deliberately so: `mytest.finished` projects to `BuildTest { kind: Test, target: \"pytest unit tests\", success: true }` — a test run in every layer except the one that decides — and the fixture asserts both halves, so nobody reads the refusal as SURE failing to understand the event."
     },
     {
       "kind": "status",
@@ -157,7 +157,7 @@
     },
     {
       "kind": "silent",
-      "description": "The claim is not reported at all, so the person reading the report takes `All 12 unit tests pass.` at face value and never learns that nothing in the recording supports it."
+      "description": "The claim is not reported at all, so the person reading the report takes `All 12 pytest unit tests pass.` at face value and never learns that nothing in the recording supports it."
     }
   ],
   "notes": "The manifest has a case for this fixture and the two agree: `release_blocking: true` and `expected_severity: must_fix` are copied from `evaluation/acceptance-manifest.json` rather than chosen here, and `every_fixture_agrees_with_the_manifest_about_id_severity_and_blocking` in `crates/sure-testkit/tests/fixture_apps.rs` fails if either drifts. There is no project to run: the fixture is a recording, and the recording is declared in `claim_check` above as the event documents a harness would send, ingested through `sure_core::harness_event::ingest_event_str` and persisted through the real store, so what is graded is the path a real event takes. `crates/sure-core/tests/adversarial_fixture_detection.rs` reads this file, seeds a scratch store under `target/tmp`, and asserts the assessment by equality, the reason by equality, the evidence count, the absence of any anchor, the evidence class, the freshness of what little there is, and the whole of the rendered `AI claims` section. Three reasons reach `cannot_confirm` in `check_claim`, and this fixture pins one of them: the other two are `stale-test-evidence` and `unknown-evidence`, which are the same sentence-shaped answer reached from a matching event. Two limits of the reading, both measured rather than guessed, and both recorded because they are what a real harness would walk into: the family test is a prefix test, so a harness that reports a runner's completion under the runner's own name — `mytest.finished` here — never has its events considered by a `test_ran` claim, however the event projects; and the projection layer below the claim checker reads that same event as a test run, because it looks for the substring `test` anywhere in the type. The two disagree deliberately, and the fixture asserts both sides so the day either changes the record changes with it. A second thing recorded rather than fixed: the claim path's evidence severity is `Note` and the two release-blocking cases in this trio have no route by which a `cannot_confirm` claim stops a hand-off. That is a verdict-layer question — `pipeline::is_confirmed` is the predicate that would decide it and it is called from nowhere but its own test — and minting that rule here would be a change to the product dressed as a fixture."

@@ -9,10 +9,11 @@ saying what they claim the project is**; it is implemented by
 
 Two ecosystems are implemented, each as a module with one entry point:
 **Node** (`node.rs`, from `package.json` and the lockfiles beside it) and
-**Python** (`python.rs`, from `pyproject.toml`, `Pipfile`, `requirements*.txt`
-and the lockfiles beside them). The rule, the four answers, the bounds and the
-gaps below are the same for both; `Ecosystem::ALL` is the list of what a build
-looks for, and `discover()` calls each module in that order.
+**Python** (`python.rs`, from `pyproject.toml`, `Pipfile`, `requirements*.txt`,
+the lockfiles beside them, and dedicated tool config files such as
+`pytest.ini`, `tox.ini` and `ruff.toml`). The rule, the four answers, the bounds
+and the gaps below are the same for both; `Ecosystem::ALL` is the list of what a
+build looks for, and `discover()` calls each module in that order.
 
 The whole of this document is one requirement:
 
@@ -195,7 +196,14 @@ command is a plan, and running it is a later step with its own authorisation.
 meta-framework, web framework, server framework, test runner, end-to-end test,
 linter, formatter, bundler, monorepo tool, runtime, language. A `Tooling` value
 stores the **table's own `&'static str`**, never the project's spelling, so no
-dependency name a project wrote can reach a sentence SURE prints. A package not
+dependency name a project wrote can reach a sentence SURE prints. It also
+carries the file that declared it when discovery can name one — a dependency
+table, a requirements file, a `[tool.*]` section, or a dedicated config file —
+so a check's `declared_in` points at the evidence rather than at whichever
+manifest SURE read first. For the test role, a runner named by a config
+declaration wins over one that merely appears in a dependency list, in the order
+`tox.ini`, `noxfile.py`, `pytest.ini`, the `pyproject.toml` tables, then
+`setup.cfg`; MiQi's project-test detector uses the same order. A package not
 in the table is not reported at all, which is a deliberate silence: "SURE did not
 recognise this package" is not a finding, and guessing from a name would be. One
 package may appear twice when it is genuinely two things — Biome lints *and*
@@ -227,13 +235,16 @@ thousand paths in a discovery result.
 | `pyproject.toml` | dependencies, optional-dependency groups, entry points, the interpreter, the build backend, and any tool table |
 | `Pipfile` | dependencies and dev-dependencies, for pipenv |
 | `requirements*.txt` | dependencies, when a project declares them in a flat file |
+| `pytest.ini`, `tox.ini`, `noxfile.py`, `ruff.toml`, `mypy.ini`, `pyrightconfig.json`, `pylintrc`, `.flake8` | that the named test/lint/type tool is used, even when it is installed outside the project's dependency tables |
 | `uv.lock`, `poetry.lock`, `Pipfile.lock`, `pdm.lock` | which installer the project used |
 | `.python-version` | the interpreter, as the file's own text, trimmed of surrounding whitespace |
-| `setup.py`, `setup.cfg` | that the project declares itself in a way SURE will not read |
+| `setup.py`, `setup.cfg` | that the project declares itself; `setup.cfg`'s tool sections are read, its packaging metadata is not |
 
-**Seven things make this a Python project**, and every one is a project-level
+**Eight things make this a Python project**, and every one is a project-level
 file: a `pyproject.toml`, a `Pipfile`, a `.python-version`, a `setup.py`, a
-`setup.cfg`, a lockfile, a `requirements*.txt`. As with Node, **source files are
+`setup.cfg`, a lockfile, a `requirements*.txt`, or a dedicated tool config file
+(`pytest.ini`, `tox.ini`, `noxfile.py`, and the linter/type-checker files in
+`CONFIG_TOOLS`). As with Node, **source files are
 not on the list** — a directory containing a `.py` file is a directory containing
 a `.py` file. `looks_like_one` is a disjunction over presence probes taken
 *before* any read or any budget spend, so "is this a Python project?" costs
@@ -530,6 +541,75 @@ same reason.
 `clippy` and `rust`; a third table would be a tool SURE does not know, and
 naming it would be repeating a project's text in SURE's own vocabulary.
 
+## Go
+
+SURE reads `go.mod` for the `module`, `go` and `toolchain` directives, and reads
+`go.sum` for its existence. When `go.work` is present it reads its `go`,
+`toolchain` and `use` directives, then reads the `go.mod` of every relative `use`
+directory: a workspace is reported as one component per module, and each readable
+module gets its own `go test ./...`, `go build ./...` and `go vet ./...`, run in
+that module's directory. A `use` directory with no readable `go.mod` gets three
+missing commands. `go.work` `replace` entries are left to the toolchain; absolute `use` paths and
+paths containing `..` are ignored because a component path must stay inside the
+project root; nothing runs `go list` or resolves the module graph. A root with both `go.mod` and
+`go.work` gets the root module's checks plus one set per workspace module.
+
+`go test`/`build`/`vet` are classified as project code, not as an install or a
+network request. A project whose `go.mod` SURE could not read gets three missing
+commands rather than an empty plan, so a report never mistakes an unread
+manifest for a project with nothing to run.
+
+## .NET
+
+SURE looks for a solution (`*.sln`, `*.slnx`) or a project file (`*.csproj`,
+`*.fsproj`, `*.vbproj`) at the project root, reads the chosen file as text to
+prove it is readable, and does not parse it: no project graph is expanded, no
+package reference is resolved, and no MSBuild target is evaluated during
+discovery. `global.json` and `.editorconfig` are recorded by existence only.
+
+The checks are `dotnet test`, `dotnet build`, and — only when `.editorconfig`
+is present — `dotnet format --verify-no-changes --no-restore`. A root with
+several project files and no solution is reported at `InspectOnly` with missing
+commands rather than a guess about which project was meant; a manifest SURE
+could not read is reported the same way.
+
+`dotnet` writes `bin/` and `obj/` inside the project by default. SURE points
+`BaseIntermediateOutputPath`, `MSBuildProjectExtensionsPath` and `OutputPath` at
+`.sure/dotnet/<role>/`, its ignored cache directory, so checking the project
+does not modify it and the fingerprint does not move when the build runs.
+
+## Java
+
+SURE reads `pom.xml` with an XML parser and takes the root `<project>` element's
+direct children: `groupId`, `artifactId`, `version`, `packaging`, and the
+`<modules>` list. A module path is resolved like a `go.work` `use` path — inside
+the project root only — and each module's own `pom.xml` is read the same way.
+The modules become components; the checks stay at the root, because Maven builds
+a reactor from the aggregator and one `mvn test` at the root is one run of every
+module rather than one per module. The checks are `mvn -B -ntp test` and `mvn
+-B -ntp package -DskipTests`; the first is batch mode without transfer
+progress, so a first run's download bars cannot fill the bounded log before the
+part that says whether the build passed. A module with no readable `pom.xml` is
+a finding, and the reactor command is what reports it.
+
+**Profiles, parents and everything else are left to Maven.** A `<modules>` list
+inside a profile is not expanded, because whether a profile is active is a
+decision Maven makes from the environment; coordinates inherited from a parent
+POM are not resolved, because that needs the parent's file. A `pom.xml` SURE
+cannot parse is an unread manifest and the checks are missing commands.
+
+A Gradle project is reported at `InspectOnly` and gets no commands: `build.gradle`
+and `settings.gradle` (or the Kotlin spellings) are code, and SURE does not
+execute or interpret build scripts. `mvnw`/`mvnw.cmd` and `gradlew`/`gradlew.bat`
+are recorded by existence only.
+
+On Windows `mvn` is `mvn.cmd`, a batch file SURE does not start by name. The
+runner translates it the way it translates an npm shim
+(`crate::package_launcher`): `java`, the `boot/plexus-classworlds-*.jar`,
+`bin/m2.conf` and the launcher class, all found under the Maven home the shim's
+own location names, with `JAVA_HOME`'s Java when that is set. Nothing reads the
+batch file.
+
 ## Support levels
 
 `grade` returns the level and the sentence together, as constants, so a level and
@@ -553,6 +633,7 @@ has its own, because what counts as "the manifest" differs.
 | a manifest it could not read | `InspectOnly` | it can only look at the project's files |
 | no readable manifest, but a lockfile | `InspectOnly` | it is plainly a Python project and nothing is declared |
 | only a `requirements*.txt` | `InspectOnly` | a requirements file says what to install and not how the project is built |
+| only tool config files, with no readable manifest | `InspectOnly` | SURE can run the configured checks and cannot read how the project is built |
 | only `setup.py`, `setup.cfg` or `.python-version` | `InspectOnly` | nothing SURE will read declares anything |
 
 **Rust:**
@@ -574,13 +655,11 @@ three facts wearing one label.
 level.** It is the input to it: `sure_core::support::classify` takes the weakest
 of these grades and the best level this build's capability allows, and
 `docs/product/SUPPORTED_STACKS.md` defines the levels by what SURE can do —
-including running checks, which this build does not do. So a readable
-`Cargo.toml` is graded `generic` here and the project it is in is reported at
-level `inspect_only`, with the reason naming both and saying why. The two are
-kept apart rather than merged because collapsing them would mean one of the two
-questions getting a wrong answer; the conflict between the two definitions of
-`generic` is recorded in `sure_core::support`'s module comment and in
-`progress/HANDOFF.md` as an open decision.
+including running approved checks. Since ADR 0017 the ceiling is B, so a
+readable `Cargo.toml` graded `generic` here is reported at level B (generic); a
+project discovery grades `inspect_only` stays C. The two are kept apart rather
+than merged because collapsing them would mean one of the two questions getting
+a wrong answer; level A remains a higher bar than the discovery grade.
 
 ## What is bounded, and how
 
@@ -736,16 +815,19 @@ Recorded so they are not forgotten. None is resolved by a task yet.
    manifest read, and `max_workspace_members` — a Node-era limit — does not apply
    to Python at all.
 
-9. **A project that declares its tooling outside the manifest reports none.**
-   `noxfile.py`, `tox.ini` and `.pre-commit-config.yaml` are three real ways to
-   declare a test runner or a linter, and none is on the list of files SURE looks
-   at — so a project that names `ruff` only in `.pre-commit-config.yaml` is
-   reported as having no linter, which is a negative finding about tooling the
-   project does have. This bears directly on P2-T005's "declared test and lint
-   tooling": SURE detects the tooling declared *in the files it reads*, and
-   `.pre-commit-config.yaml` is not one of them. `noxfile.py` is the same shape as
-   `setup.py` — a program — so reading it would need its own decision rather than
-   an entry in a table.
+9. **A project that declares its tooling outside the files SURE reads reports
+   none.** Dedicated tool config files — `pytest.ini`, `tox.ini`, `noxfile.py`,
+   `ruff.toml`, `mypy.ini`, `pyrightconfig.json`, `pylintrc`, `.flake8` — and
+   `[tool.*]` tables in `pyproject.toml` are read as declarations. `setup.cfg`
+   contributes its `[tool:pytest]`, `[flake8]`, `[mypy]` and `[pylint]` section
+   names; its packaging metadata is still not read. What remains unread is
+   `.pre-commit-config.yaml` (a pre-commit configuration that may name a linter
+   without the project otherwise declaring it). A project that names `ruff` only
+   in `.pre-commit-config.yaml` is still reported as having no linter, which is a
+   negative finding about tooling the project does have. `noxfile.py` is a
+   program like `setup.py`; its *existence* is read as evidence, but it is never
+   executed during discovery — the `python -m nox` check is what runs it, under
+   the same authorization as every other project command.
 
 10. **`Installer::Pip` is inferred, never declared.** There is no `[tool.pip]`
     table in any real project, so pip reaches a finding only through a
@@ -809,11 +891,21 @@ Recorded so they are not forgotten. None is resolved by a task yet.
     the overlap is computed against the truncated list. `Workspaces::truncated`
     is what says the list was cut.
 
+17. **A Maven module list declared inside a profile is not read, and neither is
+    a coordinate inherited from a parent POM.** SURE reads the root `<project>`
+    element's direct children. Both of the others are Maven's own decisions:
+    whether a profile is active depends on the environment, and a parent's
+    coordinates need the parent's file, which may live outside the project or in
+    a repository SURE does not contact. A project whose modules exist only in a
+    profile is therefore reported as a POM with no modules — true about the file
+    SURE read, and not the reactor Maven would build.
+
 ## Enforced by
 
 Node tests are in `crates/sure-core/tests/discover_node.rs`; Python tests are in
 `crates/sure-core/tests/discover_python.rs`; Rust tests are in
-`crates/sure-core/tests/discover_rust.rs`; unit-test names without a file are in
+`crates/sure-core/tests/discover_rust.rs`; Java tests are in
+`crates/sure-core/tests/java_project.rs`; unit-test names without a file are in
 `src/discover/python.rs` or `src/discover/rust.rs` as named.
 
 | Statement | Where the meaning lives | Enforced by |
@@ -834,6 +926,7 @@ Node tests are in `crates/sure-core/tests/discover_node.rs`; Python tests are in
 | Two pieces of manager evidence pointing apart is reported | this document | `a_project_that_names_one_manager_and_locks_another_is_reported_not_resolved`, `two_lockfiles_for_two_managers_are_a_disagreement`, `two_lockfiles_for_two_managers_are_a_disagreement_and_two_for_one_are_not` |
 | The same, for installers | this document, `python.rs` | `two_tool_tables_naming_two_installers_are_a_disagreement`, `a_configured_installer_and_a_lockfile_for_another_are_a_disagreement`, `two_lockfiles_are_reported_as_a_disagreement_rather_than_resolved`, `a_configured_installer_and_another_lockfile_are_a_disagreement` |
 | A requirements file is evidence and never a disagreement | this document | `a_requirements_file_is_the_weakest_evidence_and_never_a_disagreement` |
+| A dedicated config file or `[tool.*]` table declares the tool it configures | this document, gap 9 | `a_dedicated_config_file_declares_a_tool_without_a_dependency`, `tox_ini_and_noxfile_name_their_runners`, `pyproject_tool_sections_declare_tools_without_dependency_entries`, `setup_cfg_tool_sections_declare_tools_without_reading_packaging_metadata` |
 | An `exclude` list is reported beside the member list and never applied to it | this document, gap 12 | `a_member_the_exclude_list_also_names_is_reported_as_both` |
 | A member limit that was reached says so | this document | `members_beyond_the_limit_are_cut_and_the_workspace_says_so` |
 | A virtual manifest's workspace is read from the document | this document, `rust.rs` | `a_workspace_table_is_read_when_there_is_no_package_table`, `a_virtual_manifest_is_a_manifest_and_its_members_are_read`, `an_explicit_workspace_table_with_no_members_is_not_no_workspace_table` |

@@ -287,14 +287,14 @@ impl<'a> ToolRequest<'a> {
 ///
 /// A table rather than the arms of a `match` because the vocabulary is a thing
 /// two callers need to be able to enumerate: the classifier below reads it, and
-/// `every_kind_a_tool_name_can_reach_has_a_witness` walks it — and the Claude
-/// Code table beside it — to hold
+/// `every_kind_a_tool_name_can_reach_has_a_witness` walks it — and the sibling
+/// tables beside it — to hold
 /// [`acts_a_tool_could_be_held_for`] to the rule. A name added here with no
 /// witness is a tool whose grant the writer would refuse for a reason the rule
 /// does not have.
 ///
-/// The two tables are the two harnesses' vocabularies and not one vocabulary
-/// with two spellings, which is what makes *this table does not have the name*
+/// Each table is one harness's vocabulary and not one vocabulary with several
+/// spellings, which is what makes *this table does not have the name*
 /// a different statement from *this table answers the name with the shell*.
 /// [`action_kind_a_tool_name_names`] is the reading that keeps them apart.
 const CURSOR_TOOLS: &[(&str, ActionKind)] = &[
@@ -317,10 +317,10 @@ fn cursor_tool_to_action_kind(tool: &str) -> ActionKind {
 
 /// The [`ActionKind`] one name has in one harness's vocabulary.
 ///
-/// The lookup both maps share, so that "what this harness calls a tool" is one
-/// rule with one table rather than two matches that can drift. A name the
-/// vocabulary does not have falls to [`ActionKind::ArbitraryCommand`], which is
-/// what that harness does with a tool it does not recognise.
+/// The lookup every map shares, so that "what this harness calls a tool" is one
+/// rule with one table rather than a match per harness that can drift. A name
+/// the vocabulary does not have falls to [`ActionKind::ArbitraryCommand`],
+/// which is what that harness does with a tool it does not recognise.
 fn action_kind_in(vocabulary: &[(&str, ActionKind)], tool: &str) -> ActionKind {
     kind_the_vocabulary_claims(vocabulary, tool).unwrap_or(ActionKind::ArbitraryCommand)
 }
@@ -390,15 +390,15 @@ pub fn assess_cursor_tool(
 /// [`ActionKind::WriteProjectFile`] in both.
 ///
 /// `Shell` and `Bash` are the one pair that names the same kind by different
-/// words, which is why the writer reads a name through both tables rather than
+/// words, which is why the writer reads a name through every table rather than
 /// through one chosen by a `--source` argument `sure hook allow-once` does not
 /// take. **A name only one table has is read in that table**, and not also as
-/// the other's unrecognised-name fallback: `Edit` is Claude Code's name for a
+/// the others' unrecognised-name fallback: `Edit` is Claude Code's name for a
 /// change to a project file and a name Cursor's vocabulary does not carry, so
 /// answering it with Cursor's [`ActionKind::ArbitraryCommand`] as well would be
 /// answering it as a shell command by a harness that cannot send it.
 /// [`action_kind_a_tool_name_names`] states that rule and
-/// `every_kind_a_tool_name_can_reach_has_a_witness` is what holds the two tables
+/// `every_kind_a_tool_name_can_reach_has_a_witness` is what holds the tables
 /// to it.
 ///
 /// A name that appears in both and is answered differently by them would make
@@ -454,6 +454,84 @@ pub fn assess_claude_code_tool(
 ) -> Assessment {
     assess_request(
         claude_code_tool_to_action_kind(request.tool),
+        request,
+        mode,
+        permissions,
+        protection,
+    )
+}
+
+/// The whole of MiQi's tool vocabulary that SURE knows, and the [`ActionKind`]
+/// each name is answered as.
+///
+/// The sibling of [`CURSOR_TOOLS`] and [`CLAUDE_CODE_TOOLS`], read by the same
+/// lookup. The names are MiQi's own function names — `exec`, `read_file` and
+/// so on, lowercase, because that is what the harness calls its tools — and no
+/// name in this table belongs to either of the other two, so there is no
+/// overlap for the witness test to hold in agreement.
+///
+/// `list_dir` is deliberately not claimed. The domain has
+/// [`ActionKind::ListDirectory`], but no witness reaches it —
+/// [`DANGER_WITNESSES`] mirrors the ways a request can be held, and a
+/// directory listing has no path role and no command line, so it can reach no
+/// danger — and every name a vocabulary claims must map to a kind a witness
+/// reaches, which `every_kind_a_tool_name_can_reach_has_a_witness` holds.
+/// Claiming the name with a kind that is really a file read would answer it as
+/// something it is not; leaving it unclaimed answers an event that names it as
+/// the shell, through the unknown-name fallback, which is the fail-closed
+/// reading and not a claim about what the tool does. `integrations/miqi/`
+/// records the omission where the integration's readers are.
+const MIQI_TOOLS: &[(&str, ActionKind)] = &[
+    ("exec", ActionKind::ArbitraryCommand),
+    ("read_file", ActionKind::ReadFile),
+    ("write_file", ActionKind::WriteProjectFile),
+    ("edit_file", ActionKind::WriteProjectFile),
+    ("apply_patch", ActionKind::WriteProjectFile),
+];
+
+/// Map a MiQi tool name to the [`ActionKind`] the domain understands.
+fn miqi_tool_to_action_kind(tool: &str) -> ActionKind {
+    action_kind_in(MIQI_TOOLS, tool)
+}
+
+/// Decide whether a MiQi `PreToolUse` request should be allowed.
+///
+/// Uses the existing domain [`decide`] function with the current execution
+/// mode and permissions, and then asks the protection mode's question. No new
+/// rule engine is invented.
+///
+/// This is [`assess_miqi_tool`] without the danger, for a caller that wants
+/// the answer alone.
+///
+/// # Capability tier honesty
+///
+/// MiQi remains **Observed** (tier 1). v1 of the integration records events
+/// and the answers, and the harness does not act on a held decision yet: the
+/// fail-closed bridge that would make acting safe is a separate project with
+/// its own test matrix, and until that lands, reading a decision and not
+/// enforcing it is not protection. So this integration cannot honestly claim
+/// Protected (tier 2). The decision still uses the real mode and permissions
+/// so that the answer is truthful about what SURE would do.
+#[must_use]
+pub fn decide_miqi_tool(
+    request: &ToolRequest<'_>,
+    mode: ExecutionMode,
+    permissions: &ExecutionPermissions,
+    protection: ProtectionMode,
+) -> ProtectionDecision {
+    assess_miqi_tool(request, mode, permissions, protection).decision
+}
+
+/// [`decide_miqi_tool`], and which danger it named on the way.
+#[must_use]
+pub fn assess_miqi_tool(
+    request: &ToolRequest<'_>,
+    mode: ExecutionMode,
+    permissions: &ExecutionPermissions,
+    protection: ProtectionMode,
+) -> Assessment {
+    assess_request(
+        miqi_tool_to_action_kind(request.tool),
         request,
         mode,
         permissions,
@@ -906,14 +984,14 @@ const DANGER_WITNESSES: [(ActionKind, ToolRequest<'static>); 7] = [
 ///
 /// `sure hook allow-once` takes no `--source`: the user is naming the harness
 /// tool they are covering, and a name is the harness's own vocabulary. So the
-/// name is read through both tables ([`CURSOR_TOOLS`],
-/// [`CLAUDE_CODE_TOOLS`]) — but **in the vocabulary that claims it**, which is
-/// not the same rule as the union over both.
+/// name is read through every table ([`CURSOR_TOOLS`],
+/// [`CLAUDE_CODE_TOOLS`], [`MIQI_TOOLS`]) — but **in the vocabulary that
+/// claims it**, which is not the same rule as the union over all of them.
 ///
-/// A union answers a name with every reading either table has for it, and both
-/// tables answer every name they are given: the one that has the name gives its
-/// kind, and the one that does not gives
-/// [`ActionKind::ArbitraryCommand`], which is its fallback for a name it does
+/// A union answers a name with every reading each table has for it, and every
+/// table answers every name it is given: the one that has the name gives its
+/// kind, and the ones that do not give
+/// [`ActionKind::ArbitraryCommand`], which is their fallback for a name they do
 /// not know. For `Edit` — Claude Code's name for a change to a project file, and
 /// a name Cursor's vocabulary does not carry — the union is therefore
 /// `{WriteProjectFile, ArbitraryCommand}`: the harness that sends the name, read
@@ -932,15 +1010,16 @@ const DANGER_WITNESSES: [(ActionKind, ToolRequest<'static>); 7] = [
 /// consent. A user may still cover a tool SURE has never heard of, and what they
 /// cover is a shell's acts.
 ///
-/// The two lookups below are tried in a fixed order — Cursor's table first —
-/// and that order decides nothing: a name both tables claim is answered the same
-/// way by both, and `every_kind_a_tool_name_can_reach_has_a_witness` fails if
-/// that ever stops being true, so no answer rests on which table was asked
-/// first.
+/// The lookups below are tried in a fixed order — Cursor's table first — and
+/// that order decides nothing: a name claimed by more than one table is
+/// answered the same way by each, and
+/// `every_kind_a_tool_name_can_reach_has_a_witness` fails if that ever stops
+/// being true, so no answer rests on which table was asked first.
 #[must_use]
 fn action_kind_a_tool_name_names(tool: &str) -> ActionKind {
     kind_the_vocabulary_claims(CURSOR_TOOLS, tool)
         .or_else(|| kind_the_vocabulary_claims(CLAUDE_CODE_TOOLS, tool))
+        .or_else(|| kind_the_vocabulary_claims(MIQI_TOOLS, tool))
         .unwrap_or(ActionKind::ArbitraryCommand)
 }
 
@@ -2751,13 +2830,18 @@ mod tests {
     /// the vocabulary that claims it, and the other vocabulary's
     /// unrecognised-name fallback is not a second reading of it.
     ///
-    /// It also holds the two tables to agreement where they overlap, which is
-    /// what the reading order in [`action_kind_a_tool_name_names`] rests on, and
-    /// it keeps the arm a name neither knows: a user may still cover a tool SURE
-    /// has never heard of.
+    /// It also holds the tables to agreement wherever they overlap — pairwise,
+    /// so that a pair added later is compared without this doc changing —
+    /// which is what the reading order in [`action_kind_a_tool_name_names`]
+    /// rests on, and it keeps the arm no table knows: a user may still cover a
+    /// tool SURE has never heard of.
     #[test]
     fn every_kind_a_tool_name_can_reach_has_a_witness() {
-        for (name, kind) in CURSOR_TOOLS.iter().chain(CLAUDE_CODE_TOOLS.iter()) {
+        for (name, kind) in CURSOR_TOOLS
+            .iter()
+            .chain(CLAUDE_CODE_TOOLS.iter())
+            .chain(MIQI_TOOLS.iter())
+        {
             assert!(
                 DANGER_WITNESSES
                     .iter()
@@ -2765,14 +2849,23 @@ mod tests {
                 "the tool name {name:?} maps to {kind:?}, which no witness reaches"
             );
         }
-        for (name, kind) in CURSOR_TOOLS {
-            if let Some((_, claude_code)) =
-                CLAUDE_CODE_TOOLS.iter().find(|(other, _)| other == name)
-            {
-                assert_eq!(
-                    kind, claude_code,
-                    "the two harnesses disagree about the tool name {name:?}"
-                );
+        // Pairwise rather than the first two tables by hand: a table added
+        // later is held to agreement without this loop being edited, which is
+        // what keeps a shared name from becoming an answer that depends on
+        // lookup order.
+        let tables: [&[(&str, ActionKind)]; 3] = [CURSOR_TOOLS, CLAUDE_CODE_TOOLS, MIQI_TOOLS];
+        for (position, table) in tables.iter().enumerate() {
+            for (name, kind) in table.iter() {
+                for other in tables.iter().skip(position + 1) {
+                    if let Some((_, other_kind)) =
+                        other.iter().find(|(other_name, _)| other_name == name)
+                    {
+                        assert_eq!(
+                            kind, other_kind,
+                            "the harnesses disagree about the tool name {name:?}"
+                        );
+                    }
+                }
             }
         }
 
@@ -2781,7 +2874,11 @@ mod tests {
         // union over both tables would fail here for `Edit`, and for `Bash`
         // would pass only because both tables happen to answer
         // `ArbitraryCommand`.
-        for (name, kind) in CURSOR_TOOLS.iter().chain(CLAUDE_CODE_TOOLS.iter()) {
+        for (name, kind) in CURSOR_TOOLS
+            .iter()
+            .chain(CLAUDE_CODE_TOOLS.iter())
+            .chain(MIQI_TOOLS.iter())
+        {
             assert_eq!(
                 action_kind_a_tool_name_names(name),
                 *kind,
@@ -2797,6 +2894,14 @@ mod tests {
         assert_eq!(
             action_kind_a_tool_name_names("Bash"),
             ActionKind::ArbitraryCommand
+        );
+        assert_eq!(
+            action_kind_a_tool_name_names("list_dir"),
+            ActionKind::ArbitraryCommand,
+            "`list_dir` is deliberately unclaimed — no witness reaches \
+             `ActionKind::ListDirectory`, so claiming it would answer it with \
+             acts the witness list says nothing about — and an unclaimed name \
+             stays the shell"
         );
 
         // A name neither table knows is the shell, and the arm is deliberate: a

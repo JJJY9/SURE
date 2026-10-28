@@ -309,6 +309,50 @@ fn claude_code_synthetic_fixtures_are_valid_json_with_expected_shape() {
 }
 
 #[test]
+fn miqi_synthetic_fixtures_are_valid_json_with_expected_shape() {
+    let fixtures = sure_testkit::repository_root()
+        .join("integrations")
+        .join("miqi")
+        .join("fixtures");
+    assert!(
+        fixtures.is_dir(),
+        "miqi synthetic fixtures directory must exist"
+    );
+
+    let entries = std::fs::read_dir(&fixtures).expect("fixtures directory is readable");
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry.expect("fixture entry readable");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        count += 1;
+        let text = std::fs::read_to_string(&path).expect("fixture file readable");
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("fixture must be valid JSON");
+        let object = value.as_object().expect("fixture must be a JSON object");
+        for key in ["event", "harness_session_id", "source"] {
+            assert!(
+                object.contains_key(key),
+                "{} must contain '{key}'",
+                path.display()
+            );
+        }
+        assert_eq!(
+            object.get("source").and_then(|v| v.as_str()),
+            Some("miqi"),
+            "{} must declare source as 'miqi'",
+            path.display()
+        );
+    }
+    assert!(
+        count >= 4,
+        "expected at least four miqi synthetic fixtures, found {count}"
+    );
+}
+
+#[test]
 fn cursor_launcher_contract_fixtures_are_valid_json() {
     let launcher = sure_testkit::repository_root()
         .join("integrations")

@@ -162,6 +162,7 @@
 //! an argument holding a space is one argument before it and one argument after it.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::time::Duration;
 
@@ -170,6 +171,7 @@ use sure_domain::status::CheckResult;
 
 use crate::browser;
 use crate::enforce::{AdmittedCommand, Enforcement};
+use crate::package_launcher::PackageLaunchers;
 use crate::planned_work::{
     BrowserCheckSpec, CheckOperation, CommandRun, CommandSpec, ServiceCheckSpec,
 };
@@ -300,6 +302,10 @@ pub struct ProcessRunner {
     /// was not given one. Held as the interface's own alias rather than as the
     /// adapter, so that this file names what it was handed and not what built it.
     driver: Option<browser::Driver>,
+    /// How a package manager installed as a Windows batch shim is started
+    /// (npm's own JavaScript entry through `node`), or `None` for a run that
+    /// starts exactly what the plan names. See [`crate::package_launcher`].
+    launchers: Option<PackageLaunchers>,
 }
 
 /// Written by hand because [`browser::Driver`] is a `Box<dyn …>` and a boxed
@@ -322,6 +328,13 @@ impl fmt::Debug for ProcessRunner {
                     None => "no browser driver",
                 },
             )
+            .field(
+                "launchers",
+                &match self.launchers {
+                    Some(_) => "package-manager launchers",
+                    None => "no package-manager launchers",
+                },
+            )
             .finish()
     }
 }
@@ -338,6 +351,7 @@ impl ProcessRunner {
         Self {
             cancellation,
             driver: None,
+            launchers: None,
         }
     }
 
@@ -364,6 +378,21 @@ impl ProcessRunner {
         self
     }
 
+    /// The same runner, translating a package manager installed as a Windows
+    /// batch shim into `node` and the JavaScript entry npm ships.
+    ///
+    /// **Bound at the composition root, like the browser driver.** A runner
+    /// without this starts exactly what the plan names; the product path
+    /// (`sure-cli/src/check.rs`) gives it the machine's `PATH` so that
+    /// `npm run test` is a run rather than a not-found error on Windows. See
+    /// [`crate::package_launcher`] for what is translated and what is left
+    /// alone.
+    #[must_use]
+    pub fn with_package_launchers(mut self, launchers: PackageLaunchers) -> Self {
+        self.launchers = Some(launchers);
+        self
+    }
+
     /// The handle this runner's requests carry.
     #[must_use]
     pub const fn cancellation(&self) -> &Cancellation {
@@ -376,7 +405,10 @@ impl CheckRunner for ProcessRunner {
         // One call, and the conversion is `CommandRun`'s own: `process::run`
         // returns exactly the `Result` that `From` is written for, so the step
         // from the machinery to the check's result is not a reshape written here.
-        process::run(&work.request(&self.cancellation)).into()
+        // The launchers, when bound, resolve a batch shim to the program the
+        // shim itself runs; the plan's arguments are passed through unchanged.
+        process::run(&work.request_with_launchers(&self.cancellation, self.launchers.as_ref()))
+            .into()
     }
 
     fn run_service(&self, work: &AdmittedService<'_>) -> CheckResult {
@@ -637,13 +669,39 @@ impl<'a> AdmittedRun<'a> {
     /// against the spec it came from without starting anything.
     #[must_use]
     pub fn request(&self, cancellation: &Cancellation) -> ProcessRequest {
+        self.request_with_launchers(cancellation, None)
+    }
+
+    /// The same request, with batch-shim package managers translated to the
+    /// program the shim runs (`node` and npm's own JavaScript entry).
+    ///
+    /// **Only the program and the front of the argument vector can change.** The
+    /// plan's own arguments follow the entry unchanged, the working directory,
+    /// limits and environment are still the spec's, and a runner given no
+    /// launchers produces exactly [`Self::request`]. See
+    /// [`crate::package_launcher`] for what is and is not translated.
+    #[must_use]
+    pub fn request_with_launchers(
+        &self,
+        cancellation: &Cancellation,
+        launchers: Option<&crate::package_launcher::PackageLaunchers>,
+    ) -> ProcessRequest {
+        let mut program: OsString = self.spec.program().to_os_string();
+        let mut arguments: Vec<OsString> = self.spec.arguments().to_vec();
+        if let Some(launchers) = launchers
+            && let Some(launch) =
+                launchers.resolve(&program, &arguments, self.spec.working_directory())
+        {
+            program = launch.program.into_os_string();
+            arguments = launch.arguments;
+        }
         ProcessRequest::new(
-            self.spec.program(),
+            program,
             self.spec.working_directory(),
             self.spec.limits(),
             cancellation.clone(),
         )
-        .with_arguments(self.spec.arguments())
+        .with_arguments(arguments)
         .with_environment(self.spec.environment().clone())
     }
 }

@@ -54,8 +54,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::discover::{
-    Discovery, Ecosystem, Findings, MemberManifest, PythonProject, Source, UnreadReason, node,
-    python, rust,
+    Discovery, DotnetProject, Ecosystem, Findings, GoProject, JavaProject, MemberManifest,
+    PythonProject, Source, UnreadReason, java, node, python, rust,
 };
 
 /// Every component in a project, and which contains which.
@@ -236,6 +236,9 @@ impl Component {
                     Findings::Node(project) => root_reading(&project.manifest),
                     Findings::Python(project) => python_root_reading(project),
                     Findings::Rust(project) => rust_root_reading(&project.manifest),
+                    Findings::Go(project) => go_root_reading(project),
+                    Findings::Dotnet(project) => dotnet_root_reading(project),
+                    Findings::Java(project) => java_root_reading(project),
                 },
             })
             .collect();
@@ -496,6 +499,35 @@ impl EcosystemResolution {
                           read the tables that say so, so a Python project is \
                           reported as one component whether or not it is several.",
             },
+            Some(Findings::Go(project)) => {
+                if project.workspace.is_some() {
+                    Members::Resolved { truncated: false }
+                } else {
+                    Members::NotRead {
+                        because: "SURE could not read this project's go.work, so it \
+                                  cannot tell which modules the workspace names.",
+                    }
+                }
+            }
+            Some(Findings::Dotnet(_)) => Members::NotRead {
+                because: "A .NET solution names its projects, and SURE reads the solution \
+                          marker but does not expand the project graph, so a .NET project \
+                          is reported as one component whether or not it is several.",
+            },
+            Some(Findings::Java(project)) => match project.build {
+                java::JavaBuild::Maven if project.manifest.is_some() => {
+                    members_of(!project.modules.is_empty(), false)
+                }
+                java::JavaBuild::Maven => Members::NotRead {
+                    because: "SURE could not read this project's pom.xml, so it cannot tell \
+                              which modules the reactor names.",
+                },
+                java::JavaBuild::Gradle => Members::NotRead {
+                    because: "A Gradle build script declares its project's modules in code, \
+                              and SURE does not execute or interpret build scripts, so it \
+                              cannot tell which modules the build names.",
+                },
+            },
         };
         Self { ecosystem, members }
     }
@@ -603,6 +635,37 @@ fn add_members(components: &mut Vec<Component>, ecosystem: Ecosystem, findings: 
         // member list later fails to compile here until somebody decides what a
         // Python member is — which is the reason [`Findings`] is an enum.
         Findings::Python(_) => {}
+        Findings::Go(project) => {
+            let declared_by = [Source::new(
+                crate::discover::go::WORKSPACE,
+                "the use directives",
+            )];
+            for module in &project.modules {
+                merge(
+                    components,
+                    ecosystem,
+                    &module.path,
+                    go_member_reading(module),
+                    &declared_by,
+                );
+            }
+        }
+        Findings::Dotnet(_) => {}
+        Findings::Java(project) => {
+            let declared_by = [Source::new(
+                crate::discover::java::MAVEN_MANIFEST,
+                "the modules list",
+            )];
+            for module in &project.modules {
+                merge(
+                    components,
+                    ecosystem,
+                    &module.path,
+                    java_member_reading(module),
+                    &declared_by,
+                );
+            }
+        }
     }
 }
 
@@ -645,6 +708,16 @@ fn merge(
 /// `manifest` is what discovery saw at its name without parsing. The four
 /// combinations are four different things and none of them collapses into
 /// another.
+fn go_member_reading(module: &crate::discover::go::GoModule) -> ManifestReading {
+    if module.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &module.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
 fn member_reading(package_read: bool, manifest: MemberManifest) -> ManifestReading {
     if package_read {
         return ManifestReading::Read;
@@ -684,6 +757,50 @@ fn rust_root_reading(state: &rust::ManifestState) -> ManifestReading {
 /// recorded failure outranks a missing file, because "there is a `pyproject.toml`
 /// SURE could not read" is the answer a reader needs and "no manifest" would be
 /// wrong.
+fn dotnet_root_reading(project: &DotnetProject) -> ManifestReading {
+    if project.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &project.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
+fn go_root_reading(project: &GoProject) -> ManifestReading {
+    if project.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &project.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
+/// Java's root manifest is a Maven POM. A Gradle project has no manifest SURE
+/// reads: its build script is code, so the reading is `NoManifest` rather than
+/// an unread one — SURE did not try to parse it and there is no failure to give.
+fn java_root_reading(project: &JavaProject) -> ManifestReading {
+    if project.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &project.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
+/// One Maven module's `pom.xml`.
+fn java_member_reading(module: &java::MavenModule) -> ManifestReading {
+    if module.manifest.is_some() {
+        ManifestReading::Read
+    } else if let Some(reason) = &module.unread {
+        ManifestReading::Unread(reason.clone())
+    } else {
+        ManifestReading::NoManifest
+    }
+}
+
 fn python_root_reading(project: &PythonProject) -> ManifestReading {
     let states = [&project.manifest, &project.pipfile];
     if states

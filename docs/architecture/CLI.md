@@ -53,20 +53,22 @@ store directory cannot.
 | `sure repair [PATH]` | turn what was found into instructions an agent can act on | works: the same run, carried on to the repair-contract stage, one contract per finding. Each names the check that produced it and the further checks that must pass before it closes, and each is recorded, so the next run has something to compare against |
 | `sure history [list\|show\|delete\|export]` | show what SURE has recorded | works, except `export`: the sessions this machine has recorded, one session's events, and the delete |
 | `sure doctor` | report where SURE keeps its files on this machine, and what it found there | works |
-| `sure config [paths\|show\|validate]` | show the settings in effect and which layer each came from | recognised, not implemented |
+| `sure config show [PATH]` | show the settings in effect and which layer each came from | works: one row per setting with the value and the layer that chose it; the analysis endpoint, model and command are shown only as set or not set, never as values. With no PATH the user layer is read; with PATH the project's `sure.yaml` is read too |
+| `sure config [paths\|validate]` | show where SURE keeps its files, or report configuration problems without checking a project | recognised, not implemented |
 | `sure config set SETTING VALUE` | write one setting into your own settings file, the one outside every project | works: only the settings a run reads from that file, only on request, and never a project's own `sure.yaml` |
 | `sure hook ingest` | record one event from a coding harness | works; for a pre-action event it also answers with the action SURE would take and a sentence saying why |
 | `sure hook allow-once --tool NAME (--command WORDS \| --path PATH) [--project DIR] [--minutes N]` | record a one-time allowance for one request SURE would otherwise hold | works; SURE reads the settings in force and the tool name, and if together they leave a request naming that tool that this project could be held for, it writes the grant to its store and says which acts that covers, read off the settings in force at the moment it writes. If they leave none — the default configuration does, for every tool, and strict-on-its-own does for any tool that is not a read — it refuses, names the tool, and writes nothing, because a grant no matching request could spend is a promise SURE cannot keep. What the sentence offers with it is the change that would make the grant spendable — a setting, where a setting is what stands in the way — which for a tool whose action would change the project's own files is `execution.allow_project_write: true` in the user's own settings file, together with `protection.mode: strict` where the protection in force would otherwise allow the change outright; a project's `sure.yaml` cannot grant that permission, and the sentence says so. Where no setting in this build is the cause the sentence says that instead of naming one, because naming one would be advice to change the wrong thing — and there is no such tool in this build, so that arm is kept for a build in which a permission is once again out of reach rather than deleted. Either way the sentence says the request that spends it has to be one SURE *holds*, rather than promising that the next matching request is let through — see `docs/security/PROTECTION_MODE.md` |
-| `sure explain [ID]` | explain one recorded result in plain language | recognised, not implemented |
+| `sure explain [ID]` | explain one recorded result in plain language | works: a stored finding or check result, by its id or store row; with no ID, the most recent recorded finding (or check result if no finding is recorded). It does not re-run a check and does not turn a stored `CannotConfirm` into a pass |
 | `sure mcp serve` | answer a coding harness that speaks the Model Context Protocol | works; each tool it exposes runs one command in this table and returns that command's own answer |
 | `sure protocol [--speaks VERSION]` | say which harness protocol this build speaks, or whether it can talk to a caller that speaks one | works |
 | `sure version` | print the version of this build | works |
 
-Three options are global — accepted before or after the command name, because they
+Four options are global — accepted before or after the command name, because they
 describe the run rather than the command: `--format human|json`, which the last
 section of this document is about, `--store-dir DIR`, which says where the run's
-record store goes, and `--settings-file FILE`, which says which user-level
-settings file the run reads. A command line may name a store location or a
+record store goes, `--settings-file FILE`, which says which user-level settings
+file the run reads, and `--commands-file FILE`, which supplies user-declared
+check commands for a project SURE cannot discover. A command line may name a store location or a
 settings file whether or not the command in it writes to the store: a location
 that is wrong is a wrong command line, and finding that out only when a command
 happens to write would make the same mistake a usage error in one invocation and
@@ -75,17 +77,15 @@ a silent success in another.
 "Recognised, not implemented" is not a euphemism for a stub. The command parses
 its arguments, decides it cannot do its job, **exits with status 3**, and says in
 one sentence what it did not do. Nothing is half-done and nothing is reported as
-done. `check`, `recheck`, `repair` and `history` have left that list; `sure
-config` and `sure explain` are still on it, and so is `sure history export`,
-which is one action of a command whose other three work.
+done. `check`, `recheck`, `repair`, `history`, `config show` and `explain` have
+left that list; `config paths`, `config validate` and `sure history export`
+remain.
 
-`sure config set` is one action of `sure config` and it is not on that list: it
-writes, it exits 0 or 5 and never 3, and it is documented in its own section
-below. The row above it stays marked "not implemented" because `paths`, `show`
-and `validate` still are — the three of them are a reader, and what a person
-reaches for when a setting is not in force is a writer. Marking the whole command
-implemented because one action arrived would be this document's own defect: a
-table that says a command works is read by scripts and by harnesses.
+`sure config set` and `sure config show` are actions of `sure config` and are not
+on that list: `set` writes and `show` reads, both exit 0 or 5 and never 3, and
+each is documented in its own section below. The `config paths` and `config
+validate` rows stay marked "not implemented" because they are still readers this
+build does not carry out.
 
 Where a command is scheduled is `tasks/tasks.json`. That file is not quoted here
 on purpose: a phase number in a message a user reads is a promise the command
@@ -566,6 +566,39 @@ in force.
 Either way nothing was silently given up: the difference between the two is that
 one of them has somebody waiting and the other does not.
 
+## `--commands-file FILE`
+
+The check commands a user declares for a project SURE cannot discover — a
+Makefile, a shell script, a build system with no manifest SURE knows. The file is
+YAML, names a program and its arguments per role, and is read by `sure check`,
+`sure recheck` and `sure repair`:
+
+```yaml
+commands:
+  test: ["make", "test"]
+  build: ["make", "build"]
+  lint: ["make", "lint"]
+  typecheck: ["make", "typecheck"]
+```
+
+The first element is the program and the rest are arguments, one element per
+argument. **SURE never splits a shell string**, so a command line with pipes,
+redirections or variable expansion is not accepted; write the argv the program
+would receive. Unknown roles, an empty vector and an empty program are refused
+before any check is planned.
+
+**The file replaces the native plan, and it is outside the project.** The file is
+a path from this process's argument vector, refused when it is inside the project
+being checked, for the same reason `--settings-file` is: the project is the thing
+being judged, and a file it can edit is a plan it wrote for its own verdict. A
+role the file omits is recorded as not declared rather than silently dropped, so
+a test-only override is not a green verdict. Commands are planned under the same
+execution mode and permissions as every other check; a run that has not been
+granted `run_project_code` does not run them. The argv is the user's own
+declaration, so it is classified as project code (`Runtime`/`run_project_code`)
+and not re-read as an install or network request the way an unknown program from
+a project's text would be.
+
 ## `sure config set SETTING VALUE`
 
 Write one setting into **your own settings file** — the one outside every project,
@@ -624,7 +657,7 @@ that it will not write *this*.
 ### What it will write
 
 Exactly the settings a **run** reads from that file, and it proves each one while
-it works. There are eight, and every one of them is read from the user's own
+it works. There are nine, and every one of them is read from the user's own
 layer by `Authority`:
 
 | Setting | Values |
@@ -636,6 +669,7 @@ layer by `Authority`:
 | `privacy.full_recording` | `true`, `false` |
 | `privacy.full_recording_retention_days` | `0` or more |
 | `privacy.mode` | the privacy modes this build knows, from `PrivacyMode::ALL` |
+| `analysis.provider` | the analysis providers this build knows, from `AnalysisProvider::ALL`; `analysis.endpoint`, `analysis.model` and `analysis.command` are edited in the file, not by this command |
 | `protection.mode` | the protection modes this build knows, from `ProtectionMode::ALL` |
 
 The value lists are the product's own — read out of those `ALL` lists rather than
@@ -730,6 +764,35 @@ disagree about what it says, because it is one function reading it.
 tell the three apart without reading the sentence, and `granted_error` is filled
 in instead of `granted` when the file was written and the read-back could not be
 done: the file *was* changed, and saying so is more important than the read-back.
+
+## `sure config show [PATH]`
+
+Print the settings in effect, one row per setting, and the layer that chose it:
+your own settings, the project's `sure.yaml`, or the default. With no `PATH` only
+the user layer is read; with `PATH` the project's `sure.yaml` is read too.
+
+It never prints the analysis endpoint, model or command. Those rows say **set**
+or **not set**; the values stay in the file, so the output can be pasted into an
+issue without carrying a credential. `sure doctor` still does not read settings at
+all — this command is where the arbitration between the two layers is reported.
+
+Exit 0. A project path that is relative, or a path where there is no directory,
+exits 5 with the reason.
+
+## `sure explain [ID]`
+
+Explain one recorded finding or check result in plain language. `ID` may be the
+stable finding id (`fnd_…`), the check-result id (`chk_…`), or the store row
+number `sure history show` prints. With no id, the most recent recorded finding
+is explained; if no finding was recorded, the most recent check result is.
+
+It opens the store, decodes the document that was recorded, and prints what it
+says — title, severity, status, evidence and next step. It never re-runs a check
+and never turns a stored `CannotConfirm` into a pass. `sure check` does not record
+a result; `sure repair` and `sure recheck` do.
+
+Exit 0 when a result was explained. Exit 5 when there is no store, no matching
+result, or the row is not a finding or check result.
 
 ## Two output paths, and no third
 

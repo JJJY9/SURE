@@ -683,8 +683,8 @@ fn limitations() -> Vec<String> {
              `sure_core::enforce` admits no command that runs project code, so the checks that would \
              run one are planned and left unrun rather than executed. That is a fact about these \
              drives, and since `P18-T007` it is no longer a fact about the build: the pipeline reaches \
-             the runner, and `crates/sure-core/src/support.rs`'s ceiling of level C rests on level B \
-             being a claim about every platform SURE runs on rather than on a route nobody takes. The \
+             the runner, and the support ceiling is B since ADR 0017, resting on the tracked \
+             three-platform reading rather than on a route nobody takes. The \
              one case whose checks really run — `repair-regression` — has them run from \
              `crates/sure-core/tests/acceptance_report_runner.rs` through `sure_core::process`, and its \
              row names that file as the surface.",
@@ -1432,6 +1432,8 @@ fn intent(fixtures_root: &Path, id: &str) -> Result<Measurement, CorpusError> {
         execution: ExecutionSettings::inspect_only(),
         store: None,
         goal: None,
+        analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();
@@ -1681,6 +1683,8 @@ fn execution_refusal(
         execution: authority.execution(),
         store: None,
         goal: None,
+        analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();
