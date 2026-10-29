@@ -139,6 +139,7 @@ use sure_domain::ids::{CheckId, FingerprintId};
 use sure_domain::severity::Severity;
 use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason};
 
+use crate::discover::Invocation;
 use crate::fingerprint::digest::Digest;
 use crate::planned_work::{CheckOperation, CommandSpec};
 use crate::process::{Environment, Limits};
@@ -268,6 +269,28 @@ pub(crate) const CHECK_LIMITS: Limits =
 /// the project's own command run in the user's own
 /// shell's environment, and a check that could not find `node` would report a
 /// missing toolchain that is installed.
+/// Whether SURE's own command classifier can read this planned invocation.
+///
+/// **The cross-layer invariant, as a function.** The discovery layer builds a
+/// command line; the execution layer decides whether it may run, and that
+/// decision starts with [`crate::safety::classify`]. A command the classifier
+/// does not know is refused under every mode — an unknown operation can only be
+/// approved by naming that exact command — so a plan that carries one produces
+/// a scheduled check that cannot run, and the failure is reported as the
+/// project's when it is SURE's. The checks layer asks this before proposing; a
+/// `false` answer becomes a [`MissingKind::NotRunnable`] instead of a proposal.
+#[must_use]
+pub(crate) fn command_is_classifiable(invocation: &Invocation) -> bool {
+    let classification = crate::safety::classify(
+        invocation.program(),
+        invocation.arguments().iter().map(String::as_str),
+    );
+    !matches!(
+        classification.source(),
+        crate::safety::Source::UnknownProgram | crate::safety::Source::UnknownOperation
+    )
+}
+
 #[must_use]
 pub(crate) fn command_operation(
     program: &str,
@@ -380,6 +403,36 @@ pub enum MissingKind {
         /// The discovery's own sentence, never project text.
         why: &'static str,
     },
+    /// The project declares a tool SURE knows, and SURE does not know how to
+    /// run it.
+    ///
+    /// `mccabe` is a flake8 plugin with no standalone command; `pyflakes`
+    /// takes files and not a directory. Both are ordinary, valid declarations
+    /// that SURE's tool table has no invocation for, and the check is recorded
+    /// as not run with the tool named rather than planned as a command that
+    /// could only exit 2. The alternative — a check that fails for a reason
+    /// that is not the project's — is the failure this variant exists against.
+    ///
+    /// **Not a scope limit.** A critical test runner SURE cannot start still
+    /// keeps the run out of green: SURE could not observe the project's tests,
+    /// and calling that green would be the false green the product ranks above
+    /// every visible error. `tool` comes from SURE's own tool table, never
+    /// project text.
+    NotRunnable {
+        /// The package the project declared, from SURE's own table.
+        tool: &'static str,
+    },
+    /// The check's own command is one SURE's safety classifier cannot read.
+    ///
+    /// The discover layer built the command and the execution layer would
+    /// refuse it as an unknown operation under every mode, so scheduling it
+    /// would produce a check that cannot run and a report that blames the
+    /// project for SURE's gap. The checks layer refuses to propose it, and this
+    /// is the sentence the report prints instead.
+    ///
+    /// **Not a scope limit**, for [`Self::NotRunnable`]'s reason: SURE could not
+    /// observe what the check was about.
+    Unclassifiable,
 }
 
 /// The sentence for the case where nothing at all names a runner.
@@ -403,6 +456,8 @@ impl MissingKind {
         Self::NoRunner {
             why: NOTHING_NAMES_A_RUNNER,
         },
+        Self::NotRunnable { tool: "mccabe" },
+        Self::Unclassifiable,
     ];
 
     /// The frozen reason this maps onto.
@@ -435,9 +490,11 @@ impl MissingKind {
     pub const fn not_checked_reason(&self) -> NotCheckedReason {
         match self {
             Self::NotDeclared => NotCheckedReason::NotApplicable,
-            Self::NotACommand | Self::NotReadable | Self::NoRunner { .. } => {
-                NotCheckedReason::UnknownReason
-            }
+            Self::NotACommand
+            | Self::NotReadable
+            | Self::NoRunner { .. }
+            | Self::NotRunnable { .. }
+            | Self::Unclassifiable => NotCheckedReason::UnknownReason,
         }
     }
 
@@ -455,6 +512,15 @@ impl MissingKind {
                     .to_owned()
             }
             Self::NoRunner { why } => (*why).to_owned(),
+            Self::NotRunnable { tool } => format!(
+                "Your project declares `{tool}` for this, and SURE does not know how to run \
+                 that tool, so it will not guess."
+            ),
+            Self::Unclassifiable => {
+                "SURE planned a command for this check that its own command rules do not \
+                 recognise, so it will not run it."
+                    .to_owned()
+            }
         }
     }
 }
@@ -796,7 +862,7 @@ mod tests {
         // saying which reason. An empty component is refused by the discovery
         // rather than here — what is held here is that the three kinds are three
         // values, so a caller that has one cannot be read as having another.
-        assert_eq!(MissingKind::ALL.len(), 4);
+        assert_eq!(MissingKind::ALL.len(), 6);
         assert_ne!(MissingKind::NotDeclared, MissingKind::NotACommand);
         assert_ne!(MissingKind::NotACommand, MissingKind::NotReadable);
         assert_ne!(MissingKind::NotDeclared, MissingKind::NotReadable);
@@ -887,6 +953,8 @@ mod tests {
             MissingKind::NoRunner {
                 why: NOTHING_NAMES_A_RUNNER,
             },
+            MissingKind::NotRunnable { tool: "mccabe" },
+            MissingKind::Unclassifiable,
         ] {
             assert_eq!(kind.not_checked_reason(), NotCheckedReason::UnknownReason);
             assert_ne!(
@@ -903,7 +971,7 @@ mod tests {
             .iter()
             .map(MissingKind::plain_explanation)
             .collect();
-        assert_eq!(sentences.len(), 4);
+        assert_eq!(sentences.len(), 6);
         for (index, sentence) in sentences.iter().enumerate() {
             assert!(
                 !sentences[index + 1..].contains(sentence),

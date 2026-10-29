@@ -1713,12 +1713,13 @@ pub fn invocation_for(
         CommandRole::Build => {
             declared_tool(role, tools)?;
             Some(match manager {
-                Some(manager) if manager != Installer::Pip => {
-                    Invocation::of(manager.as_str(), &["build"])
-                }
+                Some(Installer::Uv) => Invocation::of("uv", &["build"]),
+                Some(Installer::Poetry) => Invocation::of("poetry", &["build"]),
+                Some(Installer::Pdm) => Invocation::of("pdm", &["build"]),
                 // `python -m build` is the frontend the packaging specification
-                // defines, and it is what is left when the project declared a
-                // backend and no installer to drive it.
+                // defines, and it is what is left for pip and Pipenv: neither
+                // has a `build` subcommand of its own. Naming `<manager> build`
+                // for them would be a plan that does not run.
                 _ => Invocation::of("python", &["-m", "build"]),
             })
         }
@@ -1728,7 +1729,8 @@ pub fn invocation_for(
         // a command.
         _ => {
             let tool = declared_tool(role, tools)?;
-            Some(with_role_targets(role, tool, run_invocation(manager, tool)))
+            let (module, arguments) = plan_for(role, tool)?;
+            Some(run_invocation(manager, module, arguments))
         }
     }
 }
@@ -1760,42 +1762,171 @@ fn declared_tool(role: CommandRole, tools: &[Tooling]) -> Option<&str> {
     matching().next().map(|tool| tool.package)
 }
 
+/// A tool SURE knows how to run for one role.
+///
+/// **The counterpart to [`TOOLS`], and the reason the two are separate.** `TOOLS`
+/// says which package fills a role; this says how that package is started. A
+/// package can be the first and not the second, and when it is not, SURE must
+/// say so rather than invent a command line — otherwise the plan carries a
+/// check that could never pass, and the re-check reports a failure that is
+/// SURE's rather than the project's.
+///
+/// [`TOOLS`]: static@TOOLS
+struct ToolPlan {
+    /// The package name, from [`TOOLS`].
+    package: &'static str,
+    /// The role this invocation is for. A package can fill one and not
+    /// another: `ruff` is a linter here, never a test runner.
+    role: CommandRole,
+    /// The name `python -m` receives, or the program `<manager> run` starts.
+    /// The same as `package` unless the distribution and the importable module
+    /// differ (`robotframework` ships `robot`).
+    module: &'static str,
+    /// The arguments appended after the module name. Empty when the tool's bare
+    /// form is the check.
+    arguments: &'static [&'static str],
+}
+
+/// How SURE runs each Python tool it plans a check for.
+///
+/// **A test runner defaults to the project; a linter and a type checker do
+/// not.** Bare `pytest` collects the project, which is why its arguments are
+/// empty. Bare `ruff` prints its help screen and exits 2, and bare `mypy`
+/// refuses with "Missing target module" — measured on a real project on
+/// 2026-10-29, where SURE planned `python -m ruff` and `python -m mypy` and
+/// could never have passed either. So the linters and type checkers name the
+/// project root, `.`, and `ruff` additionally names its `check` subcommand.
+///
+/// **The table is deliberately shorter than [`TOOLS`].** A linter whose CLI
+/// takes files rather than a directory (`pyflakes`, `mccabe`) and a type
+/// checker that is a library rather than a command (`typeguard`, `beartype`)
+/// are not listed. A project that declares one of those gets a
+/// [`MissingKind::NotRunnable`](crate::checks::MissingKind::NotRunnable)
+/// instead of a command that could only fail — the difference between a check
+/// SURE could not run and one that fails for a reason that is not the project's.
+///
+/// [`TOOLS`]: static@TOOLS
+const PYTHON_TOOL_PLANS: &[ToolPlan] = &[
+    // Test runners.
+    ToolPlan {
+        package: "pytest",
+        role: CommandRole::Test,
+        module: "pytest",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "nose2",
+        role: CommandRole::Test,
+        module: "nose2",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "nose",
+        role: CommandRole::Test,
+        module: "nose",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "tox",
+        role: CommandRole::Test,
+        module: "tox",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "nox",
+        role: CommandRole::Test,
+        module: "nox",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "green",
+        role: CommandRole::Test,
+        module: "green",
+        arguments: &[],
+    },
+    ToolPlan {
+        package: "robotframework",
+        role: CommandRole::Test,
+        module: "robot",
+        arguments: &["."],
+    },
+    // Linters.
+    ToolPlan {
+        package: "ruff",
+        role: CommandRole::Lint,
+        module: "ruff",
+        arguments: &["check", "."],
+    },
+    ToolPlan {
+        package: "flake8",
+        role: CommandRole::Lint,
+        module: "flake8",
+        arguments: &["."],
+    },
+    ToolPlan {
+        package: "pylint",
+        role: CommandRole::Lint,
+        module: "pylint",
+        arguments: &["."],
+    },
+    ToolPlan {
+        package: "pycodestyle",
+        role: CommandRole::Lint,
+        module: "pycodestyle",
+        arguments: &["."],
+    },
+    ToolPlan {
+        package: "pydocstyle",
+        role: CommandRole::Lint,
+        module: "pydocstyle",
+        arguments: &["."],
+    },
+    ToolPlan {
+        package: "vulture",
+        role: CommandRole::Lint,
+        module: "vulture",
+        arguments: &["."],
+    },
+    // Type checkers.
+    ToolPlan {
+        package: "mypy",
+        role: CommandRole::TypeCheck,
+        module: "mypy",
+        arguments: &["."],
+    },
+    ToolPlan {
+        package: "pyright",
+        role: CommandRole::TypeCheck,
+        module: "pyright",
+        arguments: &["."],
+    },
+];
+
+/// The module and arguments for one tool in one role, if SURE knows them.
+fn plan_for(role: CommandRole, tool: &str) -> Option<(&'static str, &'static [&'static str])> {
+    PYTHON_TOOL_PLANS
+        .iter()
+        .find(|plan| plan.package == tool && plan.role == role)
+        .map(|plan| (plan.module, plan.arguments))
+}
+
 /// A tool a project runs, through the installer if there is one.
-fn run_invocation(manager: Option<Installer>, tool: &str) -> Invocation {
-    match manager {
+fn run_invocation(manager: Option<Installer>, module: &str, arguments: &[&str]) -> Invocation {
+    let mut invocation = match manager {
         // `uv run`, `poetry run` and `pdm run` all execute a command inside the
         // project's environment. `pipenv run` does the same for pipenv.
         Some(manager) if manager != Installer::Pip => {
-            Invocation::of(manager.as_str(), &["run", tool])
+            Invocation::of(manager.as_str(), &["run", module])
         }
         // pip has no `run`: it installs, and `python -m` is how the standard
         // library names a module. `pytest` alone would be a command that
         // depends on which interpreter is first on the path.
-        _ => Invocation::of("python", &["-m", tool]),
+        _ => Invocation::of("python", &["-m", module]),
+    };
+    for argument in arguments {
+        invocation = invocation.with_argument(argument);
     }
-}
-
-/// The target a lint or type check runs over, appended to the tool's own name.
-///
-/// **A test runner defaults to the project; a linter and a type checker do
-/// not.** Bare `pytest` collects the project, which is why its plan needs no
-/// argument. Bare `ruff` prints its help screen and exits 2, and bare `mypy`
-/// refuses with "Missing target module" — measured on a real project on
-/// 2026-10-29, where SURE planned `python -m ruff` and `python -m mypy` and
-/// could never have passed either. So the check names the project root, `.`,
-/// and ruff additionally needs its `check` subcommand: its bare form has been
-/// the help screen since 0.1.
-///
-/// The other linters SURE can plan (`flake8`, `pylint`, `pyflakes`,
-/// `pycodestyle`, `pydocstyle`, `vulture`) and the other type checkers
-/// (`pyright`, `pytype`) all take a path and default to nothing without one,
-/// so they share the `.`.
-fn with_role_targets(role: CommandRole, tool: &str, invocation: Invocation) -> Invocation {
-    match role {
-        CommandRole::Lint if tool == "ruff" => invocation.with_argument("check").with_argument("."),
-        CommandRole::Lint | CommandRole::TypeCheck => invocation.with_argument("."),
-        _ => invocation,
-    }
+    invocation
 }
 
 /// The plan that installs a project's dependencies.

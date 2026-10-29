@@ -476,6 +476,13 @@ impl PythonChecks {
             // is what `command_for` renders, so the row a report prints and the
             // program a runner would start cannot come from two decisions.
             let invocation = invocation_for(installer, role, &project.tooling);
+            // What the project declared for this role, when it declared a tool
+            // at all. The difference decides which sentence the report prints:
+            // "nothing declares this" versus "it declares a tool SURE cannot
+            // run".
+            let declared_for_role = tool_role(role)
+                .and_then(|wanted| project.tooling_of_role(wanted).next())
+                .map(|tool| tool.package);
 
             // The order is Node's and the reason is the same: *is the tool
             // declared* is asked before *can SURE tell where it lives*, because
@@ -489,7 +496,10 @@ impl PythonChecks {
                     declared_in.clone(),
                     check.severity,
                     check.critical,
-                    gap_kind(project, role),
+                    match declared_for_role {
+                        Some(tool) => MissingKind::NotRunnable { tool },
+                        None => gap_kind(project, role),
+                    },
                 )),
                 (Some(_), Runner::Unknown { why }) => checks.missing.push(MissingCommand::new(
                     id,
@@ -499,6 +509,22 @@ impl PythonChecks {
                     check.critical,
                     MissingKind::NoRunner { why },
                 )),
+                // **The cross-layer invariant.** A command SURE's own safety
+                // classifier cannot read is refused under every mode, so a
+                // proposal carrying it could only become a check that runs
+                // nowhere and reports as the project's failure. The checks layer
+                // refuses it here instead; `tests/command_plan_conformance.rs`
+                // holds the same invariant over every ecosystem.
+                (Some(invocation), _) if !super::command_is_classifiable(&invocation) => {
+                    checks.missing.push(MissingCommand::new(
+                        id,
+                        title,
+                        declared_in.clone(),
+                        check.severity,
+                        check.critical,
+                        MissingKind::Unclassifiable,
+                    ))
+                }
                 (Some(invocation), _) => checks.proposed.push(PlannedWork::new(
                     CheckProposal::new(
                         id,
