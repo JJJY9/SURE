@@ -1017,6 +1017,27 @@ const PYTHON_MODULES: &[Module] = &[
         names: &["pytest", "unittest"],
         classes: RUNS_CODE,
     },
+    // A linter and a type checker import (and therefore run) the project's
+    // code: flake8/pylint load modules to inspect them, and mypy/pyright follow
+    // imports. SURE plans these as `python -m <tool> …` for pip projects, so
+    // the module name is what the classifier sees. Without these rows the plan
+    // is an unknown command: refused as not authorized even in host-confirmed
+    // mode, measured on a real project on 2026-10-29.
+    Module {
+        names: &[
+            "ruff",
+            "flake8",
+            "pylint",
+            "pyflakes",
+            "pycodestyle",
+            "pydocstyle",
+            "vulture",
+            "mypy",
+            "pyright",
+            "pytype",
+        ],
+        classes: RUNS_CODE,
+    },
 ];
 
 const COMMAND_INTERPRETER: &str = "a command interpreter: whether what follows it is a program or \

@@ -1728,7 +1728,7 @@ pub fn invocation_for(
         // a command.
         _ => {
             let tool = declared_tool(role, tools)?;
-            Some(run_invocation(manager, tool))
+            Some(with_role_targets(role, tool, run_invocation(manager, tool)))
         }
     }
 }
@@ -1772,6 +1772,29 @@ fn run_invocation(manager: Option<Installer>, tool: &str) -> Invocation {
         // library names a module. `pytest` alone would be a command that
         // depends on which interpreter is first on the path.
         _ => Invocation::of("python", &["-m", tool]),
+    }
+}
+
+/// The target a lint or type check runs over, appended to the tool's own name.
+///
+/// **A test runner defaults to the project; a linter and a type checker do
+/// not.** Bare `pytest` collects the project, which is why its plan needs no
+/// argument. Bare `ruff` prints its help screen and exits 2, and bare `mypy`
+/// refuses with "Missing target module" — measured on a real project on
+/// 2026-10-29, where SURE planned `python -m ruff` and `python -m mypy` and
+/// could never have passed either. So the check names the project root, `.`,
+/// and ruff additionally needs its `check` subcommand: its bare form has been
+/// the help screen since 0.1.
+///
+/// The other linters SURE can plan (`flake8`, `pylint`, `pyflakes`,
+/// `pycodestyle`, `pydocstyle`, `vulture`) and the other type checkers
+/// (`pyright`, `pytype`) all take a path and default to nothing without one,
+/// so they share the `.`.
+fn with_role_targets(role: CommandRole, tool: &str, invocation: Invocation) -> Invocation {
+    match role {
+        CommandRole::Lint if tool == "ruff" => invocation.with_argument("check").with_argument("."),
+        CommandRole::Lint | CommandRole::TypeCheck => invocation.with_argument("."),
+        _ => invocation,
     }
 }
 

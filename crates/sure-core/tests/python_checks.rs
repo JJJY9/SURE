@@ -258,8 +258,8 @@ fn a_real_manifest_reaches_the_checks_layer_with_the_tools_it_declares() {
         commands(&checks),
         vec![
             (CommandRole::Test, "uv run pytest".to_owned()),
-            (CommandRole::Lint, "uv run ruff".to_owned()),
-            (CommandRole::TypeCheck, "uv run mypy".to_owned()),
+            (CommandRole::Lint, "uv run ruff check .".to_owned()),
+            (CommandRole::TypeCheck, "uv run mypy .".to_owned()),
             (CommandRole::Build, "uv build".to_owned()),
         ],
         "a project that declares all four tools does not get the four checks \

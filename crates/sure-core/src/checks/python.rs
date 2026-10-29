@@ -1509,7 +1509,10 @@ mod tests {
         let checks = checks_of(&found);
         assert_eq!(checks.planned().len(), 2, "{:?}", checks.missing());
         assert_eq!(command_of(&checks, CommandRole::Test), "uv run pytest");
-        assert_eq!(command_of(&checks, CommandRole::Lint), "uv run ruff");
+        assert_eq!(
+            command_of(&checks, CommandRole::Lint),
+            "uv run ruff check ."
+        );
 
         for proposal in proposals(&checks) {
             assert_eq!(
@@ -1568,8 +1571,8 @@ mod tests {
         let checks = checks_of(&a_complete_project());
         let expected: &[(CommandRole, &str, &[&str])] = &[
             (CommandRole::Test, "uv", &["run", "pytest"]),
-            (CommandRole::Lint, "uv", &["run", "ruff"]),
-            (CommandRole::TypeCheck, "uv", &["run", "mypy"]),
+            (CommandRole::Lint, "uv", &["run", "ruff", "check", "."]),
+            (CommandRole::TypeCheck, "uv", &["run", "mypy", "."]),
             // `setuptools` is a library rather than a command, so the plan is
             // the frontend's own subcommand.
             (CommandRole::Build, "uv", &["build"]),
