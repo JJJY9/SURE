@@ -990,6 +990,7 @@ const UV_VERBS: &[Verb] = &[
         }],
     ),
     verb(&["sync", "add", "remove"], INSTALLS_AND_RUNS),
+    verb(&["build"], RUNS_CODE),
     verb(&["lock"], REACHES_NETWORK),
     verb(&["version", "help"], STATIC_ONLY),
 ];
@@ -1000,8 +1001,38 @@ const POETRY_VERBS: &[Verb] = &[
         &["install", "add", "update", "remove", "sync"],
         INSTALLS_AND_RUNS,
     ),
+    verb(&["build"], RUNS_CODE),
     verb(&["lock"], REACHES_NETWORK),
     verb(&["show", "check"], STATIC_ONLY),
+];
+
+/// PDM's verbs, read from its own command set.
+///
+/// `build` and `run` execute project code; the dependency verbs install and
+/// resolve. `config` and `venv` are absent on purpose: both can write, and a
+/// verb SURE has not classified is refused rather than guessed at.
+const PDM_VERBS: &[Verb] = &[
+    verb(&["run"], RUNS_CODE),
+    verb(&["build"], RUNS_CODE),
+    verb(
+        &["install", "add", "remove", "update", "sync", "lock"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(&["list", "show", "info"], STATIC_ONLY),
+];
+
+/// Pipenv's verbs. It has no `build` subcommand of its own, which is why the
+/// build plan for a Pipenv project is `python -m build` and not `pipenv build`.
+const PIPENV_VERBS: &[Verb] = &[
+    verb(&["run"], RUNS_CODE),
+    verb(
+        &["install", "uninstall", "sync", "lock", "update", "upgrade"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(
+        &["check", "graph", "requirements", "scripts", "where"],
+        STATIC_ONLY,
+    ),
 ];
 
 const PYTHON_MODULES: &[Module] = &[
@@ -1189,6 +1220,26 @@ const ENTRY_TABLE: &[Entry] = &[
         module_flag: None,
         text_flags: &[],
         value_flags: &["-C", "--directory", "--project"],
+    },
+    Entry {
+        names: &["pdm"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: PDM_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["-p", "--project", "-d", "--directory", "--python"],
+    },
+    Entry {
+        names: &["pipenv"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: PIPENV_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["--python", "--where", "--project"],
     },
     Entry {
         names: &["node"],
