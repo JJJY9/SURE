@@ -1000,8 +1000,12 @@ Write-Output $archive
         let output = scratch.join("manifests");
         let run = render(&host, &archive, &output);
         succeeded(&run, "rendering a manifest with winget on PATH");
+        // Winget's own success sentence is localized — measured on a zh-CN
+        // machine, which prints `清单验证成功。` — so the script's own OK line is
+        // the locale-independent verdict marker. `succeeded` has already
+        // checked the exit status, which is the other half.
         assert!(
-            run.stdout.contains("Manifest validation succeeded."),
+            run.stdout.contains("accepted by winget validate"),
             "the run did not report winget's verdict:\n{}",
             run.everything()
         );
