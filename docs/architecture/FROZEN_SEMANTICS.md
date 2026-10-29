@@ -30,6 +30,10 @@ decisions *mean* and where that meaning is enforced.
 
 Each of those ADRs carries a "Frozen semantics" section pointing back here.
 
+ADR 0019 (a person can accept a finding SURE could not settle) amends the
+aggregation rules below without changing any wire name; it is listed in the
+enforcement table under `aggregate_with_accepted`.
+
 ## Where each decision is enforced
 
 | Decision | Frozen in | Enforced by |
@@ -41,6 +45,7 @@ Each of those ADRs carries a "Frozen semantics" section pointing back here.
 | The event format version | this document | `sure_protocol::PROTOCOL_VERSION` |
 | Check statuses | `schemas/check-result.schema.json` | `crates/sure-domain/src/status.rs` |
 | Aggregation and the false-green rule | `MASTER_PROMPT.md` §9 | `sure_domain::status::aggregate` |
+| An accepted finding is a decision, not a pass | `docs/adr/0019-acknowledged-findings.md` | `sure_core::acknowledgement`, `sure_domain::status::aggregate_with_accepted` |
 | Severity levels | `docs/product/UX_AND_LANGUAGE.md` | `crates/sure-domain/src/severity.rs` |
 | Evidence classes and truth order | `docs/architecture/EVIDENCE_MODEL.md` | `crates/sure-domain/src/evidence.rs` |
 | A check result declares its evidence class and its project state | `docs/architecture/EVIDENCE_MODEL.md`, `DOMAIN_MODEL.md` | `sure_domain::status::CheckResult` |
@@ -104,6 +109,17 @@ A critical check is **out of scope** when its reason is `not_applicable`,
 `unsupported_stack` or `disabled_by_configuration`. Those reasons are honest
 scope limits the user chose or the project shape implies. Every other
 not-checked reason is a gap and counts against a green verdict.
+
+**Amended by ADR 0019 (domain semantics version 2).** One clause, and only one:
+rule 4 is relaxed for a `warning` result whose finding a person has recorded an
+acceptance of (`FindingStatus::AcceptedRisk`, written by `sure acknowledge` to
+the user-level store, outside the project). Such a warning no longer makes the
+run `needs_attention`; `sure_domain::status::aggregate_with_accepted` is the
+function, rules 1, 2, 3 and 5 are untouched, a `fail`, an `error`, an `unknown`
+and every skipped check are never discounted, and a run that is green because of
+acceptances says how many in its headline. The accepted result itself keeps its
+`warning` status in the report — the acceptance is a decision about the finding,
+not a pass for the command.
 
 Independently of the aggregate, `ProjectVerdict::is_ready_for_hand_off` returns
 false whenever an open `must_fix` finding exists. A green aggregate next to an

@@ -104,6 +104,7 @@
 //! against would be a command changing the thing it is describing. `sure doctor`
 //! states the same rule for the same reason.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -117,9 +118,10 @@ use sure_domain::finding::{
 use sure_domain::ids::{CheckId, ClaimId, FingerprintId};
 use sure_domain::intent::{IntentSource, ProjectIntent};
 use sure_domain::severity::Severity;
-use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason};
+use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason, aggregate_with_accepted};
 use sure_domain::vocabulary::{Claim, ProjectFingerprint, ProjectSupport, ProjectVerdict};
 
+use crate::acknowledgement::AcknowledgementIndex;
 use crate::aggregation::{RunReport, aggregate_run};
 use crate::analysis_provider;
 use crate::candidate_scanner::CandidateScanner;
@@ -138,7 +140,7 @@ use crate::discover::{self, DiscoverOptions, Discovery, Ecosystem, Findings};
 use crate::enforce::Enforcement;
 use crate::external_commands::{ExternalCommand, ExternalRole};
 use crate::false_completion_aggregator;
-use crate::findings_from_checks::findings_from_checks;
+use crate::findings_from_checks::findings_with_checks;
 use crate::fingerprint::{self, project_fingerprint};
 use crate::intent_implementation::compare_intent_to_project;
 use crate::intent_model;
@@ -1096,11 +1098,27 @@ impl Pipeline<'_> {
         // Read from `report.results()` and not from `not_checked` below, although
         // the two overlap: `not_checked` is the subset with no result, and a check
         // that ran and failed is a finding with no entry in it.
-        let mut findings = findings_from_checks(report.results(), &schedule);
-        findings.extend(model_findings);
+        //
+        // **The person's recorded acceptances are applied here, before the
+        // verdict exists** (ADR 0019): a finding they reviewed and accepted
+        // changes status to `AcceptedRisk`, and the check results those findings
+        // cover are the exact set the aggregate discounts. Applying them after
+        // `build_verdict` would leave the headline and the finding statuses
+        // answering the same question two ways.
+        let (findings, accepted_checks, acknowledgement_note) = self.apply_acknowledgements(
+            discovery.root.as_path(),
+            report.results(),
+            &schedule,
+            model_findings,
+        );
+        let aggregate = if accepted_checks.is_empty() {
+            report.aggregate().clone()
+        } else {
+            aggregate_with_accepted(report.results(), &accepted_checks)
+        };
         let verdict = build_verdict(
             fingerprint,
-            report.aggregate().clone(),
+            aggregate,
             intent.clone(),
             capability,
             findings,
@@ -1162,10 +1180,11 @@ impl Pipeline<'_> {
             Stage::Aggregate,
             StageOutcome::Ran {
                 detail: format!(
-                    "{} {} check(s) produced a result, {} did not run.{stale_clause}{capability_failure}",
+                    "{} {} check(s) produced a result, {} did not run.{stale_clause}{capability_failure}{}",
                     verdict.aggregate.headline,
                     coverage.checked_count,
                     coverage.not_checked.len(),
+                    acknowledgement_note.unwrap_or_default(),
                 ),
             },
         );
@@ -1275,6 +1294,61 @@ impl Pipeline<'_> {
             requirements.push(documented);
         }
         ProjectIntent::from_requirements(requirements)
+    }
+
+    /// Apply the acceptances recorded for this project (ADR 0019).
+    ///
+    /// **A person's recorded decision, applied before the verdict exists.** Each
+    /// matching finding changes status to `AcceptedRisk` — its evidence, severity
+    /// and place in the report are untouched — and the check ids those findings
+    /// cover are returned so the aggregate can discount exactly those warnings
+    /// and nothing else.
+    ///
+    /// Matching is `crate::acknowledgement`'s: the re-check's own cross-run key,
+    /// so an acceptance stops applying the moment the evidence it was made about
+    /// changes. A finding the evidence settled (`can_be_acknowledged` false) is
+    /// never accepted, even if a row somehow matches it.
+    ///
+    /// A store read that failed is returned as a sentence for the aggregate
+    /// stage, not as a silent empty set: the user's acceptances not being
+    /// applied would otherwise look exactly like never having made any.
+    fn apply_acknowledgements(
+        &self,
+        root: &Path,
+        results: &[CheckResult],
+        schedule: &CheckSchedule,
+        model_findings: Vec<Finding>,
+    ) -> (Vec<Finding>, BTreeSet<CheckId>, Option<String>) {
+        let mut pairs = findings_with_checks(results, schedule);
+        let mut accepted = BTreeSet::new();
+        let mut note = None;
+        if let Some(store) = self.store {
+            let project_root = root.to_string_lossy();
+            let case = recheck_lifecycle::case_rule_for(&project_root);
+            match AcknowledgementIndex::load(store, &project_root) {
+                Ok(index) => {
+                    for (finding, check_id) in &mut pairs {
+                        let Some(record) = index.for_finding(finding, case) else {
+                            continue;
+                        };
+                        if !finding.can_be_acknowledged() {
+                            continue;
+                        }
+                        accept_finding(finding, record);
+                        accepted.insert(check_id.clone());
+                    }
+                }
+                Err(error) => {
+                    note = Some(format!(
+                        " SURE could not read the acceptances its store holds, so none were \
+                         applied this run: {error}"
+                    ));
+                }
+            }
+        }
+        let mut findings: Vec<Finding> = pairs.into_iter().map(|(finding, _)| finding).collect();
+        findings.extend(model_findings);
+        (findings, accepted, note)
     }
 
     /// Stage 8: the grounded model assessment, or the state a run is in without
@@ -1828,20 +1902,38 @@ fn contracts_for(
 fn repair_contracts(
     run: &RunOutcome,
 ) -> (Vec<sure_domain::vocabulary::RepairContract>, StageOutcome) {
-    if run.verdict.findings.is_empty() {
+    // **Only a finding that still needs attention needs instructions.** A
+    // resolved finding was closed by evidence and an accepted one (ADR 0019) was
+    // closed by the person; writing a repair contract for either would ask an
+    // agent to change a project about a question somebody already answered. The
+    // stage keeps its shape for the ordinary case because every open finding is
+    // in this list.
+    let needing: Vec<Finding> = run
+        .verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.status.needs_attention())
+        .cloned()
+        .collect();
+    if needing.is_empty() {
         return (
             Vec::new(),
             StageOutcome::Ran {
-                detail: "no check produced a finding, so there is nothing to write instructions \
-                         for."
-                    .to_owned(),
+                detail: if run.verdict.findings.is_empty() {
+                    "no check produced a finding, so there is nothing to write instructions for."
+                        .to_owned()
+                } else {
+                    "every finding this run produced is resolved or accepted, so there is \
+                     nothing to write instructions for."
+                        .to_owned()
+                },
             },
         );
     }
 
-    let (contracts, refused) = contracts_for(&run.verdict.findings, &run.schedule);
+    let (contracts, refused) = contracts_for(&needing, &run.schedule);
 
-    let findings = run.verdict.findings.len();
+    let findings = needing.len();
     if contracts.is_empty() {
         return (
             Vec::new(),
@@ -2144,6 +2236,29 @@ fn model_supported_severity(severity: Severity) -> Severity {
         Severity::MustFix => Severity::ShouldFixFirst,
         other => other,
     }
+}
+
+/// Record on the finding itself that a person reviewed and accepted it.
+///
+/// The evidence, severity and explanation stay exactly as the check produced
+/// them; what changes is the status and the two sentences a reader acts on. The
+/// reason and date live in the store row (`sure acknowledge --list`), and this
+/// function names the row rather than restating the reason into text the checked
+/// project could influence.
+fn accept_finding(
+    finding: &mut Finding,
+    recorded: &crate::acknowledgement::RecordedAcknowledgement,
+) {
+    finding.status = FindingStatus::AcceptedRisk;
+    finding.user_impact = "You reviewed this and accepted the risk. SURE still cannot settle \
+        it, and your decision is recorded outside the project."
+        .to_owned();
+    finding.next_step = format!(
+        "No action is needed. You reviewed this and accepted the risk (record {}); if the \
+         evidence at this location changes, the finding comes back as unresolved and you can \
+         review it again.",
+        recorded.row
+    );
 }
 
 fn completeness(discovery: &Discovery, intent: &ProjectIntent) -> Candidates {

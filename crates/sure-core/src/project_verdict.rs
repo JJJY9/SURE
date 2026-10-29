@@ -5,7 +5,7 @@
 //! reader.
 
 use sure_domain::capability::CapabilityReport;
-use sure_domain::finding::Finding;
+use sure_domain::finding::{Finding, FindingStatus};
 use sure_domain::ids::FingerprintId;
 use sure_domain::intent::ProjectIntent;
 use sure_domain::severity::Severity;
@@ -173,6 +173,22 @@ pub fn render_summary_with_run_facts(
             }
         }
         parts.push(format!("Unresolved findings: {}.", phrases.join(", ")));
+    }
+
+    // A person's recorded acceptances (ADR 0019) are not unresolved, and they
+    // are not hidden either: the count is named beside the unresolved ones so
+    // "no unresolved findings" cannot read as "nothing was found".
+    let accepted = verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.status == FindingStatus::AcceptedRisk)
+        .count();
+    if accepted > 0 {
+        parts.push(format!(
+            "{accepted} finding{} you reviewed and accepted {} not counted as unresolved.",
+            if accepted == 1 { "" } else { "s" },
+            if accepted == 1 { "is" } else { "are" },
+        ));
     }
 
     // Not-checked checks.

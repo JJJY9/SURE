@@ -51,6 +51,7 @@ store directory cannot.
 | `sure check [PATH] [--goal TEXT]` | check a project and report what it found | works: the pipeline, a per-stage record, and a verdict |
 | `sure recheck [PATH]` | check again and compare with last time | works: the same run, carried on to the last stage, which compares it with what an earlier run left open |
 | `sure repair [PATH]` | turn what was found into instructions an agent can act on | works: the same run, carried on to the repair-contract stage, one contract per finding. Each names the check that produced it and the further checks that must pass before it closes, and each is recorded, so the next run has something to compare against |
+| `sure acknowledge [PATH] (--finding ID [--from FILE] --reason TEXT \| --list \| --undo RECORD)` | record that you reviewed a finding and accept the risk it describes, or read back and remove what you recorded | works, for findings no check can settle (ADR 0019): a candidate a scanner inferred or a model opinion. A failing test, a checker error and a check that did not run are refused — those are defects and gaps to fix. The decision is written to your own store outside the project, and it stops applying if the evidence it names changes |
 | `sure history [list\|show\|delete\|export]` | show what SURE has recorded | works, except `export`: the sessions this machine has recorded, one session's events, and the delete |
 | `sure doctor` | report where SURE keeps its files on this machine, and what it found there | works |
 | `sure config show [PATH]` | show the settings in effect and which layer each came from | works: one row per setting with the value and the layer that chose it; the analysis endpoint, model and command are shown only as set or not set, never as values. With no PATH the user layer is read; with PATH the project's `sure.yaml` is read too |
@@ -778,6 +779,73 @@ all — this command is where the arbitration between the two layers is reported
 
 Exit 0. A project path that is relative, or a path where there is no directory,
 exits 5 with the reason.
+
+## `sure acknowledge`
+
+Record, read back or remove one person's decision to live with one finding
+(ADR 0019).
+
+```
+sure acknowledge [PATH] --finding fnd_… --reason "a real HTTP 200 in an API handler"
+sure acknowledge [PATH] --list
+sure acknowledge [PATH] --undo 7
+```
+
+**What may be accepted.** Only a finding no check can settle: a candidate a
+scanner inferred (`CannotConfirm`, inference evidence) or a model opinion. The
+predicate is `Finding::can_be_acknowledged`, and it refuses the moment any piece
+of the finding's evidence could alone carry a `must_fix` — a failing test, a
+checker error, a check that did not run and a claim that was contradicted are all
+defects and gaps to fix, and recording them as accepted risks would turn the
+verdict into the user's opinion of the project. The refusal is exit 5 and quotes
+the domain's own sentence.
+
+**Where it is written, and what it names.** The row goes into the user-level
+store — the one outside every project — as `RecordKind::Acknowledgement`, with
+the finding's cross-run identity (title, anchor location, locator), the finding
+id it was made from, the required reason and the moment it was made. The checked
+project's files cannot add, remove or soften one: the project is editable by the
+agent whose work is being judged. The identity is the same `FindingKey` the
+re-check matches findings by, so **if the evidence changes the acceptance stops
+applying** and the finding comes back as unresolved. The reason and the date are
+read back out of the record, not out of the command line, so what `--list`
+prints is what was stored.
+
+**What the next check does with it.** The matching finding keeps its evidence,
+severity and place in the report and changes status to `accepted_risk`. The
+check result itself still says `warning` — the acceptance is a decision about
+the finding, not a pass for the command. The aggregate discounts exactly those
+warnings and nothing else, and a run that is green because of acceptances says
+so in its headline: *"Everything that could be checked passed. 1 finding you
+reviewed and accepted is not counted against this result."* A `fail`, an
+`error`, an `unknown`, a skipped check and the "nothing ran" rule are never
+discounted (`sure_domain::status::aggregate_with_accepted`).
+
+**Where the id resolves.** A plain `sure check` records nothing (`--store-dir`
+below), so its finding ids live only in the report it printed. There are two
+ways in, and `--from` is how the person who just read a check report gets there:
+
+- `--finding ID --from FILE` reads the machine-form report
+  (`sure check --format json > report.json`) and takes the finding's identity,
+  its project state and its `acknowledgeable` answer from the report itself — a
+  report that says the finding cannot be accepted is refused, and a report that
+  lies is caught again when the acceptance is applied. This form may create the
+  store: it brings its own finding.
+- without `--from`, the id is looked up in this project's **recorded** findings
+  — the rows `sure repair` and `sure recheck` write — so an id from a repair run
+  still resolves later. A machine with no history has no such rows, and the
+  refusal says which of the two forms to use instead of creating a store to
+  answer with.
+
+The pipeline re-checks that the finding may be accepted when it applies a
+record, so a record written against a settled finding's identity never matches:
+the refusal at record time is a courtesy, and the application is the guarantee.
+
+`--undo` deletes exactly the row it names, and only if that row is an
+acknowledgement of this project. Exit 0 for all three endings, including an
+`--undo` whose id names nothing: the question asked is *is that record gone*, and
+it is; the sentence says which happened. A refusal or an unreadable store exits
+5.
 
 ## `sure explain [ID]`
 

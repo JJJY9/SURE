@@ -266,6 +266,28 @@ impl Finding {
             .min_by_key(|c| c.truth_rank())
             .unwrap_or(EvidenceClass::Unknown)
     }
+
+    /// Whether a person may accept this finding as a risk (ADR 0019).
+    ///
+    /// **A finding SURE settled with evidence a check could carry is a defect to
+    /// fix, not a risk to accept.** Accepting is an answer to SURE's honest
+    /// uncertainty — the candidate a scanner inferred, the model opinion — and
+    /// never to a failing test, a checker error or a check that did not run. So
+    /// this is false as soon as one piece of evidence could alone carry a
+    /// `must_fix` ([`EvidenceClass::can_alone_support_must_fix`]): that is the
+    /// same line [`Self::is_grounded`] draws for blocking severities, used here
+    /// for the opposite direction — what may not be waved away.
+    ///
+    /// A finding with no evidence at all cannot be keyed to anything and is not
+    /// acknowledgeable either.
+    #[must_use]
+    pub fn can_be_acknowledged(&self) -> bool {
+        !self.evidence.is_empty()
+            && !self
+                .evidence
+                .iter()
+                .any(|e| e.class.can_alone_support_must_fix())
+    }
 }
 
 /// What went wrong when a [`FindingBuilder`] could not produce a finding.
@@ -519,6 +541,67 @@ mod tests {
             let json = serde_json::to_string(&status).expect("serialize");
             assert_eq!(json, format!("\"{}\"", status.as_str()));
         }
+    }
+
+    #[test]
+    fn an_inferred_candidate_may_be_acknowledged() {
+        let finding = builder()
+            .evidence(vec![evidence(EvidenceClass::Inference)])
+            .build()
+            .expect("valid finding");
+        assert!(finding.can_be_acknowledged());
+    }
+
+    #[test]
+    fn a_model_opinion_may_be_acknowledged() {
+        let finding = FindingBuilder::new(
+            AssessmentSource::ModelAssessment,
+            SeverityRationale::for_severity(Severity::ShouldFixFirst)
+                .expect("a rationale for should_fix_first"),
+        )
+        .title("Model assessment: something looks incomplete")
+        .severity(Severity::ShouldFixFirst)
+        .evidence(vec![Evidence::new(
+            EvidenceClass::ModelAssessment,
+            "summary",
+            EvidenceAnchor::model_only("a candidate"),
+            Some(fingerprint()),
+            Severity::ShouldFixFirst,
+        )])
+        .fingerprint(fingerprint())
+        .build()
+        .expect("valid finding");
+        assert!(finding.can_be_acknowledged());
+    }
+
+    #[test]
+    fn a_deterministic_failure_may_not_be_acknowledged() {
+        let finding = builder()
+            .evidence(vec![evidence(EvidenceClass::DeterministicCheck)])
+            .build()
+            .expect("valid finding");
+        assert!(!finding.can_be_acknowledged());
+    }
+
+    #[test]
+    fn an_observed_fact_may_not_be_acknowledged() {
+        // A check that did not run is evidence about what the run did, and
+        // accepting it would accept an untested project.
+        let finding = builder()
+            .evidence(vec![evidence(EvidenceClass::ObservedFact)])
+            .build()
+            .expect("valid finding");
+        assert!(!finding.can_be_acknowledged());
+    }
+
+    #[test]
+    fn a_finding_with_no_evidence_may_not_be_acknowledged() {
+        let mut finding = builder()
+            .evidence(vec![evidence(EvidenceClass::Inference)])
+            .build()
+            .expect("valid finding");
+        finding.evidence.clear();
+        assert!(!finding.can_be_acknowledged());
     }
 
     #[test]

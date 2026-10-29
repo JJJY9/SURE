@@ -13,6 +13,7 @@ use std::io::{self, Write};
 
 use sure_core::claim_report::render_claim_section;
 use sure_core::coverage_summary::{CoverageNotCheckedSummary, summarize};
+use sure_core::finding::FindingStatus;
 use sure_core::plain_language_finding::{PlainLanguageFinding, render_findings};
 use sure_core::project_verdict::render_summary_with_run_facts;
 use sure_core::redact::escape_control_characters;
@@ -102,6 +103,25 @@ pub fn render_verdict(verdict: &ProjectVerdict, settings: HumanReportSettings<'_
                 render_plain_finding(&mut out, finding, settings);
                 out.push('\n');
             }
+        }
+    }
+
+    // Accepted findings (ADR 0019): decisions the person recorded. They are not
+    // unresolved and they are not hidden — a decision a reader cannot see is
+    // indistinguishable from a fix, and the reason may matter later.
+    let accepted: Vec<_> = verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.status == FindingStatus::AcceptedRisk)
+        .cloned()
+        .collect();
+    if !accepted.is_empty() {
+        out.push('\n');
+        out.push_str("Accepted risks\n");
+        out.push_str("--------------\n");
+        for finding in &render_findings(&accepted) {
+            render_plain_finding(&mut out, finding, settings);
+            out.push('\n');
         }
     }
 

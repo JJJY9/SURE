@@ -96,7 +96,7 @@ use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceCla
 use sure_domain::finding::{
     AssessmentSource, Finding, FindingBuilder, FindingStatus, SeverityRationale,
 };
-use sure_domain::ids::FingerprintId;
+use sure_domain::ids::{CheckId, FingerprintId};
 use sure_domain::severity::Severity;
 use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason};
 
@@ -109,9 +109,28 @@ use crate::schedule::CheckSchedule;
 /// has to say so itself rather than get one by accident.
 #[must_use]
 pub fn findings_from_checks(results: &[CheckResult], schedule: &CheckSchedule) -> Vec<Finding> {
+    findings_with_checks(results, schedule)
+        .into_iter()
+        .map(|(finding, _)| finding)
+        .collect()
+}
+
+/// The same findings, each with the check it came from.
+///
+/// The acceptance step (ADR 0019) has to name the check results an accepted
+/// finding covers, so that the aggregate can discount exactly those warnings
+/// and nothing else. Split out rather than recomputed, so the pairing and
+/// [`findings_from_checks`] are one pass over the results.
+#[must_use]
+pub fn findings_with_checks(
+    results: &[CheckResult],
+    schedule: &CheckSchedule,
+) -> Vec<(Finding, CheckId)> {
     results
         .iter()
-        .filter_map(|result| finding_for(result, schedule))
+        .filter_map(|result| {
+            finding_for(result, schedule).map(|finding| (finding, result.id.clone()))
+        })
         .collect()
 }
 
