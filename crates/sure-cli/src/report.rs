@@ -519,6 +519,9 @@ pub enum Report {
     /// the person reading them has to be able to tell which one happened: a
     /// write, a no-op, and a refusal are not "worked" and "did not work".
     Settings(Box<SettingsChange>),
+    /// `sure acknowledge`, carrying the acceptance it recorded, the records it
+    /// listed or the one it removed (ADR 0019).
+    Acknowledge(Box<crate::acknowledge::AcknowledgeReport>),
     /// `sure config show`, carrying the settings in effect and their layers.
     ConfigShow(Box<crate::config_show::ConfigShowReport>),
     /// `sure explain`, carrying one recorded finding or check result.
@@ -619,6 +622,11 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => "ok",
                 SettingsOutcome::Refused { .. } => "failed",
             },
+            // A recorded, listed or removed acceptance is an answer about this
+            // machine's own store, like a history report and unlike a check: it
+            // says nothing about a project's problems. A refusal or a store that
+            // could not be written is a [`Self::Failed`], below.
+            Self::Acknowledge(_) => "ok",
             Self::ConfigShow(_) | Self::Explain(_) => "ok",
             Self::Unavailable(_) => "unavailable",
             // A command that did not finish has not answered, and saying
@@ -729,6 +737,11 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => exit::OK,
                 SettingsOutcome::Refused { .. } => exit::FAILED,
             },
+            // 0 for the three endings, including an `--undo` whose id named
+            // nothing of this kind: the question asked was *is that record
+            // gone*, and it is. A write or read that did not happen is a
+            // [`Self::Failed`] above, which is the ending that must never be 0.
+            Self::Acknowledge(_) => exit::OK,
             Self::ConfigShow(_) | Self::Explain(_) => exit::OK,
             Self::Unavailable(_) => exit::UNAVAILABLE,
             Self::Failed(_) => exit::FAILED,
@@ -803,6 +816,10 @@ impl Report {
             // follows: there is nothing to file, and a person who piped the
             // output meant to read why.
             Self::Settings(change) => !matches!(change.outcome, SettingsOutcome::Refused { .. }),
+            // The same rule as a history report's: `sure acknowledge --list >
+            // accepted.txt` has to put the list in the file, and the sentence a
+            // write answers with is the whole of what the command was asked for.
+            Self::Acknowledge(_) => true,
             Self::ConfigShow(_) | Self::Explain(_) => true,
             Self::Unavailable(_) | Self::Failed(_) => false,
             // A hook decision is an answer: the command ran and produced a result.
@@ -869,6 +886,10 @@ impl Report {
             // code that decided which of the three things happened rather than
             // in a renderer that has to reconstruct it.
             Self::Settings(change) => crate::settings::human(change, out),
+            // The command's own module renders it, for `settings`'s reason: the
+            // sentence that says what was recorded, listed or removed is the
+            // answer itself, and it belongs beside the code that decided which.
+            Self::Acknowledge(report) => crate::acknowledge::human(report, out),
             Self::ConfigShow(report) => report.human(out),
             Self::Explain(report) => report.human(out),
             Self::Failed(failure) => {
@@ -1142,6 +1163,7 @@ impl Report {
             // command's own module so that the shape a script reads is decided
             // beside the prose a person reads.
             Self::Settings(change) => frame["details"] = crate::settings::machine(change),
+            Self::Acknowledge(report) => frame["details"] = crate::acknowledge::machine(report),
             Self::ConfigShow(report) => frame["details"] = report.machine(),
             Self::Explain(report) => frame["details"] = report.machine(),
             // The failure's own words. `what` is a sentence SURE wrote about
@@ -1239,6 +1261,7 @@ impl Report {
             // frame that said `config` for a write would name a surface that
             // does not exist.
             Self::Settings(change) => change.command,
+            Self::Acknowledge(_) => "acknowledge",
             Self::ConfigShow(_) => "config show",
             Self::Explain(_) => "explain",
             Self::Unavailable(not_yet) => not_yet.command,

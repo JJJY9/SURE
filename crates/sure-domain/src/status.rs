@@ -5,6 +5,8 @@
 //! "all good". Everything here is deliberately explicit — there is no status
 //! that means "probably fine".
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceClass;
@@ -624,6 +626,30 @@ impl Aggregate {
 ///    result green.
 #[must_use]
 pub fn aggregate(results: &[CheckResult]) -> Aggregate {
+    aggregate_inner(results, &BTreeSet::new())
+}
+
+/// The same aggregation, with findings a person reviewed and accepted
+/// (ADR 0019).
+///
+/// **Exactly one rule is relaxed: `warning` results whose finding the user
+/// acknowledged no longer contribute `needs_attention`.** Nothing else moves —
+/// a `fail`, an `error`, an `unknown`, a skipped check, a critical out-of-scope
+/// check and the "nothing ran" rule are untouched, and an id in `accepted` that
+/// names a non-warning result has no effect at all. When the run is green only
+/// because of such acknowledgements, the headline gains a clause that says how
+/// many findings were accepted to get there, so a green run cannot read as
+/// "everything passed" when something was reviewed and accepted instead.
+///
+/// The counts keep the warnings: the check results are facts and are reported
+/// as they were, whatever the person decided about the findings built from
+/// them.
+#[must_use]
+pub fn aggregate_with_accepted(results: &[CheckResult], accepted: &BTreeSet<CheckId>) -> Aggregate {
+    aggregate_inner(results, accepted)
+}
+
+fn aggregate_inner(results: &[CheckResult], accepted: &BTreeSet<CheckId>) -> Aggregate {
     let counts = StatusCounts::tally(results.iter().map(|r| r.status));
 
     let mut critical_failed = Vec::new();
@@ -655,6 +681,14 @@ pub fn aggregate(results: &[CheckResult]) -> Aggregate {
         }
     }
 
+    let accepted_warnings = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warning && accepted.contains(&r.id))
+        .count();
+    let unaccepted_warning = results
+        .iter()
+        .any(|r| r.status == CheckStatus::Warning && !accepted.contains(&r.id));
+
     let severity = if !critical_failed.is_empty() {
         AggregateSeverity::NotReady
     } else if !critical_errored.is_empty() || !critical_not_checked.is_empty() {
@@ -664,7 +698,7 @@ pub fn aggregate(results: &[CheckResult]) -> Aggregate {
         // technically "blocking" because the plan was empty.
         AggregateSeverity::NotEnoughChecked
     } else if counts.fail > 0
-        || counts.warning > 0
+        || unaccepted_warning
         || counts.not_checked() > 0
         // A critical check that was honestly out of scope still means the
         // project was not fully checked, so the run is not a clean green.
@@ -684,9 +718,24 @@ pub fn aggregate(results: &[CheckResult]) -> Aggregate {
         critical_checked,
     };
 
+    // Green because warnings were accepted is not the same statement as green
+    // because everything passed, and the headline is where a reader finds out
+    // which one this is.
+    let headline = if severity.is_green() && accepted_warnings > 0 {
+        format!(
+            "{} {accepted_warnings} finding{} you reviewed and accepted {} not counted against \
+             this result.",
+            severity.headline(),
+            if accepted_warnings == 1 { "" } else { "s" },
+            if accepted_warnings == 1 { "is" } else { "are" },
+        )
+    } else {
+        severity.headline().to_owned()
+    };
+
     Aggregate {
         severity,
-        headline: severity.headline().to_owned(),
+        headline,
         counts,
         blocking,
         coverage,
@@ -1030,5 +1079,105 @@ mod tests {
                 assert!(!headline.contains(banned), "{severity:?} leads with jargon");
             }
         }
+    }
+
+    #[test]
+    fn an_accepted_warning_does_not_hold_the_run_back() {
+        let pass = check(CheckStatus::Pass, true);
+        let warning = check(CheckStatus::Warning, false);
+        let accepted: BTreeSet<CheckId> = [warning.id.clone()].into();
+        let summary = aggregate_with_accepted(&[pass, warning], &accepted);
+        assert_eq!(summary.severity, AggregateSeverity::Green);
+        assert!(summary.is_green());
+        assert!(
+            summary
+                .headline
+                .contains("1 finding you reviewed and accepted"),
+            "a green run because of an acceptance must say so: {}",
+            summary.headline
+        );
+        // The result itself is a fact and is still counted as the warning it is.
+        assert_eq!(summary.counts.warning, 1);
+    }
+
+    #[test]
+    fn the_plural_headline_says_findings() {
+        let pass = check(CheckStatus::Pass, true);
+        let first = check(CheckStatus::Warning, false);
+        let second = check(CheckStatus::Warning, false);
+        let accepted: BTreeSet<CheckId> = [first.id.clone(), second.id.clone()].into();
+        let summary = aggregate_with_accepted(&[pass, first, second], &accepted);
+        assert_eq!(summary.severity, AggregateSeverity::Green);
+        assert!(
+            summary
+                .headline
+                .contains("2 findings you reviewed and accepted are"),
+            "{}",
+            summary.headline
+        );
+    }
+
+    #[test]
+    fn a_warning_nobody_accepted_still_needs_attention() {
+        let pass = check(CheckStatus::Pass, true);
+        let warning = check(CheckStatus::Warning, false);
+        let summary = aggregate_with_accepted(&[pass, warning], &BTreeSet::new());
+        assert_eq!(summary.severity, AggregateSeverity::NeedsAttention);
+        assert_eq!(
+            summary.headline,
+            AggregateSeverity::NeedsAttention.headline()
+        );
+    }
+
+    #[test]
+    fn acceptance_never_discounts_a_failure() {
+        let pass = check(CheckStatus::Pass, true);
+        let fail = check(CheckStatus::Fail, true);
+        let accepted: BTreeSet<CheckId> = [fail.id.clone()].into();
+        let summary = aggregate_with_accepted(&[pass, fail], &accepted);
+        assert_eq!(summary.severity, AggregateSeverity::NotReady);
+    }
+
+    #[test]
+    fn acceptance_never_discounts_a_check_that_did_not_run() {
+        for status in [
+            CheckStatus::Unknown,
+            CheckStatus::Error,
+            CheckStatus::Skipped,
+        ] {
+            let pass = check(CheckStatus::Pass, true);
+            let other = check(status, true);
+            let accepted: BTreeSet<CheckId> = [other.id.clone()].into();
+            let summary = aggregate_with_accepted(&[pass, other], &accepted);
+            assert_ne!(
+                summary.severity,
+                AggregateSeverity::Green,
+                "{status:?} must never be accepted into a green run"
+            );
+            assert!(!summary.is_green());
+        }
+    }
+
+    #[test]
+    fn an_accepted_id_that_names_nothing_changes_nothing() {
+        let pass = check(CheckStatus::Pass, true);
+        let accepted: BTreeSet<CheckId> = [CheckId::generate()].into();
+        let summary = aggregate_with_accepted(&[pass], &accepted);
+        assert_eq!(summary.severity, AggregateSeverity::Green);
+        assert_eq!(summary.headline, AggregateSeverity::Green.headline());
+    }
+
+    #[test]
+    fn an_empty_accepted_set_aggregates_exactly_like_aggregate() {
+        let results = [
+            check(CheckStatus::Pass, true),
+            check(CheckStatus::Warning, false),
+            check(CheckStatus::Skipped, false),
+        ];
+        let plain = aggregate(&results);
+        let with_empty = aggregate_with_accepted(&results, &BTreeSet::new());
+        assert_eq!(plain.severity, with_empty.severity);
+        assert_eq!(plain.headline, with_empty.headline);
+        assert_eq!(plain.counts, with_empty.counts);
     }
 }

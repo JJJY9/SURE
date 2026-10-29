@@ -123,8 +123,18 @@ mod tests {
         // asked. `mcp` is in both: the table lists `sure mcp serve`, so the
         // grammar accepting it is not a command nobody documented.
         const DOCUMENTED: &[&str] = &[
-            "check", "recheck", "repair", "history", "doctor", "config", "hook", "explain", "mcp",
-            "protocol", "version",
+            "check",
+            "recheck",
+            "repair",
+            "acknowledge",
+            "history",
+            "doctor",
+            "config",
+            "hook",
+            "explain",
+            "mcp",
+            "protocol",
+            "version",
         ];
         let command = Cli::command();
         let parsed: Vec<&str> = command

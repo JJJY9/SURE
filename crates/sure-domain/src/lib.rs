@@ -42,7 +42,14 @@ pub const PRODUCT_PROMISE: &str = "AI says it's done. Be SURE.";
 ///
 /// Bumping this is a deliberate act: it means the meaning of a stored verdict,
 /// finding or evidence record changed, and stored records may need reinterpretation.
-pub const DOMAIN_SEMANTICS_VERSION: u32 = 1;
+///
+/// **2 (ADR 0019):** a finding's status may now be `accepted_risk` because a
+/// person recorded a decision about it, and a green aggregate may mean "nothing
+/// unaccepted is wrong" rather than "every recorded check passed" — the headline
+/// says which, and the accepted results keep their `warning` status. A stored
+/// record written under version 1 cannot carry either meaning, which is why the
+/// number moved.
+pub const DOMAIN_SEMANTICS_VERSION: u32 = 2;
 
 /// The version number of this build, without the product name.
 ///
