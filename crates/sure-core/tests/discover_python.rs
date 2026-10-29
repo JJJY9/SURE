@@ -979,7 +979,7 @@ fn a_command_is_planned_only_for_a_tool_the_project_declared() {
     assert_eq!(row(CommandRole::Test).because, ["pytest"]);
     assert_eq!(
         row(CommandRole::TypeCheck).command.as_deref(),
-        Some("uv run mypy")
+        Some("uv run mypy .")
     );
     // No linter and no formatter were declared, so there is no plan for either.
     assert!(row(CommandRole::Lint).command.is_none());
@@ -1081,11 +1081,11 @@ fn a_dedicated_config_file_declares_a_tool_without_a_dependency() {
     );
     assert_eq!(
         row(CommandRole::Lint).command.as_deref(),
-        Some("python -m ruff")
+        Some("python -m ruff check .")
     );
     assert_eq!(
         row(CommandRole::TypeCheck).command.as_deref(),
-        Some("python -m mypy")
+        Some("python -m mypy .")
     );
 }
 
@@ -1260,7 +1260,7 @@ fn setup_cfg_tool_sections_declare_tools_without_reading_packaging_metadata() {
     );
     assert_eq!(
         row(CommandRole::TypeCheck).command.as_deref(),
-        Some("python -m mypy")
+        Some("python -m mypy .")
     );
 }
 
