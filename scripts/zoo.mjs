@@ -111,12 +111,31 @@ function parseArgs(argv) {
   return opts;
 }
 
+function onPath(name) {
+  if (name.includes('/') || name.includes('\\')) return null;
+  const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  const hit = (which.stdout ?? '').split(/\r?\n/)[0]?.trim();
+  return which.status === 0 && hit && fs.existsSync(hit) ? hit : null;
+}
+
 function resolveSure(explicit) {
+  // `--sure` 是调用者点名要量的二进制:找到了就用它,找不到就停下——
+  // 绝不悄悄换成另一个构建。2026-11-02:传入 `cmd.exe` 时 `existsSync`
+  // 因为没有扩展名而失配,运行静默量了 release 构建,报告里的二进制不是
+  // 所指的那个。
+  if (explicit) {
+    if (fs.existsSync(explicit)) return path.resolve(explicit);
+    const hit = onPath(explicit);
+    if (hit) return hit;
+    fail(`找不到 --sure 指定的二进制: ${explicit}`);
+  }
   // 本仓库的量具优先量本仓库的构建:这台机器上的 SURE_BIN 可能指向一个旧的
   // 安装版(2026-11-02 实测:SURE_BIN 指向 10-22 的构建,chailv 的 lint/类型检查
   // 因此被计划成裸模块)。SURE_BIN 与 PATH 只在仓库里没有构建时兜底。
   const candidates = [
-    explicit,
     path.join(ROOT, 'target', 'release', 'sure.exe'),
     path.join(ROOT, 'target', 'release', 'sure'),
     path.join(ROOT, 'target', 'debug', 'sure.exe'),
@@ -126,12 +145,8 @@ function resolveSure(explicit) {
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return path.resolve(candidate);
   }
-  const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['sure'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  const hit = (which.stdout ?? '').split(/\r?\n/)[0]?.trim();
-  if (which.status === 0 && hit && fs.existsSync(hit)) return hit;
+  const hit = onPath('sure');
+  if (hit) return hit;
   return null;
 }
 
@@ -450,7 +465,6 @@ function main() {
     }
   }
 
-  // --update-baseline:只有在这次运行里真实拿到结论的条目才更新。
   // --update-baseline:只有在这次运行里真实拿到结论的条目才更新,且只更新
   // 当前运行平台的那一档——另一个平台的基线原样保留。
   if (opts.updateBaseline) {
@@ -523,12 +537,16 @@ function main() {
   console.log(`zoo: 明细 ${path.join(runDir, 'zoo-report.json')}`);
   if (opts.updateBaseline) console.log(`zoo: 基线已更新 ${opts.baseline}`);
 
+  // 记录模式下 CHANGED / NEW 已经写进基线,是这次运行的目的而不是失配,
+  // 只剩真的失败(崩溃、不合规报告、超时)才该让任务标红。2026-11-02:记录
+  // 模式曾把刚记录的条目也当失败,CI 的基线记录任务因此以 exit 1 结束。
   const failures = results.filter((r) =>
-    ['ERROR', 'FAILED', 'CHANGED'].includes(r.status) ||
-    (r.status === 'NEW' && !opts.updateBaseline)
+    ['ERROR', 'FAILED'].includes(r.status) ||
+    (!opts.updateBaseline && ['CHANGED', 'NEW'].includes(r.status))
   );
   if (failures.length > 0) {
-    console.error(`zoo: ${failures.length} 个条目需要处理: ${failures.map((r) => r.id).join(', ')}`);
+    const what = opts.updateBaseline ? '个条目失败' : '个条目需要处理';
+    console.error(`zoo: ${failures.length} ${what}: ${failures.map((r) => r.id).join(', ')}`);
     process.exit(1);
   }
 }

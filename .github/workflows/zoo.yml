@@ -22,7 +22,10 @@
 # a pull request (the label is the only path before this workflow exists on the
 # default branch, because workflow_dispatch requires it there). Nothing writes
 # the baseline into the repository from CI — a person downloads the artifact,
-# commits the section, and the next run compares against it.
+# commits the section, and the next run compares against it. A recording run
+# succeeds when it recorded: drift and new entries are its purpose and do not
+# fail the job; only an entry that itself failed (crash, broken report, timeout)
+# does.
 name: project-zoo
 
 on:
