@@ -48,6 +48,38 @@
       "why_here": "小型 Go module:go test/build 计划与 vet 分类——Go 的基线形态"
     },
     {
+      "id": "junit4-java",
+      "kind": "git",
+      "repo": "https://github.com/junit-team/junit4.git",
+      "commit": "890f3c972647de378f25e7271d8fbbd9d3456b79",
+      "profile": "static",
+      "why_here": "经典 JUnit 4 工程:pom.xml 声明 surefire 测试与编译——Java/Maven 的基线形态"
+    },
+    {
+      "id": "newtonsoft-json-dotnet",
+      "kind": "git",
+      "repo": "https://github.com/JamesNK/Newtonsoft.Json.git",
+      "commit": "52fa3aef1f2cadcd3a3f874251eddc98d3efbbaa",
+      "profile": "static",
+      "why_here": "真实 .NET 仓库,但解决方案与工程都在 Src/ 下——SURE 的发现模型是“根清单=一个项目”,这一条把“嵌套布局不被识别”固定成基线(sentinel:哪天支持了,比对会翻出变化)"
+    },
+    {
+      "id": "restsharp-dotnet",
+      "kind": "git",
+      "repo": "https://github.com/restsharp/RestSharp.git",
+      "commit": "466e5f8782bd52f98df829f63a83b45fdb8472ae",
+      "profile": "static",
+      "why_here": "根目录带 .slnx 的真实 .NET 库:dotnet 检查计划与命令分类的基线形态"
+    },
+    {
+      "id": "changesets-monorepo",
+      "kind": "git",
+      "repo": "https://github.com/changesets/changesets.git",
+      "commit": "b09779a3d503a581df98a81384d5849db969eb03",
+      "profile": "static",
+      "why_here": "pnpm workspace monorepo:workspace 根与多个包的 scripts——monorepo 形态的基线"
+    },
+    {
       "id": "chailv",
       "kind": "local",
       "path": "D:\\Code\\chailv",
