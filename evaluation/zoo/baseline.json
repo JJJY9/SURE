@@ -1,127 +1,230 @@
 {
-  "schema_version": 1,
-  "sure_version": "sure 0.1.3",
-  "entries": {
-    "sampleproject-py": {
+  "schema_version": 2,
+  "platforms": {
+    "win32": {
       "sure_version": "sure 0.1.3",
-      "severity": "not_enough_checked",
-      "findings": [
-        "Must fix | Cannot confirm | build the distribution",
-        "Must fix | Cannot confirm | run the tests"
-      ],
-      "notChecked": [
-        "build the distribution",
-        "check the code for style and likely mistakes",
-        "check the types without running the code",
-        "run the tests"
-      ],
-      "checkResults": [
-        "skipped | build the distribution",
-        "skipped | check the code for style and likely mistakes",
-        "skipped | check the types without running the code",
-        "skipped | run the tests"
-      ]
+      "entries": {
+        "sampleproject-py": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Must fix | Cannot confirm | build the distribution",
+            "Must fix | Cannot confirm | run the tests"
+          ],
+          "notChecked": [
+            "build the distribution",
+            "check the code for style and likely mistakes",
+            "check the types without running the code",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the distribution",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | check the types without running the code",
+            "skipped | run the tests"
+          ]
+        },
+        "express-node": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check the code for style and likely mistakes",
+            "Must fix | Cannot confirm | project contains hard-coded success responses in production code",
+            "Must fix | Cannot confirm | run the tests",
+            "Note | Open | frontend expects backend path `/admin` which is not declared",
+            "Note | Open | project contains TODO or FIXME comments in tests",
+            "Note | Open | project contains placeholder usage in examples"
+          ],
+          "notChecked": [
+            "build the project",
+            "check the code for style and likely mistakes",
+            "check the types without building",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the project",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | check the types without building",
+            "skipped | run the tests",
+            "warning | frontend expects backend path `/admin` which is not declared",
+            "warning | project contains TODO or FIXME comments in tests",
+            "warning | project contains hard-coded success responses in production code",
+            "warning | project contains placeholder usage in examples"
+          ]
+        },
+        "ripgrep-rs": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check that it compiles",
+            "Can fix later | Open | project contains TODO or FIXME comments in production code",
+            "Can fix later | Open | project contains placeholder usage in production code",
+            "Must fix | Cannot confirm | project contains no-op functions that always succeed in production code",
+            "Must fix | Cannot confirm | run the tests",
+            "Note | Cannot confirm | check that the source is formatted"
+          ],
+          "notChecked": [
+            "check that it compiles",
+            "check that the source is formatted",
+            "look for probable mistakes",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | check that it compiles",
+            "skipped | check that the source is formatted",
+            "skipped | look for probable mistakes",
+            "skipped | run the tests",
+            "warning | project contains TODO or FIXME comments in production code",
+            "warning | project contains no-op functions that always succeed in production code",
+            "warning | project contains placeholder usage in production code"
+          ]
+        },
+        "pflag-go": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check the code for style and likely mistakes",
+            "Must fix | Cannot confirm | build the project",
+            "Must fix | Cannot confirm | run the tests"
+          ],
+          "notChecked": [
+            "build the project",
+            "check the code for style and likely mistakes",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the project",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | run the tests"
+          ]
+        },
+        "chailv": {
+          "sure_version": "sure 0.1.3",
+          "severity": "green",
+          "findings": [],
+          "notChecked": [],
+          "checkResults": [
+            "pass | build the distribution",
+            "pass | check the code for style and likely mistakes",
+            "pass | check the types without running the code",
+            "pass | run the tests"
+          ]
+        },
+        "open-dream-rsi": {
+          "sure_version": "sure 0.1.3",
+          "severity": "needs_attention",
+          "findings": [
+            "Must fix | Cannot confirm | project contains hard-coded success responses in production code"
+          ],
+          "notChecked": [],
+          "checkResults": [
+            "pass | build the distribution",
+            "pass | check the code for style and likely mistakes",
+            "pass | check the types without running the code",
+            "pass | run the tests",
+            "warning | project contains hard-coded success responses in production code"
+          ]
+        }
+      }
     },
-    "express-node": {
+    "linux": {
       "sure_version": "sure 0.1.3",
-      "severity": "not_enough_checked",
-      "findings": [
-        "Can fix later | Cannot confirm | check the code for style and likely mistakes",
-        "Must fix | Cannot confirm | project contains hard-coded success responses in production code",
-        "Must fix | Cannot confirm | run the tests",
-        "Note | Open | frontend expects backend path `/admin` which is not declared",
-        "Note | Open | project contains TODO or FIXME comments in tests",
-        "Note | Open | project contains placeholder usage in examples"
-      ],
-      "notChecked": [
-        "build the project",
-        "check the code for style and likely mistakes",
-        "check the types without building",
-        "run the tests"
-      ],
-      "checkResults": [
-        "skipped | build the project",
-        "skipped | check the code for style and likely mistakes",
-        "skipped | check the types without building",
-        "skipped | run the tests",
-        "warning | frontend expects backend path `/admin` which is not declared",
-        "warning | project contains TODO or FIXME comments in tests",
-        "warning | project contains hard-coded success responses in production code",
-        "warning | project contains placeholder usage in examples"
-      ]
-    },
-    "ripgrep-rs": {
-      "sure_version": "sure 0.1.3",
-      "severity": "not_enough_checked",
-      "findings": [
-        "Can fix later | Cannot confirm | check that it compiles",
-        "Can fix later | Open | project contains TODO or FIXME comments in production code",
-        "Can fix later | Open | project contains placeholder usage in production code",
-        "Must fix | Cannot confirm | project contains no-op functions that always succeed in production code",
-        "Must fix | Cannot confirm | run the tests",
-        "Note | Cannot confirm | check that the source is formatted"
-      ],
-      "notChecked": [
-        "check that it compiles",
-        "check that the source is formatted",
-        "look for probable mistakes",
-        "run the tests"
-      ],
-      "checkResults": [
-        "skipped | check that it compiles",
-        "skipped | check that the source is formatted",
-        "skipped | look for probable mistakes",
-        "skipped | run the tests",
-        "warning | project contains TODO or FIXME comments in production code",
-        "warning | project contains no-op functions that always succeed in production code",
-        "warning | project contains placeholder usage in production code"
-      ]
-    },
-    "pflag-go": {
-      "sure_version": "sure 0.1.3",
-      "severity": "not_enough_checked",
-      "findings": [
-        "Can fix later | Cannot confirm | check the code for style and likely mistakes",
-        "Must fix | Cannot confirm | build the project",
-        "Must fix | Cannot confirm | run the tests"
-      ],
-      "notChecked": [
-        "build the project",
-        "check the code for style and likely mistakes",
-        "run the tests"
-      ],
-      "checkResults": [
-        "skipped | build the project",
-        "skipped | check the code for style and likely mistakes",
-        "skipped | run the tests"
-      ]
-    },
-    "chailv": {
-      "sure_version": "sure 0.1.3",
-      "severity": "green",
-      "findings": [],
-      "notChecked": [],
-      "checkResults": [
-        "pass | build the distribution",
-        "pass | check the code for style and likely mistakes",
-        "pass | check the types without running the code",
-        "pass | run the tests"
-      ]
-    },
-    "open-dream-rsi": {
-      "sure_version": "sure 0.1.3",
-      "severity": "needs_attention",
-      "findings": [
-        "Must fix | Cannot confirm | project contains hard-coded success responses in production code"
-      ],
-      "notChecked": [],
-      "checkResults": [
-        "pass | build the distribution",
-        "pass | check the code for style and likely mistakes",
-        "pass | check the types without running the code",
-        "pass | run the tests",
-        "warning | project contains hard-coded success responses in production code"
-      ]
+      "entries": {
+        "sampleproject-py": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Must fix | Cannot confirm | build the distribution",
+            "Must fix | Cannot confirm | run the tests"
+          ],
+          "notChecked": [
+            "build the distribution",
+            "check the code for style and likely mistakes",
+            "check the types without running the code",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the distribution",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | check the types without running the code",
+            "skipped | run the tests"
+          ]
+        },
+        "express-node": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check the code for style and likely mistakes",
+            "Must fix | Cannot confirm | project contains hard-coded success responses in production code",
+            "Must fix | Cannot confirm | run the tests",
+            "Note | Open | frontend expects backend path `/admin` which is not declared",
+            "Note | Open | project contains TODO or FIXME comments in tests",
+            "Note | Open | project contains placeholder usage in examples"
+          ],
+          "notChecked": [
+            "build the project",
+            "check the code for style and likely mistakes",
+            "check the types without building",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the project",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | check the types without building",
+            "skipped | run the tests",
+            "warning | frontend expects backend path `/admin` which is not declared",
+            "warning | project contains TODO or FIXME comments in tests",
+            "warning | project contains hard-coded success responses in production code",
+            "warning | project contains placeholder usage in examples"
+          ]
+        },
+        "ripgrep-rs": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check that it compiles",
+            "Can fix later | Open | project contains TODO or FIXME comments in production code",
+            "Can fix later | Open | project contains placeholder usage in production code",
+            "Must fix | Cannot confirm | project contains no-op functions that always succeed in production code",
+            "Must fix | Cannot confirm | run the tests",
+            "Note | Cannot confirm | check that the source is formatted"
+          ],
+          "notChecked": [
+            "check that it compiles",
+            "check that the source is formatted",
+            "look for probable mistakes",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | check that it compiles",
+            "skipped | check that the source is formatted",
+            "skipped | look for probable mistakes",
+            "skipped | run the tests",
+            "warning | project contains TODO or FIXME comments in production code",
+            "warning | project contains no-op functions that always succeed in production code",
+            "warning | project contains placeholder usage in production code"
+          ]
+        },
+        "pflag-go": {
+          "sure_version": "sure 0.1.3",
+          "severity": "not_enough_checked",
+          "findings": [
+            "Can fix later | Cannot confirm | check the code for style and likely mistakes",
+            "Must fix | Cannot confirm | build the project",
+            "Must fix | Cannot confirm | run the tests"
+          ],
+          "notChecked": [
+            "build the project",
+            "check the code for style and likely mistakes",
+            "run the tests"
+          ],
+          "checkResults": [
+            "skipped | build the project",
+            "skipped | check the code for style and likely mistakes",
+            "skipped | run the tests"
+          ]
+        }
+      }
     }
   }
 }

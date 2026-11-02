@@ -1,0 +1,89 @@
+# The project zoo in CI: SURE against the pinned corpus in
+# `evaluation/zoo/projects.json`, compared with the committed baseline.
+#
+# Why a job and why these triggers. The corpus is four public repositories at
+# fixed commits plus two `kind: "local"` entries that only exist on a
+# developer's machine; a CI runner runs the clones and records the local ones
+# as skipped with that reason (`evaluation/zoo/README.md`). The zoo's whole
+# value is comparing against the baseline, so it runs where the baseline for
+# the runner's platform exists: `ubuntu-latest` here, with `win32` recorded
+# from the developer machine.
+#
+# Cost switch, in the repository's usual shape: nightly on an off-minute cron,
+# on demand, and on pull requests that touch the zoo itself. A pull request
+# that changes SURE's engine does not run this job — the nightly does, and a
+# reviewer who wants the reading sooner dispatches it. Clones are cached by
+# manifest hash, so the steady-state cost is a release build plus the static
+# checks.
+#
+# The first-run path for a platform with no baseline yet records what this
+# runner observed into `baseline.json` and uploads the file as an artifact:
+# `update_baseline: true` for a dispatch, or the `zoo-update-baseline` label on
+# a pull request (the label is the only path before this workflow exists on the
+# default branch, because workflow_dispatch requires it there). Nothing writes
+# the baseline into the repository from CI — a person downloads the artifact,
+# commits the section, and the next run compares against it.
+name: project-zoo
+
+on:
+  workflow_dispatch:
+    inputs:
+      update_baseline:
+        description: 'Record this runner platform''s baseline instead of comparing (uploads baseline.json; nothing is committed)'
+        type: boolean
+        default: false
+  schedule:
+    # Off the :00 fleet, and before the European morning.
+    - cron: '43 4 * * *'
+  pull_request:
+    # labeled/unlabeled carry the baseline-recording switch below.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'evaluation/zoo/**'
+      - 'scripts/zoo.mjs'
+      - '.github/workflows/zoo.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  zoo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Cache the zoo clone corpus
+        uses: actions/cache@v4
+        with:
+          path: target/tmp/zoo/cache
+          # The manifest pins every repository to a commit, so its hash is the
+          # corpus identity: a new pin misses the cache, everything else hits.
+          key: zoo-corpus-${{ runner.os }}-${{ hashFiles('evaluation/zoo/projects.json') }}
+          restore-keys: |
+            zoo-corpus-${{ runner.os }}-
+      - name: Build SURE
+        run: cargo build --release -p sure-cli
+      - name: Run the zoo (compare with the baseline)
+        if: ${{ !(inputs.update_baseline || contains(github.event.pull_request.labels.*.name, 'zoo-update-baseline')) }}
+        run: node scripts/zoo.mjs
+      - name: Run the zoo (record this platform's baseline)
+        if: ${{ inputs.update_baseline || contains(github.event.pull_request.labels.*.name, 'zoo-update-baseline') }}
+        run: node scripts/zoo.mjs --update-baseline
+      - name: Upload the zoo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zoo-report
+          path: |
+            target/tmp/zoo/runs/**/zoo-report.json
+            target/tmp/zoo/runs/**/*.stdout.log
+            target/tmp/zoo/runs/**/*.stderr.log
+            evaluation/zoo/baseline.json
+          retention-days: 7
+          if-no-files-found: warn
