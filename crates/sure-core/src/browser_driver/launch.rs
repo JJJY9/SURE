@@ -829,7 +829,9 @@ mod tests {
             path
         };
         #[cfg(not(windows))]
-        let program = std::path::PathBuf::from("/bin/true");
+        // `/bin/true` is Linux-only; macOS ships true(1) in `/usr/bin`, and both
+        // runners have this path — the program only has to exit 0.
+        let program = std::path::PathBuf::from("/usr/bin/true");
 
         let budget = Duration::from_millis(600);
         let started = std::time::Instant::now();
