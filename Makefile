@@ -1,4 +1,4 @@
-.PHONY: validate status ready preflight
+.PHONY: validate status ready preflight zoo
 
 # Secondary convenience targets for macOS/Linux. Windows is canonical; use scripts/*.ps1 there.
 validate:
@@ -12,3 +12,7 @@ ready:
 
 preflight:
 	./scripts/preflight.sh
+
+# The project zoo: run SURE against the pinned corpus and compare with the baseline.
+zoo:
+	node scripts/zoo.mjs

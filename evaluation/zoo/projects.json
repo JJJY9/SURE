@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "static": {
+      "execution_mode": "inspect_only",
+      "allow_dependency_install": false,
+      "allow_network": false,
+      "why": "只读核查:只跑读文件的检查,计划出的命令如实记为未运行。无需网络,适合 CI。"
+    },
+    "dynamic": {
+      "execution_mode": "host_confirmed",
+      "allow_dependency_install": true,
+      "allow_network": true,
+      "why": "允许运行项目自己的命令(测试/构建/lint)。依赖需已就绪或允许安装——本机条目用这一档。"
+    }
+  },
+  "projects": [
+    {
+      "id": "sampleproject-py",
+      "kind": "git",
+      "repo": "https://github.com/pypa/sampleproject.git",
+      "commit": "621e4974ca25ce531773def586ba3ed8e736b3fc",
+      "profile": "static",
+      "why_here": "最小的 setuptools 样例工程:pyproject、src 布局、没有网络依赖——Python 发现与计划的基线形态"
+    },
+    {
+      "id": "express-node",
+      "kind": "git",
+      "repo": "https://github.com/expressjs/express.git",
+      "commit": "1c6f1b0fe4000977b9a7b4f34097e4d527dd9824",
+      "profile": "static",
+      "why_here": "真实 Node 服务端工程:多种 scripts、mocha 测试——Node 计划与命令分类的基线形态"
+    },
+    {
+      "id": "ripgrep-rs",
+      "kind": "git",
+      "repo": "https://github.com/BurntSushi/ripgrep.git",
+      "commit": "91f5d22ef48bde459d90a8c7dbeab416e97d0f2b",
+      "profile": "static",
+      "why_here": "真实 Rust workspace(cargo):多 crate、build/test 计划——Rust 的基线形态"
+    },
+    {
+      "id": "pflag-go",
+      "kind": "git",
+      "repo": "https://github.com/spf13/pflag.git",
+      "commit": "f8a990678a6d44385313e9b19e40737f889f9b14",
+      "profile": "static",
+      "why_here": "小型 Go module:go test/build 计划与 vet 分类——Go 的基线形态"
+    },
+    {
+      "id": "chailv",
+      "kind": "local",
+      "path": "D:\\Code\\chailv",
+      "profile": "dynamic",
+      "why_here": "真实业务工程(pip/venv):声明了 pytest/ruff/mypy,动态检查真实运行——本机条目"
+    },
+    {
+      "id": "open-dream-rsi",
+      "kind": "local",
+      "path": "D:\\Code\\Dream-RSI\\open-dream-rsi",
+      "profile": "dynamic",
+      "why_here": "真实 OSS 工程(uv):build/pytest/ruff/mypy 全部真实运行,并含一条无法被检查证实的候选——本机条目"
+    }
+  ]
+}
