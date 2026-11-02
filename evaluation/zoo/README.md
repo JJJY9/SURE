@@ -81,6 +81,15 @@ the manifest change so the review sees what SURE said about it first.
 entry's stdout/stderr, and its settings/store. Nothing is written into the
 checked projects.
 
+## One entry that records a known limitation
+
+`newtonsoft-json-dotnet` keeps its solution and projects under `Src/`, and
+SURE's discovery reads root manifests only, so its baseline is *no stack
+recognised* rather than a .NET reading — a sentinel on purpose: the day nested
+layouts become visible to discovery, the comparison against this baseline says
+so with a diff. `restsharp-dotnet` (a root `.slnx`) is the entry that measures
+the .NET stack today.
+
 ## What it is not
 
 - Not a judgement of the corpus projects; their own findings are SURE's answer
