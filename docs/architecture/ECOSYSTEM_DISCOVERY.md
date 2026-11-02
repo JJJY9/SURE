@@ -562,10 +562,15 @@ manifest for a project with nothing to run.
 ## .NET
 
 SURE looks for a solution (`*.sln`, `*.slnx`) or a project file (`*.csproj`,
-`*.fsproj`, `*.vbproj`) at the project root, reads the chosen file as text to
-prove it is readable, and does not parse it: no project graph is expanded, no
-package reference is resolved, and no MSBuild target is evaluated during
-discovery. `global.json` and `.editorconfig` are recorded by existence only.
+`*.fsproj`, `*.vbproj`) **at any depth**, picks the shallowest (ties broken by
+path, solutions before project files), reads the chosen file as text to prove it
+is readable, and does not parse it: no project graph is expanded, no package
+reference is resolved, and no MSBuild target is evaluated during discovery. The
+depth rule exists because keeping the solution under `Src/` is a common layout —
+measured on `JamesNK/Newtonsoft.Json` (2026-11-02), whose root holds no .NET
+file — and a root-only rule read that project as having no .NET stack at all.
+`global.json` and `.editorconfig` are recorded by existence only, at the root or
+beside the chosen manifest.
 
 The checks are `dotnet test`, `dotnet build`, and — only when `.editorconfig`
 is present — `dotnet format --verify-no-changes --no-restore`. A root with

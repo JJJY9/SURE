@@ -144,9 +144,20 @@
         "newtonsoft-json-dotnet": {
           "sure_version": "sure 0.1.3",
           "severity": "not_enough_checked",
-          "findings": [],
-          "notChecked": [],
-          "checkResults": []
+          "findings": [
+            "Must fix | Cannot confirm | build the .NET project",
+            "Must fix | Cannot confirm | run the .NET tests"
+          ],
+          "notChecked": [
+            "build the .NET project",
+            "check the .NET formatting",
+            "run the .NET tests"
+          ],
+          "checkResults": [
+            "skipped | build the .NET project",
+            "skipped | check the .NET formatting",
+            "skipped | run the .NET tests"
+          ]
         },
         "changesets-monorepo": {
           "sure_version": "sure 0.1.3",
