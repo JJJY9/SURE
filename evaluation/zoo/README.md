@@ -1,0 +1,88 @@
+# The project zoo
+
+A curated corpus of real projects — pinned by commit — that SURE is run against
+on demand, with invariants and a committed baseline.
+
+The unit suites prove SURE's logic against fixtures this repository wrote. The
+zoo measures SURE against projects this repository did not write: a setuptools
+sample, an Express server, a Cargo workspace, a Go module, and (on the machine
+that has them) two real working projects. Every ecosystem that joined SURE
+after 0.1.2 arrived because a real project broke something the fixtures had not
+imagined; the zoo is how that discovery stops being a user's job.
+
+## Running it
+
+From the repository root, after building the binary:
+
+```
+cargo build --release
+node scripts/zoo.mjs                    # every entry; compares with the baseline
+node scripts/zoo.mjs --only chailv      # one entry
+node scripts/zoo.mjs --offline          # cached clones only; others skip honestly
+node scripts/zoo.mjs --update-baseline  # record what this run observed
+```
+
+The binary is `--sure BIN` when given, otherwise the repository's own build
+(`target/release`, then `target/debug`), then `SURE_BIN`, then `sure` on PATH —
+this is a repository instrument, so the freshly built binary measures first and
+an installed copy is only a fallback (2026-11-02: a machine whose `SURE_BIN`
+pointed at a month-old build produced findings the current build does not).
+Per-entry timeout: `--timeout-minutes N` (default 20).
+
+Exit status: `0` when every entry matches its baseline, `1` when any entry
+failed, drifted, or is new (a new entry needs `--update-baseline`), `2` on a
+zoo-side error (bad arguments, no binary).
+
+## What a run asserts
+
+Per entry — none of it about the checked project's own quality:
+
+- **The check finished.** Exit 0 (green) or 1 (checked, not green). A crash, a
+  refused command line or an unfinished run is a zoo failure.
+- **The machine form parses** and carries `details.report` with an aggregate.
+- **No check result is `error`.** A checker that crashed is SURE's defect.
+- **Every skipped check carries a reason.** "Not run" must say why.
+- **The run matches the committed baseline**: aggregate severity, findings and
+  the not-checked list. A difference is a behavior change; either update the
+  baseline in the same change and say why, or fix what moved. The baseline
+  records the SURE version it was taken with, so a version bump alone does not
+  hide a change.
+
+The settings file the zoo writes disables the analysis provider — two runs of
+one commit compare without model variance — and each entry gets its own
+`--store-dir` under the run directory, so runs share nothing through history.
+
+## The manifest
+
+`projects.json` lists the entries. `kind: "git"` entries name a `repo` and a
+pinned `commit`; clones are cached under `target/tmp/zoo/cache` and only reused
+for the same commit. `kind: "local"` entries name an absolute `path` on the
+machine — a machine that does not have it records the entry as skipped with
+that reason, never as a pass.
+
+`profiles` decide what a run may do: `static` inspects (commands are planned and
+honestly recorded as not run); `dynamic` allows running the project's own
+checks, which local entries use where their dependencies are already in place.
+For every entry the runner prepends the project's own `.venv` (or `venv`)
+interpreter directory to the child's PATH when one exists — the same rule the
+MiQi panel applies — so `python -m pytest` in a local entry resolves to the
+project's interpreter, not the machine's; the run summary says when it did.
+
+Adding an entry: pick a project whose shape SURE does not yet see in the
+corpus, pin its commit, run `--update-baseline`, and commit the baseline with
+the manifest change so the review sees what SURE said about it first.
+
+## Where the output goes
+
+`target/tmp/zoo/runs/<timestamp>/` — one JSON summary (`zoo-report.json`), each
+entry's stdout/stderr, and its settings/store. Nothing is written into the
+checked projects.
+
+## What it is not
+
+- Not a judgement of the corpus projects; their own findings are SURE's answer
+  about them, recorded faithfully, and nothing here fixes them.
+- Not a substitute for the fixture suites: it cannot pin an exact expected
+  report, only compare against what the baseline observed.
+- Not green when it did not run: an entry with no clone and no local path is a
+  skip with a reason, and the summary keeps skips visible.
