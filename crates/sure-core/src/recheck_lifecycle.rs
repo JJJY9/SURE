@@ -65,6 +65,30 @@ impl FindingKey {
         ))
     }
 
+    /// The parts this key was built from, in [`Self::from_finding`]'s order.
+    ///
+    /// For a caller that has to write the identity down — an acknowledgement
+    /// record stores it (ADR 0019) — so that the stored form and the matching
+    /// form are one rule rather than two that agree today.
+    #[must_use]
+    pub fn parts(&self) -> (&str, &str, &str) {
+        (&self.title, &self.location, &self.locator)
+    }
+
+    /// The key these parts name, normalised under `case`.
+    ///
+    /// For a reader of a written-down identity: the parts were normalised by
+    /// the case rule in force when they were stored, and folding them a second
+    /// time under a different rule would be two answers to one question. The
+    /// current run's findings are folded by [`Self::from_finding`] under the
+    /// run's own rule, so on the same machine both sides arrive here already in
+    /// the same form. A caller that holds *unfolded* parts — a finding read out
+    /// of a report (ADR 0019) — passes the rule and they arrive in that form too.
+    #[must_use]
+    pub fn from_parts(title: &str, location: &str, locator: &str, case: CaseSensitivity) -> Self {
+        Self::new(title, location, locator, case)
+    }
+
     fn new(title: &str, location: &str, locator: &str, case: CaseSensitivity) -> Self {
         Self {
             title: title.to_owned(),
@@ -304,10 +328,16 @@ pub fn reconcile(
             continue;
         };
 
-        if current_keys.contains_key(&key) {
+        if let Some(current) = current_keys.get(&key) {
             // The issue still exists in the current run. The current finding is
-            // already in `findings`; the previous one is history.
-            kept_open.push(previous.clone());
+            // already in `findings`; the previous one is history. A current
+            // finding the person has accepted (ADR 0019) is neither still open
+            // nor resolved: the evidence stands, and the decision about it was
+            // made outside the project, so an earlier open copy must not come
+            // back as still open in a comparison the person already answered.
+            if current.status != FindingStatus::AcceptedRisk {
+                kept_open.push(previous.clone());
+            }
             continue;
         }
 

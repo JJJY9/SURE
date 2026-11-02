@@ -189,6 +189,55 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
+    /// Record that you reviewed a finding and accept the risk it describes.
+    ///
+    /// Only a finding no check can settle may be accepted (ADR 0019): a
+    /// candidate a scanner inferred, or a model opinion. A failing test, a
+    /// checker error and a check that did not run are defects and gaps to fix,
+    /// and SURE refuses to record them as accepted risks.
+    ///
+    /// The decision is written to your own store outside the project, so the
+    /// project — which the agent under judgement can edit — cannot add, remove
+    /// or soften one. It names the finding's evidence: if that evidence changes,
+    /// the acceptance stops applying and the finding comes back for review.
+    #[command(group(
+        clap::ArgGroup::new("acknowledge-action")
+            .required(true)
+            .multiple(false)
+    ))]
+    Acknowledge {
+        /// The project the finding belongs to. Default: the current directory.
+        path: Option<PathBuf>,
+
+        /// The finding id to accept, as `sure check` printed it (`fnd_…`).
+        #[arg(long, value_name = "ID", group = "acknowledge-action")]
+        finding: Option<String>,
+
+        /// A report written by `sure check --format json`, where the finding id
+        /// was printed.
+        ///
+        /// A plain `sure check` records nothing, so its finding ids exist only
+        /// in the report it printed. Name the file the report was written to and
+        /// the id resolves against it; without this flag the id is looked up in
+        /// this project's recorded findings, which `sure repair` and `sure
+        /// recheck` write.
+        #[arg(long, value_name = "FILE", requires = "finding")]
+        from: Option<PathBuf>,
+
+        /// Why you accepted it. Required with --finding, and recorded with the
+        /// decision so a reader later knows what was reviewed.
+        #[arg(long, value_name = "TEXT", requires = "finding")]
+        reason: Option<String>,
+
+        /// List what this project has accepted, and why.
+        #[arg(long, group = "acknowledge-action")]
+        list: bool,
+
+        /// Remove one recorded acceptance by its record id.
+        #[arg(long, value_name = "RECORD", group = "acknowledge-action")]
+        undo: Option<i64>,
+    },
+
     /// Look at what SURE has recorded.
     History {
         /// What to do with the history. Default: `list`.
@@ -455,6 +504,7 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Recheck { .. } => "recheck",
             Self::Repair { .. } => "repair",
+            Self::Acknowledge { .. } => "acknowledge",
             Self::History { .. } => "history",
             Self::Doctor => "doctor",
             Self::Config { .. } => "config",

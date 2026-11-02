@@ -122,7 +122,16 @@ use crate::report::{NotYet, Report};
 /// under the name a user types, which is what a caller comparing this list
 /// against `sure --help` will find there.
 pub const IMPLEMENTED: &[&str] = &[
-    "check", "doctor", "explain", "history", "hook", "mcp", "protocol", "recheck", "repair",
+    "acknowledge",
+    "check",
+    "doctor",
+    "explain",
+    "history",
+    "hook",
+    "mcp",
+    "protocol",
+    "recheck",
+    "repair",
     "version",
 ];
 
@@ -171,7 +180,12 @@ pub const IMPLEMENTED_IN_PART: &[&str] = &["config set", "config show"];
 /// this crate's own directory, which is what none of these tests is about. They
 /// are driven instead by `tests/cli_contract.rs`, against a project it makes.
 /// See `every_command` in the tests below.
-pub const NOT_ASKED_HERE: &[&str] = &["check", "recheck", "repair"];
+///
+/// `acknowledge` is here for a store's sake rather than a project's: every form
+/// of it reads or writes the user's own history — `--list` would list what the
+/// machine running the tests has accepted — and a test must not reach that. It
+/// is driven in `tests/cli_contract.rs` against a store the test names.
+pub const NOT_ASKED_HERE: &[&str] = &["acknowledge", "check", "recheck", "repair"];
 
 impl Command {
     /// What SURE does about this command, in this build.
@@ -233,6 +247,27 @@ impl Command {
             Self::Repair { path } => {
                 crate::check::run(Purpose::Repair, path.as_deref(), None, named)
             }
+
+            // A person's recorded decision about one finding (ADR 0019). It is
+            // not a check: the work is resolving a recorded finding and writing
+            // one row in the user's store, which is `crate::acknowledge`'s, and
+            // what comes back is the value that was written, read or removed.
+            Self::Acknowledge {
+                path,
+                finding,
+                from,
+                reason,
+                list,
+                undo,
+            } => crate::acknowledge::run(
+                path.as_deref(),
+                finding.as_deref(),
+                from.as_deref(),
+                reason.as_deref(),
+                *list,
+                *undo,
+                named,
+            ),
 
             // The whole inspect-and-delete surface. It goes through
             // `crate::history` for `Self::Doctor`'s reason — the work belongs one
@@ -506,12 +541,18 @@ mod tests {
                 // of it can belong in `every_command`, and the entry in
                 // [`IMPLEMENTED_IN_PART`] is driven against a settings file the
                 // test names instead.
+                // `Acknowledge` joins them for the same store reason as
+                // `HookAllowance`: every form of it reads the user's own history,
+                // so no invocation belongs in this list. Its three endings are
+                // driven in `tests/cli_contract.rs` against a store the test
+                // names.
                 Report::Check(_)
                 | Report::Settings(_)
                 | Report::Failed(_)
                 | Report::Mcp(_)
                 | Report::McpSession(_)
-                | Report::HookAllowance(_) => {
+                | Report::HookAllowance(_)
+                | Report::Acknowledge(_) => {
                     panic!(
                         "{command:?} produced {report:?}, and nothing in this list may have a \
                      side effect or a failure. See `every_command`."

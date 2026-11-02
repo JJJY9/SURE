@@ -93,7 +93,7 @@ mod record;
 
 pub use error::StoreError;
 pub use migrations::{LATEST as LATEST_SCHEMA_VERSION, Migration, MigrationError};
-pub use record::{ALLOWANCE, APPROVAL, RECORDING, RecordKind, StoredRecord};
+pub use record::{ACKNOWLEDGEMENT, ALLOWANCE, APPROVAL, RECORDING, RecordKind, StoredRecord};
 pub use sure_protocol::documents::DocumentKind;
 
 use std::fs;
@@ -853,6 +853,32 @@ impl Store {
     /// As [`Store::delete`].
     pub fn delete_recordings(&self) -> Result<u64, StoreError> {
         self.delete(&HistoryFilter::recordings())
+    }
+
+    /// Delete one record by row id, but only if it is the kind the caller
+    /// expects.
+    ///
+    /// A targeted delete rather than a [`Store::delete`] filter because the one
+    /// caller — `sure acknowledge --undo` — has a row id and nothing else it
+    /// means: a filter would have to restate what identifies the row, and a
+    /// filter that names the wrong thing deletes more than the user asked for.
+    /// The kind is part of the statement so that an id from one table of the
+    /// user's history can never remove a row of another.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Busy`] if another process held the write lock for longer
+    /// than [`StoreOptions::busy_timeout`]. Nothing is deleted in that case.
+    pub fn delete_record_of_kind(&self, id: i64, kind: RecordKind) -> Result<bool, StoreError> {
+        self.transaction(|connection| {
+            let affected = connection
+                .execute(
+                    "DELETE FROM records WHERE id = ?1 AND kind = ?2",
+                    rusqlite::params![id, kind.as_str()],
+                )
+                .map_err(|error| self.open_error(error))?;
+            Ok(affected > 0)
+        })
     }
 
     /// Run SQLite's own consistency check.

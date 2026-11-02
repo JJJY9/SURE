@@ -124,6 +124,32 @@ fn settings_file_of_our_own() -> PathBuf {
     a_directory_of_our_own("settings").join("user-settings.yaml")
 }
 
+/// A settings file with a local-command analysis provider that answers nothing.
+///
+/// Stage 8 then runs — so `every_stage_ran` does not see a gap there — without
+/// a network call and without a model: the stub prints nothing, which
+/// `parse_assessment` reads as "no verdicts", and the stage detail says it
+/// assessed the candidates and flagged none. The alternative, naming no
+/// settings file at all, would consult whatever provider the machine running
+/// the suite has configured and make this file's answer depend on it.
+fn an_analysis_stub_settings() -> PathBuf {
+    // No file to run: the interpreter's own built-in exits quietly. A script
+    // path would put this test's scratch directory — which deliberately holds
+    // spaces, like the fixture names everywhere in this file — through cmd.exe's
+    // command-line re-parsing, which is not the thing being measured here.
+    #[cfg(windows)]
+    let command = "['cmd.exe', '/c', 'exit', '/b', '0']";
+    #[cfg(not(windows))]
+    let command = "['/bin/sh', '-c', 'exit 0']";
+    let file = a_directory_of_our_own("settings-analysis-stub").join("settings.yaml");
+    std::fs::write(
+        &file,
+        format!("analysis:\n  provider: local_command\n  command: {command}\n"),
+    )
+    .expect("the settings file is written");
+    file
+}
+
 /// A project for a check to be about, with something in it to read.
 ///
 /// Under the same `target/tmp` root as the stores and never the repository
@@ -329,6 +355,9 @@ const EVERY_COMMAND: &[&[&str]] = &[
     &["check"],
     &["recheck"],
     &["repair"],
+    // The list form, against the store this file named and never wrote: the
+    // answer is that nothing has been accepted there (ADR 0019).
+    &["acknowledge", "--list"],
     &["history"],
     &["history", "list"],
     &["history", "list", "--limit", "1"],
@@ -6376,4 +6405,275 @@ fn every_command_is_reached_by_the_location_the_caller_named() {
             path.display()
         );
     }
+}
+
+// --- acknowledging a finding (ADR 0019) ---------------------------------
+
+/// A project whose only finding is a candidate nothing can settle.
+///
+/// No manifest, so SURE recognises no stack and plans none of the per-role
+/// checks — the plan holds only what the scanners propose — and the one line
+/// below is the shape the hard-coded-success detector matches. It is the same
+/// fixture `crates/sure-core/tests/acknowledged_findings.rs` drives through the
+/// pipeline directly; this file drives it through the binary a user types.
+fn a_project_with_one_unsettleable_candidate() -> PathBuf {
+    let project = a_directory_of_our_own("ack-project");
+    std::fs::create_dir_all(project.join("src")).expect("src exists");
+    std::fs::write(
+        project.join("src").join("bridge.js"),
+        "function respond(body) {\n  return {\n    status: 200,\n    body,\n  };\n}\n",
+    )
+    .expect("the source is written");
+    project
+}
+
+/// The run's own frame, parsed from the one line the machine form writes.
+fn frame_of(run: &Run) -> serde_json::Value {
+    serde_json::from_str(run.stdout.trim()).unwrap_or_else(|error| {
+        panic!(
+            "the machine form was not one JSON object ({error}):\nstdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        )
+    })
+}
+
+#[test]
+fn an_accepted_candidate_makes_the_next_check_green_and_undo_brings_it_back() {
+    let project = a_project_with_one_unsettleable_candidate();
+    let project_text = project.to_string_lossy().into_owned();
+    let store = a_store_of_our_own();
+    // An analysis stage that runs and answers nothing: no network, no model,
+    // and no gap in `every_stage_ran` for this environment to decide.
+    let settings = an_analysis_stub_settings();
+    // The store exists before the first check: `sure check` opens a store only
+    // when its file is already there, and a run that recorded nothing leaves
+    // `sure acknowledge` nothing to resolve (crate::acknowledge's module
+    // comment).
+    Store::open_at(&store_file(&store)).expect("the store is made");
+
+    // 1. The candidate run: one unsettled finding, not green.
+    let before = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "check", &project_text],
+    );
+    assert_eq!(
+        before.status, 1,
+        "an unsettled candidate must not be green:\n{}",
+        before.stderr
+    );
+    let frame = frame_of(&before);
+    let finding = &frame["details"]["report"]["findings"][0];
+    assert_eq!(finding["status"], "Cannot confirm", "{finding}");
+    let id = finding["id"]
+        .as_str()
+        .expect("the finding has an id")
+        .to_owned();
+
+    // 2. The report is the identity a plain check leaves behind — it records
+    //    nothing — so the id is resolved through the file the report was
+    //    written to. An id that file does not hold, and a missing reason, are
+    //    refusals rather than silent writes.
+    let report_path = a_directory_of_our_own("ack-report").join("check.json");
+    std::fs::write(&report_path, &before.stdout).expect("the report is saved");
+    let report_text = report_path.to_string_lossy().into_owned();
+    let unknown = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &[
+            "acknowledge",
+            &project_text,
+            "--finding",
+            "fnd_nothingrecorded0000000000",
+            "--from",
+            &report_text,
+            "--reason",
+            "x",
+        ],
+    );
+    assert_eq!(unknown.status, 5, "an unknown id is a failure");
+    assert!(
+        unknown.stderr.contains("holds no finding with the id"),
+        "{}",
+        unknown.stderr
+    );
+    let no_reason = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &[
+            "acknowledge",
+            &project_text,
+            "--finding",
+            &id,
+            "--from",
+            &report_text,
+        ],
+    );
+    assert_eq!(no_reason.status, 5, "an acceptance needs a reason");
+    assert!(
+        no_reason.stderr.contains("needs a reason"),
+        "{}",
+        no_reason.stderr
+    );
+
+    // 3. The decision is recorded.
+    let accepted = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &[
+            "acknowledge",
+            &project_text,
+            "--finding",
+            &id,
+            "--from",
+            &report_text,
+            "--reason",
+            "a real HTTP 200 in an API handler",
+        ],
+    );
+    assert_eq!(
+        accepted.status, 0,
+        "recording the acceptance failed:\n{}",
+        accepted.stderr
+    );
+    assert!(accepted.stdout.contains("Accepted:"), "{}", accepted.stdout);
+
+    // 4. The list reads the reason back out of the record.
+    let listed = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "acknowledge", &project_text, "--list"],
+    );
+    assert_eq!(listed.status, 0, "{}", listed.stderr);
+    let listed = frame_of(&listed);
+    assert_eq!(listed["details"]["action"], "listed");
+    let record = &listed["details"]["records"][0];
+    assert_eq!(record["reason"], "a real HTTP 200 in an API handler");
+    let row = record["record"].as_i64().expect("the record has a row");
+
+    // 5. The same check is green, says why, and keeps the finding visible.
+    let after = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "check", &project_text],
+    );
+    assert_eq!(
+        after.status, 0,
+        "the accepted candidate should reach green:\nstdout: {}\nstderr: {}",
+        after.stdout, after.stderr
+    );
+    let frame = frame_of(&after);
+    assert_eq!(frame["details"]["report"]["aggregate"]["severity"], "green");
+    assert!(
+        frame["details"]["report"]["aggregate"]["headline"]
+            .as_str()
+            .is_some_and(|headline| headline.contains("1 finding you reviewed and accepted")),
+        "a green run because of an acceptance must say so: {}",
+        frame["details"]["report"]["aggregate"]["headline"]
+    );
+    assert_eq!(
+        frame["details"]["report"]["findings"][0]["status"],
+        "Accepted risk"
+    );
+
+    // 6. Undo removes the record, and the finding is unresolved again.
+    let undone = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["acknowledge", &project_text, "--undo", &row.to_string()],
+    );
+    assert_eq!(undone.status, 0, "{}", undone.stderr);
+    assert!(
+        undone.stdout.contains("Removed record"),
+        "{}",
+        undone.stdout
+    );
+    let back = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "check", &project_text],
+    );
+    assert_eq!(back.status, 1, "the finding is unresolved again");
+    let frame = frame_of(&back);
+    assert_eq!(
+        frame["details"]["report"]["findings"][0]["status"],
+        "Cannot confirm"
+    );
+}
+
+#[test]
+fn a_finding_sure_repair_recorded_can_be_acknowledged_by_id_alone() {
+    // `sure repair` carries the loop and records every finding it leaves open
+    // (docs/architecture/CLI.md, `--store-dir`), which is the other way an id
+    // resolves: no report file needed. The store is not made here — repair
+    // creates it, which is the documented difference between the loop commands
+    // and `sure check`.
+    let project = a_project_with_one_unsettleable_candidate();
+    let project_text = project.to_string_lossy().into_owned();
+    let store = a_store_of_our_own();
+    // An analysis stage that runs and answers nothing: no network, no model,
+    // and no gap in `every_stage_ran` for this environment to decide.
+    let settings = an_analysis_stub_settings();
+
+    let repair = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "repair", &project_text],
+    );
+    assert_eq!(
+        repair.status, 1,
+        "a candidate leaves the run not green:\n{}",
+        repair.stderr
+    );
+    let frame = frame_of(&repair);
+    let id = frame["details"]["report"]["findings"][0]["id"]
+        .as_str()
+        .expect("the finding has an id")
+        .to_owned();
+
+    let accepted = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &[
+            "acknowledge",
+            &project_text,
+            "--finding",
+            &id,
+            "--reason",
+            "a real HTTP 200 in an API handler",
+        ],
+    );
+    assert_eq!(
+        accepted.status, 0,
+        "acknowledging by recorded id failed:\n{}",
+        accepted.stderr
+    );
+
+    // The re-check applies the decision, and the comparison the loop keeps does
+    // not report the accepted finding as still open.
+    let recheck = run_in_a_store_without_machine_settings(
+        &store,
+        &settings,
+        &["--format", "json", "recheck", &project_text],
+    );
+    assert_eq!(
+        recheck.status, 0,
+        "the accepted candidate should reach green on a re-check:\n{}",
+        recheck.stderr
+    );
+    let frame = frame_of(&recheck);
+    assert_eq!(frame["details"]["report"]["aggregate"]["severity"], "green");
+    assert!(
+        frame["details"]["lifecycle"].is_object(),
+        "the re-check did not compare against the repair run, so an empty still_open would mean          nothing: {}",
+        frame["details"]["lifecycle"]
+    );
+    let still_open = frame["details"]["lifecycle"]["still_open"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        still_open.is_empty(),
+        "an accepted finding was reported as still open: {still_open:?}"
+    );
 }
