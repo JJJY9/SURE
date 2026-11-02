@@ -27,11 +27,16 @@ The binary is `--sure BIN` when given, otherwise the repository's own build
 this is a repository instrument, so the freshly built binary measures first and
 an installed copy is only a fallback (2026-11-02: a machine whose `SURE_BIN`
 pointed at a month-old build produced findings the current build does not).
+`--sure` is not a hint: a name that cannot be found (as a path or on PATH) is an
+error, never a silent fallback to another build.
 Per-entry timeout: `--timeout-minutes N` (default 20).
 
 Exit status: `0` when every entry matches its baseline, `1` when any entry
 failed, drifted, or is new (a new entry needs `--update-baseline`), `2` on a
-zoo-side error (bad arguments, no binary).
+zoo-side error (bad arguments, no binary). `--update-baseline` records instead
+of comparing, so drift and new entries do not fail it: it exits `1` only when
+an entry itself failed (crash, report that breaks the invariants, timeout), and
+that entry's baseline is left as it was.
 
 ## What a run asserts
 
