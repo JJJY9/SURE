@@ -46,7 +46,10 @@ Per entry — none of it about the checked project's own quality:
   the not-checked list. A difference is a behavior change; either update the
   baseline in the same change and say why, or fix what moved. The baseline
   records the SURE version it was taken with, so a version bump alone does not
-  hide a change.
+  hide a change. It is kept **per runner platform** (`win32`, `linux`,
+  `darwin`): a Linux CI run compares against the Linux baseline, and a platform
+  with no baseline reports every entry as new rather than borrowing another
+  platform's answer.
 
 The settings file the zoo writes disables the analysis provider — two runs of
 one commit compare without model variance — and each entry gets its own
@@ -86,3 +89,22 @@ checked projects.
   report, only compare against what the baseline observed.
 - Not green when it did not run: an entry with no clone and no local path is a
   skip with a reason, and the summary keeps skips visible.
+
+## In CI
+
+`.github/workflows/zoo.yml` runs the zoo on `ubuntu-latest` nightly (an
+off-minute cron), on demand, and on pull requests that touch the zoo itself
+(`evaluation/zoo/**`, `scripts/zoo.mjs`, the workflow). It builds the release
+binary, caches the clone corpus by manifest hash, and uploads the run's
+`zoo-report.json` plus the baseline as an artifact.
+
+The local `kind: "local"` entries have no path on a CI runner and are recorded
+as skipped with that reason — the run summary keeps them visible and the job
+does not treat them as passes.
+
+**A platform's first run.** Dispatch the workflow with
+`update_baseline: true`: it runs `--update-baseline`, writes that runner
+platform's section into `baseline.json`, and uploads the file as an artifact.
+Download it, commit the platform's section, and dispatch again — the second
+run compares against it. Nothing writes the baseline into the repository from
+CI itself.

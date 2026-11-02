@@ -26,7 +26,10 @@
 //     findings and the not-checked list are identical to what the baseline
 //     recorded. A difference is a behavior change SURE's own diff should
 //     explain — either update the baseline in the same change and say why, or
-//     fix what moved.
+//     fix what moved. The baseline is kept per runner platform (win32, linux,
+//     darwin): a Linux CI run compares against the Linux baseline, and a
+//     platform without one reports every entry as new rather than borrowing
+//     another platform's answer.
 //
 // Honesty rules (the same ones the product holds itself to):
 //
@@ -286,13 +289,22 @@ function invariants(exitCode, envelope, summary) {
   return problems;
 }
 
-function loadBaseline(file, sureVersion) {
-  if (!fs.existsSync(file)) return { schema_version: 1, sure_version: sureVersion, entries: {} };
+function loadBaseline(file) {
+  if (!fs.existsSync(file)) return { schema_version: 2, platforms: {} };
+  let parsed;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
     fail(`基线文件无法解析(${file}): ${error.message}`);
   }
+  if (
+    parsed.schema_version !== 2 ||
+    typeof parsed.platforms !== 'object' ||
+    parsed.platforms === null
+  ) {
+    fail(`基线文件不是 schema_version 2(按平台的 platforms): ${file}——用 --update-baseline 重新生成`);
+  }
+  return parsed;
 }
 
 function comparable(summary) {
@@ -337,7 +349,8 @@ function main() {
   const runDir = path.join(RUNS_ROOT, stamp);
   fs.mkdirSync(runDir, { recursive: true });
 
-  const baseline = loadBaseline(opts.baseline, sureVersion);
+  const baseline = loadBaseline(opts.baseline);
+  const platform = process.platform;
   const entries = manifest.projects.filter((entry) => !opts.only || opts.only.has(entry.id));
   if (opts.only && entries.length === 0) fail(`--only 没有匹配任何条目: ${[...opts.only].join(',')}`);
 
@@ -414,10 +427,10 @@ function main() {
         result.note = problems.join('; ');
         continue;
       }
-      const previous = baseline.entries?.[entry.id];
+      const previous = baseline.platforms?.[platform]?.entries?.[entry.id];
       if (!previous) {
         result.status = 'NEW';
-        result.note = '基线里没有这个条目——用 --update-baseline 记录本次结果';
+        result.note = `基线里没有 ${platform} 平台下该条目的记录——用 --update-baseline 记录本次结果`;
         continue;
       }
       if (previous.sure_version !== sureVersion) {
@@ -438,15 +451,17 @@ function main() {
   }
 
   // --update-baseline:只有在这次运行里真实拿到结论的条目才更新。
+  // --update-baseline:只有在这次运行里真实拿到结论的条目才更新,且只更新
+  // 当前运行平台的那一档——另一个平台的基线原样保留。
   if (opts.updateBaseline) {
-    const next = {
-      schema_version: 1,
+    const next = { schema_version: 2, platforms: { ...baseline.platforms } };
+    const current = {
       sure_version: sureVersion,
-      entries: { ...baseline.entries },
+      entries: { ...(baseline.platforms?.[platform]?.entries ?? {}) },
     };
     for (const result of results) {
-      if (result.status === 'MATCH' || result.status === 'NEW' || result.status === 'CHANGED') {
-        next.entries[result.id] = {
+      if (['MATCH', 'NEW', 'CHANGED'].includes(result.status)) {
+        current.entries[result.id] = {
           sure_version: sureVersion,
           severity: result.severity,
           findings: result.findings,
@@ -455,12 +470,14 @@ function main() {
         };
       }
     }
+    next.platforms[platform] = current;
     fs.mkdirSync(path.dirname(opts.baseline), { recursive: true });
     fs.writeFileSync(opts.baseline, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   }
 
   const report = {
     ran_at: new Date().toISOString(),
+    platform,
     sure,
     sure_version: sureVersion,
     manifest: opts.manifest,
@@ -472,6 +489,7 @@ function main() {
   fs.writeFileSync(path.join(runDir, 'zoo-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
   console.log(`zoo: SURE ${sureVersion} (${sure})`);
+  console.log(`zoo: 平台 ${platform}${opts.updateBaseline ? '(本次记录该平台基线)' : ''}`);
   console.log(`zoo: ${entries.length} 个条目,运行目录 ${runDir}`);
   console.log('');
   const header = ['条目', '结果', '结论', '已核查', '未运行', '发现项', '耗时'];
