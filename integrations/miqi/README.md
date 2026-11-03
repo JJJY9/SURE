@@ -98,10 +98,12 @@ pass, the decision is documentary evidence, not protection.
 The SURE side now offers the decision mode that bridge needs: `sure hook
 ingest --consent-owner harness` (ADR 0020) makes SURE judge only the danger
 rules, reports the execution-mode and consent outcomes as a warning, and leaves
-obtaining consent to the harness's own approval flow. MiQi v1 does **not** pass
-it yet, and the plugin still sends no tool arguments (see above), so a decision
-it did enforce could not name a command's danger. Both are part of the Tier 2
-work, not of this contract.
+obtaining consent to the harness's own approval flow. A danger is named even
+for an action the execution mode denies, because MiQi may still run it after
+its own approval; that block cannot be answered by a one-time allowance. MiQi
+v1 does **not** pass it yet, and the plugin still sends no tool arguments (see
+above), so a decision it did enforce could not name a command's danger. Both
+are part of the Tier 2 work, not of this contract.
 
 ## Binary resolution, installation, and rights
 

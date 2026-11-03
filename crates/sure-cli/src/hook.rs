@@ -659,6 +659,12 @@ fn with_any_allowance(
         decision,
         allowance: None,
     };
+    // A danger named beside a *denied* action is protective information for a
+    // harness that owns consent; no grant may answer it. Only a request held
+    // for consent is within an allowance's reach (`Assessment`'s own rule).
+    if !assessment.allowance_reachable {
+        return unspent(assessment.decision.clone());
+    }
     let (Some(danger), Some(subject)) = (assessment.danger, request.subject()) else {
         return unspent(assessment.decision.clone());
     };

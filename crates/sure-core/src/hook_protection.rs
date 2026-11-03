@@ -590,13 +590,23 @@ pub struct Assessment {
     pub decision: ProtectionDecision,
     /// Which danger was named, when one was.
     ///
-    /// `Some` only where [`decision`](Self::decision) is a block, and a block
-    /// with `None` is a request held for a reason no allowance may be spent on:
-    /// a mode that does not permit it, the one mode this release refuses, a
-    /// whole-location change strict holds, a migration, CI configuration. The
-    /// danger is *the* list of what a recorded allowance can let through, so
-    /// this field is also that list.
+    /// `Some` only where [`decision`](Self::decision) is a block. A block with
+    /// `None` is a request held for a reason no allowance may be spent on: a
+    /// mode that does not permit it, the one mode this release refuses, a
+    /// migration or CI configuration. Under [`ConsentOwner::Harness`] a
+    /// request the engine *denied* can carry a danger too — the harness may
+    /// still run it after its own approval, so the danger is worth naming —
+    /// and [`allowance_reachable`](Self::allowance_reachable) says whether a
+    /// recorded allowance may answer this particular block.
     pub danger: Option<Danger>,
+    /// Whether a one-time allowance may spend against this block.
+    ///
+    /// True only where the request was held for consent
+    /// ([`ExecutionDecision::NeedsConsent`]): that is the question an allowance
+    /// answers. A danger named beside a *denied* action is protective
+    /// information for a harness that owns consent; it is not a way to run
+    /// under settings the user did not change.
+    pub allowance_reachable: bool,
 }
 
 /// The one decision path both integrations share.
@@ -631,6 +641,7 @@ fn assess_request(
         return Assessment {
             decision: ProtectionDecision::block(custom_reason()),
             danger: None,
+            allowance_reachable: false,
         };
     }
 
@@ -639,12 +650,23 @@ fn assess_request(
         // off an allow because that is where a shell request always lands: the
         // domain holds every arbitrary command for consent.
         //
-        // It is read for `NeedsConsent` and for nothing else. `Denied` is the
-        // execution mode or the permissions refusing, and a one-time allowance
-        // is not a way to run under settings the user did not change.
-        let danger = match base {
-            ExecutionDecision::NeedsConsent => claimed_danger(action_kind, request),
-            ExecutionDecision::Allowed | ExecutionDecision::Denied => None,
+        // It is read for `NeedsConsent` always. `Denied` is the execution mode
+        // or the permissions refusing, and under the default owner no danger is
+        // read and an allowance cannot answer that refusal. Under
+        // [`ConsentOwner::Harness`] the danger *is* read for `Denied`: the
+        // harness may run the action after its own approval, so naming the
+        // danger is the part of the question it delegated to SURE — and the
+        // block such a naming produces is marked not `allowance_reachable`,
+        // because an allowance is still not a way to run under settings the
+        // user did not change.
+        let danger = match (base, consent) {
+            (ExecutionDecision::NeedsConsent, _) => claimed_danger(action_kind, request),
+            (ExecutionDecision::Denied, ConsentOwner::Harness) => {
+                claimed_danger(action_kind, request)
+            }
+            (ExecutionDecision::Denied, ConsentOwner::Sure) | (ExecutionDecision::Allowed, _) => {
+                None
+            }
         };
         // A named danger is SURE's own question and blocks under either owner:
         // the danger rule is what the harness declared it was delegating here.
@@ -652,6 +674,22 @@ fn assess_request(
             return Assessment {
                 decision: ProtectionDecision::block(danger_reason(danger)),
                 danger: Some(danger),
+                allowance_reachable: base == ExecutionDecision::NeedsConsent,
+            };
+        }
+        // A strict-mode hold is the user's protection instruction, not SURE's
+        // own authorisation, so under the harness owner it applies even where
+        // the engine denied the action: the harness may run what SURE itself
+        // would not. Without this a strict user on the default `inspect_only`
+        // settings would get no protection for the areas `strict` names.
+        if consent == ConsentOwner::Harness
+            && protection == ProtectionMode::Strict
+            && let Some((area, role)) = sensitive_area(action_kind, request.path)
+        {
+            return Assessment {
+                decision: ProtectionDecision::block(strict_reason(area, role)),
+                danger: danger_of(area, role),
+                allowance_reachable: false,
             };
         }
         let decision = match consent {
@@ -661,7 +699,11 @@ fn assess_request(
             // not enforced: the decision is a warning carrying what happened.
             ConsentOwner::Harness => ProtectionDecision::warn(harness_consent_reason(base)),
         };
-        return Assessment { decision, danger };
+        return Assessment {
+            decision,
+            danger,
+            allowance_reachable: false,
+        };
     }
 
     match protection {
@@ -672,10 +714,12 @@ fn assess_request(
         ProtectionMode::Custom => Assessment {
             decision: ProtectionDecision::block(custom_reason()),
             danger: None,
+            allowance_reachable: false,
         },
         ProtectionMode::Standard => Assessment {
             decision: ProtectionDecision::allow_with(STANDARD_ALLOWS),
             danger: None,
+            allowance_reachable: false,
         },
         ProtectionMode::Strict => match sensitive_area(action_kind, request.path) {
             Some((area, role)) => Assessment {
@@ -685,10 +729,14 @@ fn assess_request(
                 // two chances to disagree.
                 decision: ProtectionDecision::block(strict_reason(area, role)),
                 danger: danger_of(area, role),
+                // A strict-mode hold is a hold for consent: `allow-once` is
+                // the person's answer to it, as it has been since `P13-T005`.
+                allowance_reachable: true,
             },
             None => Assessment {
                 decision: ProtectionDecision::allow_with(STRICT_ALLOWS),
                 danger: None,
+                allowance_reachable: false,
             },
         },
     }
@@ -2677,6 +2725,10 @@ mod tests {
         );
         assert_eq!(assessment.decision.decision, ProtectionDecisionKind::Block);
         assert_eq!(assessment.danger, Some(Danger::BroadDelete));
+        assert!(
+            assessment.allowance_reachable,
+            "a danger named beside consent is what an allowance answers"
+        );
         let reason = assessment.decision.reason.expect("a block says why");
         assert!(reason.contains("whole location"), "{reason}");
         assert!(
@@ -2737,6 +2789,110 @@ mod tests {
         );
         assert_eq!(destructive.decision.decision, ProtectionDecisionKind::Block);
         assert!(destructive.danger.is_some(), "{destructive:?}");
+    }
+
+    /// **A danger is read under the harness owner even where the engine
+    /// denied the action.** The harness may run it after its own approval, so
+    /// naming the danger is what SURE can still add; the block is protective
+    /// and no allowance may answer it, because an allowance is not a way to
+    /// run under settings the user did not change.
+    #[test]
+    fn a_denied_action_names_its_danger_under_the_harness_owner() {
+        // Inspect-only permissions deny a shell command before it is ever
+        // held for consent.
+        let permissions = ExecutionPermissions::inspect_only();
+        let denied = assess_miqi_tool(
+            &ToolRequest::running("exec", "rm -rf build/"),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            denied.decision.decision,
+            ProtectionDecisionKind::Block,
+            "{denied:?}"
+        );
+        assert_eq!(denied.danger, Some(Danger::BroadDelete));
+        assert!(
+            !denied.allowance_reachable,
+            "a mode denial is not a consent question an allowance answers"
+        );
+
+        // An ordinary command under the same mode stays a warning: nothing in
+        // it names one of the three dangers.
+        let ordinary = assess_miqi_tool(
+            &ToolRequest::running("exec", "cargo test"),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(ordinary.decision.decision, ProtectionDecisionKind::Warn);
+        assert_eq!(ordinary.danger, None);
+
+        // A strict-mode hold is the user's protection instruction and applies
+        // under the harness owner even where the engine denied the action: a
+        // write to credentials blocks on the default inspect-only settings,
+        // and a whole-location change names its danger.
+        let strict_write = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".env")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Strict,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            strict_write.decision.decision,
+            ProtectionDecisionKind::Block,
+            "{strict_write:?}"
+        );
+        assert_eq!(
+            strict_write.danger, None,
+            "a write to a secret is a strict hold"
+        );
+        assert!(!strict_write.allowance_reachable);
+
+        let strict_broad = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Strict,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            strict_broad.decision.decision,
+            ProtectionDecisionKind::Block
+        );
+        assert_eq!(strict_broad.danger, Some(Danger::BroadDelete));
+        assert!(!strict_broad.allowance_reachable);
+
+        // The same request under the default protection mode is only held by
+        // the engine, and the harness owner answers that with a warning.
+        let standard_write = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".env")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            standard_write.decision.decision,
+            ProtectionDecisionKind::Warn
+        );
+
+        // Under SURE's own consent nothing changes: the mode refuses, and no
+        // danger is named for an allowance to spend.
+        let sure = assess_miqi_tool(
+            &ToolRequest::running("exec", "rm -rf build/"),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Sure,
+        );
+        assert_eq!(sure.decision.decision, ProtectionDecisionKind::Block);
+        assert_eq!(sure.danger, None);
+        assert!(!sure.allowance_reachable);
     }
 
     /// A request SURE cannot read is answered exactly as it was before this

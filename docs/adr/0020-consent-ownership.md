@@ -42,7 +42,15 @@ sure hook ingest --consent-owner harness
   request with no named danger is answered `warn`, carrying the engine's own
   sentence and saying that the harness must obtain the consent. A request that
   *names a danger* still blocks under either owner: the danger rules are the
-  part of the answer the harness delegated to SURE.
+  part of the answer the harness delegated to SURE. Under `harness` the danger
+  is read even where the engine **denied** the action — the harness may still
+  run it after its own approval, so the danger is worth naming — and that
+  block cannot be answered by a one-time allowance, which remains tied to the
+  consent question (`needs consent`) and not to a mode denial. The same holds
+  for a `strict`-mode hold on a sensitive area (migrations, CI configuration,
+  credentials, a whole-location change): it is the user's protection
+  instruction, so under `harness` it applies even where the engine denied the
+  action.
 - The one-time allowance (`sure hook allow-once`) still spends against a
   danger block, under either owner. It is the person's answer to the one
   question SURE can still name.
