@@ -87,11 +87,12 @@ use sure_domain::variants::variants;
 
 use crate::paths::CaseSensitivity;
 
-/// How hard a scan is allowed to try.
+/// How a scan is bounded, and what it was told to leave out.
 ///
-/// Every field is a limit on work, and every limit that is reached is recorded
-/// as a [`Skipped`] rather than applied quietly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The limits are on work, and every limit that is reached is recorded as a
+/// [`Skipped`] rather than applied quietly. [`ScanOptions::exclude`] is not a
+/// limit but a person's decision, and it is recorded the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     /// How many levels below the root SURE will list.
     ///
@@ -115,6 +116,16 @@ pub struct ScanOptions {
     /// rules can be tested on one machine, exactly as
     /// [`crate::paths::is_within_case`] does for locations.
     pub case: CaseSensitivity,
+    /// Project-relative paths the person asked SURE not to read.
+    ///
+    /// **Only the user's own SURE settings produce these** (`scan.exclude` in the
+    /// user's configuration file, keyed by project root); a project file that
+    /// names the setting is refused when the configuration is loaded, because a
+    /// project that could exclude paths would be a project that can hide
+    /// evidence (ADR 0011). An excluded directory leaves out everything below
+    /// it, and the walk records each exclusion as [`SkipReason::UserExcluded`]
+    /// rather than dropping it silently.
+    pub exclude: Vec<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -125,6 +136,7 @@ impl Default for ScanOptions {
             max_depth: 32,
             max_entries: 200_000,
             case: CaseSensitivity::platform(),
+            exclude: Vec::new(),
         }
     }
 }
@@ -148,6 +160,13 @@ impl ScanOptions {
     #[must_use]
     pub const fn with_case(mut self, case: CaseSensitivity) -> Self {
         self.case = case;
+        self
+    }
+
+    /// The same options with paths the person asked not to read.
+    #[must_use]
+    pub fn with_exclude(mut self, exclude: Vec<PathBuf>) -> Self {
+        self.exclude = exclude;
         self
     }
 }
@@ -441,6 +460,28 @@ impl Walk {
         true
     }
 
+    /// Record a path the person's settings asked the scan to leave out.
+    ///
+    /// Answered before the ignore tables and before the link check: the decision
+    /// is the person's, and the report should say so rather than describing the
+    /// entry as vendored, a cache or a link.
+    fn excluded(&mut self, path: &Path) -> bool {
+        if !self
+            .options
+            .exclude
+            .iter()
+            .any(|exclude| path_is_within(path, exclude, self.options.case))
+        {
+            return false;
+        }
+        self.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: SkipReason::UserExcluded,
+            detail: None,
+        });
+        true
+    }
+
     /// List the contents of `dir`, if there is still budget to.
     ///
     /// `relative` is `dir`'s path relative to the root, which is empty for the
@@ -509,6 +550,10 @@ impl Walk {
 
             let child_relative = relative.join(&name);
 
+            if self.excluded(&child_relative) {
+                continue;
+            }
+
             match kind {
                 None => self.skipped.push(Skipped {
                     path: child_relative,
@@ -568,6 +613,20 @@ impl Walk {
             }
         }
     }
+}
+
+/// Whether `path` is `prefix` or inside it, under `case`.
+///
+/// Component-wise, so `out` excludes `out/` and `out/a.js` but never `output/`;
+/// and under the platform's case rule, so a Windows checkout matches whatever
+/// case its directories were given.
+fn path_is_within(path: &Path, prefix: &Path, case: CaseSensitivity) -> bool {
+    let prefix_len = prefix.components().count();
+    if prefix_len == 0 || path.components().count() < prefix_len {
+        return false;
+    }
+    let head: PathBuf = path.components().take(prefix_len).collect();
+    crate::paths::compare::same_path_case(&head, prefix, case)
 }
 
 #[cfg(test)]
@@ -730,6 +789,44 @@ mod tests {
             assert_eq!(skip.reason, SkipReason::VersionControl, "{path}");
             assert!(skip.detail.is_some(), "{path}");
         }
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
+    }
+
+    #[test]
+    fn a_path_the_person_excluded_is_recorded_as_a_scope_skip_and_not_scanned() {
+        // `scan.exclude` in the user's own settings: the decision is theirs, and
+        // the scan records it rather than dropping the path silently. A
+        // near-miss name (`output/`) stays in the scan — the exclusion is a
+        // path, not a pattern.
+        let root = sure_testkit::scratch::directory("scan user exclude", "excluded output");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/app.js"), b"const x = 1;\n").expect("src app");
+        fs::create_dir_all(root.join("out/assets")).expect("out");
+        fs::write(root.join("out/assets/bundle.js"), b"const y = 2;\n").expect("bundle");
+        fs::create_dir_all(root.join("output")).expect("output");
+        fs::write(root.join("output/own.js"), b"").expect("own");
+
+        let options = ScanOptions::default().with_exclude(vec![PathBuf::from("out")]);
+        let scan = scan(&root, options).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/app.js"), "{paths:?}");
+        assert!(
+            paths.iter().any(|path| path == "output/own.js"),
+            "a near-miss name stays in the scan: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("out/")),
+            "{paths:?}"
+        );
+        let skip = scan
+            .skipped()
+            .iter()
+            .find(|skip| skip.path == Path::new("out"))
+            .unwrap_or_else(|| panic!("the exclusion was not recorded: {:?}", scan.skipped()));
+        assert_eq!(skip.reason, SkipReason::UserExcluded);
         assert!(
             scan.is_complete(),
             "a declared scope skip is not a loss of coverage"

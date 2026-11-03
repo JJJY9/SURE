@@ -411,7 +411,7 @@ fn a_manifest_sure_ran_out_of_budget_for_is_unread_and_never_absent() {
     assert!(fixture.exists("pyproject.toml"), "the premise");
 
     let options = DiscoverOptions::default().with_max_manifests(0);
-    let found = fixture.discover_with(options);
+    let found = fixture.discover_with(options.clone());
     let python = fixture.python_with(options);
     match &python.manifest {
         ManifestState::Unread(UnreadReason::OutOfBudget { limit }) => assert_eq!(*limit, 0),
@@ -445,7 +445,7 @@ fn a_requirements_file_that_could_not_be_read_is_named_and_not_dropped() {
     assert!(fixture.exists("requirements.txt"), "the premise");
 
     let options = DiscoverOptions::default().with_max_manifest_bytes(500);
-    let found = fixture.discover_with(options);
+    let found = fixture.discover_with(options.clone());
     let python = fixture.python_with(options);
     assert!(
         python.requirements.is_empty(),

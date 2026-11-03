@@ -397,11 +397,15 @@ pub fn run_with_commands(
         // npm's shipped JavaScript entry — for the names it can prove; every
         // other program is left exactly as the plan holds it.
         .with_package_launchers(sure_core::package_launcher::PackageLaunchers::of_this_machine());
+    // The scan leaves out what the person's own settings asked it to; the
+    // project's file cannot set any of it (`Authority::load` refuses it).
+    let scan_excludes = authority.scan_excludes(project);
     let run = Pipeline {
         project,
         purpose,
         config: &loaded.config,
         execution: authority.execution(),
+        scan_excludes: &scan_excludes,
         analysis: authority.analysis().value,
         external_commands: &external_commands,
         store: store.as_ref(),
@@ -3114,6 +3118,58 @@ and do not trim the trailing tab";
         a_project(&fixture);
         let report = run_with(Purpose::Check, &fixture.paths(), &fixture.project(), None);
         assert!(machine_of(&report)["recorded_goal"].is_null());
+    }
+
+    #[test]
+    fn a_user_excluded_path_is_not_read_and_the_report_does_not_find_anything_in_it() {
+        // The whole feature at the command level: the same candidate sits in a
+        // source file and in a build-output directory, the person's own settings
+        // exclude the directory, and only the source file is read.
+        let fixture = Fixture::new("user-scan-exclude");
+        fixture.write(
+            "src/app.js",
+            "function respond() {\n  return { status: 200 };\n}\n",
+        );
+        fixture.write(
+            "out/app.js",
+            "function respond() {\n  return { status: 200 };\n}\n",
+        );
+        let project = fixture.project();
+        fixture.write_user_config(&format!(
+            "scan:\n  exclude:\n    '{}':\n      - out\n",
+            project.display()
+        ));
+
+        let report = run_with(Purpose::Check, &fixture.paths(), &project, None);
+        let outcome = &checked(&report).run;
+        let run = outcome.run.as_ref().expect("a finished run");
+        let discover = outcome.stage(Stage::Discover);
+        let StageOutcome::Ran { detail } = &discover.outcome else {
+            panic!("discovery did not run: {:?}", discover.outcome)
+        };
+        assert!(
+            detail.contains("your settings exclude"),
+            "the report does not say the path was left out on the user's decision: {detail}"
+        );
+        let anchors: Vec<String> = run
+            .verdict
+            .findings
+            .iter()
+            .flat_map(|finding| {
+                finding
+                    .evidence
+                    .iter()
+                    .map(|evidence| evidence.anchor.location.clone())
+            })
+            .collect();
+        assert!(
+            anchors.iter().any(|anchor| anchor == "src/app.js"),
+            "the fixture's candidate was not found in the source file: {anchors:?}"
+        );
+        assert!(
+            !anchors.iter().any(|anchor| anchor == "out/app.js"),
+            "a path the user excluded was read: {anchors:?}"
+        );
     }
 
     #[test]

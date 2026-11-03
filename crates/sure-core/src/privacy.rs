@@ -528,6 +528,7 @@ mod tests {
             purpose: Purpose::Check,
             config: &Config::default(),
             execution: ExecutionSettings::inspect_only(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),

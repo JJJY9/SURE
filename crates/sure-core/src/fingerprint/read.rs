@@ -238,7 +238,7 @@ impl<'a> Reader<'a> {
         relative: &Path,
         entry: &Path,
     ) -> Result<Contents, FingerprintError> {
-        let walked = scan(entry, self.options.scan).map_err(|error| match error {
+        let walked = scan(entry, self.options.scan.clone()).map_err(|error| match error {
             ScanError::Unreadable { message, .. } => FingerprintError::Unreadable {
                 path: relative.to_path_buf(),
                 message,

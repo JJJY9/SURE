@@ -105,7 +105,7 @@
 //! states the same rule for the same reason.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sure_domain::evidence::{
@@ -154,6 +154,7 @@ use crate::recheck_lifecycle::{self, LifecycleInputs, LifecycleUpdate};
 use crate::repair_impact::{seed_rechecks, select_impacted_checks};
 use crate::route_consistency::RouteConsistency;
 use crate::runtime_probes::{PlanRefused, ProbePlan};
+use crate::scan::ScanOptions;
 use crate::schedule::{
     CheckProposal, CheckReason, CheckSchedule, PlanBuilder, ProposalRefused, ScheduledCheck,
 };
@@ -635,6 +636,17 @@ pub struct Pipeline<'a> {
     /// machine whose user never allowed any of it — the defect P13-T009 exists
     /// to close, in the one place `check` can observe it.
     pub execution: ExecutionSettings,
+    /// Paths the person's settings asked the scan to leave out of this project.
+    ///
+    /// Resolved from the user's own configuration by the authority layer
+    /// (`Authority::scan_excludes`), and never from the project's file: an
+    /// exclusion narrows the evidence a finding could come from, and the project
+    /// may be controlled by the agent under evaluation (ADR 0011). The scan
+    /// records each one as [`SkipReason::UserExcluded`], so a report says what
+    /// was not read instead of leaving a reader to assume it was empty.
+    ///
+    /// [`SkipReason::UserExcluded`]: crate::scan::SkipReason::UserExcluded
+    pub scan_excludes: &'a [PathBuf],
     /// The history to compare against, when there is one.
     ///
     /// Never opened here: see the module comment.
@@ -767,7 +779,11 @@ impl Pipeline<'_> {
         let mut stages = Stages::new();
 
         // ---- 1. Discover -----------------------------------------------------
-        let discovery = match discover::discover(self.project, &DiscoverOptions::default()) {
+        let scan_options = ScanOptions::default().with_exclude(self.scan_excludes.to_vec());
+        let discovery = match discover::discover(
+            self.project,
+            &DiscoverOptions::default().with_scan(scan_options),
+        ) {
             Ok(discovery) => discovery,
             Err(error) => {
                 return self.stopped_at(
@@ -2478,13 +2494,28 @@ fn describe_discovery(discovery: &Discovery, support: &ProjectSupport) -> String
     } else {
         stacks.join(", ")
     };
-    let complete = if discovery.is_complete() {
-        "all of it was read"
+    // A path the person's settings excluded is not a loss, but it is also not
+    // "all of it was read": the sentence has to say whose decision left it out,
+    // or a reader cannot tell the exclusion from an empty directory.
+    let excluded = discovery
+        .scan
+        .skipped()
+        .iter()
+        .filter(|skip| skip.reason == crate::scan::SkipReason::UserExcluded)
+        .count();
+    let read = if discovery.is_complete() {
+        if excluded == 0 {
+            "all of it was read".to_owned()
+        } else {
+            format!("all of it was read except {excluded} path(s) your settings exclude")
+        }
+    } else if excluded == 0 {
+        "part of it was not read".to_owned()
     } else {
-        "part of it was not read"
+        format!("part of it was not read, and {excluded} path(s) your settings exclude")
     };
     format!(
-        "{named}; {complete}. Support reaches level {}.",
+        "{named}; {read}. Support reaches level {}.",
         support.level.letter()
     )
 }
@@ -3014,6 +3045,7 @@ mod tests {
                 purpose: Purpose::Recheck,
                 config: &config,
                 execution: ExecutionSettings::inspect_only(),
+                scan_excludes: &[],
                 store: Some(store),
                 goal: None,
                 analysis: Default::default(),
@@ -3246,6 +3278,7 @@ mod tests {
                 purpose: Purpose::Recheck,
                 config: &config,
                 execution: ExecutionSettings::inspect_only(),
+                scan_excludes: &[],
                 store: Some(store),
                 goal: None,
                 analysis: Default::default(),
@@ -3367,6 +3400,7 @@ mod tests {
             purpose: Purpose::Recheck,
             config,
             execution: ExecutionSettings::inspect_only(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),
@@ -3719,6 +3753,7 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: ExecutionSettings::inspect_only(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),
@@ -3778,6 +3813,7 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),
@@ -3854,6 +3890,7 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),
@@ -4204,6 +4241,7 @@ mod tests {
                 purpose: Purpose::Check,
                 config: &config,
                 execution: authority.execution(),
+                scan_excludes: &[],
                 store: None,
                 goal: None,
                 analysis: Default::default(),
@@ -4461,6 +4499,7 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
             analysis: Default::default(),

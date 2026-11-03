@@ -2211,6 +2211,7 @@ fn pipelined_with(
         purpose: Purpose::Check,
         config: &config,
         execution,
+        scan_excludes: &[],
         store: None,
         goal,
         analysis: Default::default(),

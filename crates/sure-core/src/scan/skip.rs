@@ -67,6 +67,15 @@ pub enum SkipReason {
     /// checking a project would change the thing being checked and the second
     /// check would be of a different project state than the first.
     SureCache,
+    /// A path the person asked SURE not to read, in their own settings.
+    ///
+    /// **Only the user's configuration can produce this** (`scan.exclude`, keyed
+    /// by project); a project file that names the setting is refused when the
+    /// configuration is loaded (ADR 0011). It is a declared scope skip, not a
+    /// loss — but it is reported like every other skip, because a scan that
+    /// silently stopped reading a path would leave a reader unable to tell
+    /// "nothing was there" from "nobody looked".
+    UserExcluded,
     /// Deeper than [`ScanOptions::max_depth`] allows.
     ///
     /// [`ScanOptions::max_depth`]: super::ScanOptions::max_depth
@@ -106,6 +115,7 @@ variants!(
         BuildOutput,
         Cache,
         SureCache,
+        UserExcluded,
         TooDeep,
         OutOfBudget,
         NotFollowed,
@@ -124,6 +134,7 @@ impl SkipReason {
             Self::BuildOutput => "build_output",
             Self::Cache => "cache",
             Self::SureCache => "sure_cache",
+            Self::UserExcluded => "user_excluded",
             Self::TooDeep => "too_deep",
             Self::OutOfBudget => "out_of_budget",
             Self::NotFollowed => "not_followed",
@@ -144,7 +155,8 @@ impl SkipReason {
             | Self::Vendored
             | Self::BuildOutput
             | Self::Cache
-            | Self::SureCache => true,
+            | Self::SureCache
+            | Self::UserExcluded => true,
             Self::TooDeep
             | Self::OutOfBudget
             | Self::NotFollowed
@@ -168,7 +180,8 @@ impl SkipReason {
             | Self::Vendored
             | Self::BuildOutput
             | Self::Cache
-            | Self::SureCache => false,
+            | Self::SureCache
+            | Self::UserExcluded => false,
             Self::TooDeep
             | Self::OutOfBudget
             | Self::NotFollowed
@@ -196,6 +209,7 @@ impl SkipReason {
             Self::SureCache => {
                 "is SURE's own cache inside the project, and reading it would make a check depend on SURE's previous runs"
             }
+            Self::UserExcluded => "is a path your SURE settings asked the scan to leave out",
             Self::TooDeep => "is deeper inside the project than SURE looks in one run",
             Self::OutOfBudget => {
                 "is where SURE stopped, having listed as many files and folders as it will in one run"

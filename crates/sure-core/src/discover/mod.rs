@@ -419,7 +419,7 @@ impl Discovery {
 /// Limits on work, in the same spirit as [`ScanOptions`] and
 /// `FingerprintOptions`: every one that is reached is reported rather than
 /// applied quietly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoverOptions {
     /// Limits on the walk. The same tables, the same rules.
     pub scan: ScanOptions,
@@ -457,7 +457,7 @@ impl Default for DiscoverOptions {
 impl DiscoverOptions {
     /// The same options with different limits on the walk.
     #[must_use]
-    pub const fn with_scan(mut self, scan: ScanOptions) -> Self {
+    pub fn with_scan(mut self, scan: ScanOptions) -> Self {
         self.scan = scan;
         self
     }
@@ -515,7 +515,7 @@ impl DiscoverOptions {
 /// # }
 /// ```
 pub fn discover(root: &Path, options: &DiscoverOptions) -> Result<Discovery, ScanError> {
-    let scan = crate::scan::scan(root, options.scan)?;
+    let scan = crate::scan::scan(root, options.scan.clone())?;
 
     let mut budget = read::Budget::new(options.max_manifests);
     let mut unread = Vec::new();
