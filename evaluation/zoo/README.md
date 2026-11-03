@@ -38,7 +38,8 @@ those — it was measured and set aside — so it does not fail the run.
 `--update-baseline` records instead of comparing, so drift and new entries do
 not fail it: it exits `1` only when an entry itself failed (crash, report that
 breaks the invariants, timeout), and that entry's baseline is left as it was.
-`DIRTY` entries are not recorded either.
+A `DIRTY` local entry is recorded in this mode: the update is the person's own
+decision about what to record.
 
 ## What a run asserts
 
@@ -72,11 +73,11 @@ that reason, never as a pass.
 
 A local entry whose working tree has uncommitted changes is measured and shown
 as `DIRTY`: its findings are reported like any other entry's, but it is not
-compared with the baseline and `--update-baseline` does not record it. A tree
-somebody is editing is a moving target — comparing it would report the edits as
-regression, and recording it would freeze a transient state as expected. The
-same rule is not applied to `kind: "git"` entries: their tree is the pinned
-commit, and a dirty clone means the pin is not what was measured.
+compared with the baseline — comparing it would report somebody's edits as
+regression. `--update-baseline` records it, because running the update is the
+person's deliberate act and the reading is what they chose to record. The same
+rule is not applied to `kind: "git"` entries: their tree is the pinned commit,
+and a dirty clone means the pin is not what was measured.
 
 `profiles` decide what a run may do: `static` inspects (commands are planned and
 honestly recorded as not run); `dynamic` allows running the project's own
