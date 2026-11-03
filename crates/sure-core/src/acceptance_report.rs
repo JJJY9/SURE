@@ -61,8 +61,8 @@ use crate::false_completion_aggregator::aggregate;
 use crate::fingerprint::digest::Digest as CorpusDigest;
 use crate::harness_event::{IngestedEvent, ingest_event_str};
 use crate::hook_protection::{
-    Danger, ProtectionDecisionKind, ToolRequest, assess_claude_code_tool, assess_cursor_tool,
-    danger_reason,
+    ConsentOwner, Danger, ProtectionDecisionKind, ToolRequest, assess_claude_code_tool,
+    assess_cursor_tool, danger_reason,
 };
 use crate::ids::{CheckId, FingerprintId};
 use crate::intent::{ProjectIntent, may_claim_full_fulfilment};
@@ -1985,8 +1985,16 @@ fn action(fixtures_root: &Path, id: &str, danger: Danger) -> Result<Measurement,
             command,
         };
         let assessment = match harness.as_str() {
-            "claude_code" => assess_claude_code_tool(&request, mode, &permissions, protection),
-            "cursor" => assess_cursor_tool(&request, mode, &permissions, protection),
+            "claude_code" => assess_claude_code_tool(
+                &request,
+                mode,
+                &permissions,
+                protection,
+                ConsentOwner::Sure,
+            ),
+            "cursor" => {
+                assess_cursor_tool(&request, mode, &permissions, protection, ConsentOwner::Sure)
+            }
             other => {
                 return Err(CorpusError::Malformed {
                     path: format!("{FIXTURES_PATH}/{id}/scenario.json"),

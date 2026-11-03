@@ -435,6 +435,17 @@ pub enum HookAction {
 
         /// The kind of event, as named by the harness.
         event_kind: Option<String>,
+
+        /// Who owns the consent a held request needs: `sure` (the default) or
+        /// `harness`.
+        ///
+        /// A harness that asks its own user declares `harness`: the
+        /// execution-mode and consent outcomes stop blocking (the decision is a
+        /// warning carrying what the engine said), and the danger rules are the
+        /// only ones that still block. A hook that cannot ask keeps the
+        /// default, where those outcomes block.
+        #[arg(long, value_name = "OWNER")]
+        consent_owner: Option<String>,
     },
     /// Record a one-time allowance for one request SURE would otherwise hold.
     ///

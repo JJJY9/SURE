@@ -441,6 +441,7 @@ mod tests {
                 action: HookAction::Ingest {
                     source: None,
                     event_kind: None,
+                    consent_owner: None,
                 },
             },
             Command::Explain { id: None },
