@@ -423,9 +423,14 @@ fn scan_frontend_files(discovery: &Discovery, actions: &mut Vec<UiAction>) {
         bytes_read = bytes_read.saturating_add(metadata.len());
 
         let file = display_path(path);
+        let open_tags = open_tag_by_line(&text);
         for (index, line) in text.lines().enumerate() {
             let line_number = index + 1;
+            let open_tag = open_tags.get(index).and_then(|tag| tag.clone());
             for (kind, element) in actions_on_line(line) {
+                let element = element
+                    .or_else(|| open_tag.clone())
+                    .unwrap_or_else(|| default_element(kind).to_owned());
                 let context = escape_control_characters(line.trim());
                 actions.push(UiAction {
                     kind,
@@ -449,7 +454,7 @@ fn is_frontend_source(path: &Path) -> bool {
 }
 
 /// Every UI action binding on one line.
-fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
+fn actions_on_line(line: &str) -> Vec<(UiActionKind, Option<String>)> {
     let mut found = Vec::new();
 
     // onClick= or onClick: (React/JSX/Vue bindings)
@@ -457,7 +462,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = tag_name_before(before).unwrap_or_else(|| "element".to_owned());
+            let element = tag_name_before(before);
             found.push((UiActionKind::Click, element));
             search_from += start + pattern.len();
         }
@@ -470,7 +475,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
             let next = line[end..].chars().next();
             if next == Some('=') || next == Some('.') || next == Some(' ') || next == Some('\t') {
                 let before = &line[..search_from + start];
-                let element = tag_name_before(before).unwrap_or_else(|| "element".to_owned());
+                let element = tag_name_before(before);
                 found.push((UiActionKind::Click, element));
             }
             search_from = end + 1;
@@ -482,7 +487,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = tag_name_before(before).unwrap_or_else(|| "form".to_owned());
+            let element = tag_name_before(before);
             found.push((UiActionKind::Submit, element));
             search_from += start + pattern.len();
         }
@@ -495,7 +500,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
             let next = line[end..].chars().next();
             if next == Some('=') || next == Some('.') || next == Some(' ') || next == Some('\t') {
                 let before = &line[..search_from + start];
-                let element = tag_name_before(before).unwrap_or_else(|| "form".to_owned());
+                let element = tag_name_before(before);
                 found.push((UiActionKind::Submit, element));
             }
             search_from = end + 1;
@@ -507,7 +512,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = receiver_before(before).unwrap_or_else(|| "element".to_owned());
+            let element = receiver_before(before);
             found.push((UiActionKind::Click, element));
             search_from += start + pattern.len();
         }
@@ -518,13 +523,94 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = receiver_before(before).unwrap_or_else(|| "form".to_owned());
+            let element = receiver_before(before);
             found.push((UiActionKind::Submit, element));
             search_from += start + pattern.len();
         }
     }
 
     found
+}
+
+/// The name a binding falls back to when nothing in the source names one.
+fn default_element(kind: UiActionKind) -> &'static str {
+    match kind {
+        UiActionKind::Click => "element",
+        UiActionKind::Submit => "form",
+    }
+}
+
+/// The tag open at the start of each line, when it opened on an earlier line.
+///
+/// JSX and Vue templates routinely put one attribute per line, so a binding
+/// (`onClick={reset}`) sits on a line whose `<button` is above it. This walks
+/// the file once, carrying the most recently opened tag across lines until its
+/// closing `>`, and reports it per line. A tag that opened on the binding's own
+/// line is found by [`tag_name_before`] instead, which wins because it is the
+/// closer reading.
+///
+/// The walk is a heuristic, not a parser, and it is written to fail towards "no
+/// tag" rather than towards a guess: quotes are skipped, `{}` raises a depth
+/// that ignores `>` (so an arrow function's `=>` cannot close a tag), and a `<`
+/// that is not followed by a letter is not a tag at all. A tag name is
+/// lowercased, like [`tag_name_before`] does.
+fn open_tag_by_line(text: &str) -> Vec<Option<String>> {
+    let mut per_line = Vec::new();
+    let mut open: Option<String> = None;
+    let mut depth = 0_usize;
+    let mut quote: Option<char> = None;
+    for line in text.lines() {
+        // What was open when this line began is what a binding on it belongs to.
+        per_line.push(open.clone());
+        let chars: Vec<char> = line.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            let current = chars[index];
+            if let Some(opened) = quote {
+                if current == opened {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if open.is_some() {
+                match current {
+                    '"' | '\'' | '`' => quote = Some(current),
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    '>' if depth == 0 => open = None,
+                    _ => {}
+                }
+                index += 1;
+                continue;
+            }
+            if current == '<' {
+                let mut end = index + 1;
+                while end < chars.len()
+                    && (chars[end].is_ascii_alphanumeric()
+                        || chars[end] == '_'
+                        || chars[end] == '-'
+                        || chars[end] == '.'
+                        || chars[end] == ':')
+                {
+                    end += 1;
+                }
+                if end > index + 1 && chars[index + 1].is_ascii_alphabetic() {
+                    open = Some(
+                        chars[index + 1..end]
+                            .iter()
+                            .collect::<String>()
+                            .to_lowercase(),
+                    );
+                    depth = 0;
+                    index = end;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+    }
+    per_line
 }
 
 /// The tag name immediately before an attribute, if we're inside a tag.
@@ -1018,6 +1104,99 @@ mod tests {
             locator(&a),
             locator(&c),
             "replacing a declaration is a new set"
+        );
+    }
+
+    #[test]
+    fn a_binding_on_its_own_line_belongs_to_the_tag_that_opened_above_it() {
+        let temp = scratch("multiline-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button\n  className=\"save\"\n  onClick={reset}\n>\n  Save\n</button>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 1);
+        assert!(
+            proposals[0].title().contains("on button"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn an_arrow_function_in_the_open_tag_does_not_close_it() {
+        // `=>` inside an earlier attribute's braces must not end the tag, or the
+        // binding on the next line would lose the element it belongs to.
+        let temp = scratch("arrow-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<div\n  onMouseDown={() => set(true)}\n  onClick={reset}\n>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert!(
+            proposals[0].title().contains("on div"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn nested_tags_across_lines_name_the_innermost_open_tag() {
+        let temp = scratch("nested-tags");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<div className=\"row\">\n  <button\n    onClick={save}\n  >\n    Save\n  \
+             </button>\n</div>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert!(
+            proposals[0].title().contains("on button"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn a_binding_outside_any_tag_stays_unnamed() {
+        let temp = scratch("props-object");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "const props = {\n  onClick: handleSave,\n};\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 1);
+        assert!(
+            proposals[0].title().contains("on element"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn a_tag_closed_before_the_binding_line_does_not_name_it() {
+        // The submit binding below the closed button is not inside any tag; if
+        // the walk leaked the button across the close, the title would say
+        // "on button" for it too.
+        let temp = scratch("closed-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button onClick={a}>Go</button>\nconst props = {\n  onSubmit: b,\n};\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 2);
+        let titles: Vec<&str> = proposals.iter().map(|proposal| proposal.title()).collect();
+        assert!(
+            titles.iter().any(|title| title.contains("on button")),
+            "{titles:?}"
+        );
+        assert!(
+            titles.iter().any(|title| title.contains("on form")),
+            "the submit outside any tag keeps the honest default: {titles:?}"
         );
     }
 
