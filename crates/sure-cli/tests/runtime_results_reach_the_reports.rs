@@ -141,6 +141,7 @@ fn the_run(fixture: &Fixture) -> (Config, PipelineOutcome) {
         purpose: Purpose::Check,
         config: &config,
         execution: authority.execution(),
+        scan_excludes: &[],
         store: None,
         goal: None,
         analysis: Default::default(),

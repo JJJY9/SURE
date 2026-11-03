@@ -67,6 +67,7 @@ fn check(root: &Path, store: Option<&Store>) -> RunOutcome {
         purpose: Purpose::Check,
         config: &config,
         execution: ExecutionSettings::inspect_only(),
+        scan_excludes: &[],
         store,
         goal: None,
         analysis: Default::default(),

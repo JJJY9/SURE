@@ -136,7 +136,7 @@ use crate::scan::ScanOptions;
 /// work: the scan's limits bound how many names are listed, and these bound how
 /// many files are opened and how much is read. A project can be comfortably
 /// inside the first and far outside the second.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintOptions {
     /// Limits on the walk, used where a fingerprint has to read a directory the
     /// scan would have walked. Same tables, same rules, same limits.
@@ -173,7 +173,7 @@ impl Default for FingerprintOptions {
 impl FingerprintOptions {
     /// The same options with different limits on the walk.
     #[must_use]
-    pub const fn with_scan(mut self, scan: ScanOptions) -> Self {
+    pub fn with_scan(mut self, scan: ScanOptions) -> Self {
         self.scan = scan;
         self
     }
@@ -216,19 +216,19 @@ mod tests {
         let scan = ScanOptions::default()
             .with_max_depth(3)
             .with_case(CaseSensitivity::Sensitive);
-        let options = FingerprintOptions::default().with_scan(scan);
+        let options = FingerprintOptions::default().with_scan(scan.clone());
         assert_eq!(options.scan, scan);
     }
 
     #[test]
     fn each_builder_changes_only_its_own_limit() {
         let base = FingerprintOptions::default();
-        assert_eq!(base.with_max_files(1).max_bytes, base.max_bytes);
-        assert_eq!(base.with_max_files(1).scan, base.scan);
-        assert_eq!(base.with_max_bytes(1).max_files, base.max_files);
-        assert_eq!(base.with_max_bytes(1).scan, base.scan);
+        assert_eq!(base.clone().with_max_files(1).max_bytes, base.max_bytes);
+        assert_eq!(base.clone().with_max_files(1).scan, base.scan);
+        assert_eq!(base.clone().with_max_bytes(1).max_files, base.max_files);
+        assert_eq!(base.clone().with_max_bytes(1).scan, base.scan);
         assert_eq!(
-            base.with_scan(ScanOptions::default()).max_files,
+            base.clone().with_scan(ScanOptions::default()).max_files,
             base.max_files
         );
     }

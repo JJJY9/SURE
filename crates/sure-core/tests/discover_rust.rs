@@ -1151,7 +1151,7 @@ fn a_toolchain_file_sure_could_not_read_is_not_a_project_that_pins_nothing() {
     fixture.write("rust-toolchain.toml", &toolchain);
 
     let options = DiscoverOptions::default().with_max_manifest_bytes(64);
-    let project = fixture.rust_with(options);
+    let project = fixture.rust_with(options.clone());
     assert!(
         matches!(
             project.toolchain,
@@ -1172,7 +1172,7 @@ fn a_toolchain_file_sure_could_not_read_is_not_a_project_that_pins_nothing() {
     // second.
     assert!(
         fixture
-            .discover_with(options)
+            .discover_with(options.clone())
             .report(Ecosystem::Rust)
             .expect("a report")
             .level
