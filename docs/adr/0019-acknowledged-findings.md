@@ -91,9 +91,11 @@ finding's identity never matches one.
 
 The pointer runs both ways. When a machine-form report lists a finding with the
 person's decision applied (`Accepted risk`), that finding carries
-`accepted_record`, the store row `--undo` takes. A panel showing a later run's
-report can therefore offer the undo without having kept the answer to the call
-that recorded the decision.
+`accepted_record`, the store row `--undo` takes, and with it the person's own
+`accepted_reason` and `accepted_at_ms`. A panel showing a later run's report can
+therefore offer the undo without having kept the answer to the call that recorded
+the decision — and can show a later reader why the finding is not counted
+against the project.
 
 ## Consequences
 

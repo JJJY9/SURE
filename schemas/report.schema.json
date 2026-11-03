@@ -196,6 +196,12 @@
           "accepted_record": {
             "type": "integer"
           },
+          "accepted_reason": {
+            "type": "string"
+          },
+          "accepted_at_ms": {
+            "type": "integer"
+          },
           "evidence_anchors": {
             "type": "array",
             "items": {
