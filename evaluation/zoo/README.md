@@ -33,10 +33,12 @@ Per-entry timeout: `--timeout-minutes N` (default 20).
 
 Exit status: `0` when every entry matches its baseline, `1` when any entry
 failed, drifted, or is new (a new entry needs `--update-baseline`), `2` on a
-zoo-side error (bad arguments, no binary). `--update-baseline` records instead
-of comparing, so drift and new entries do not fail it: it exits `1` only when
-an entry itself failed (crash, report that breaks the invariants, timeout), and
-that entry's baseline is left as it was.
+zoo-side error (bad arguments, no binary). A `DIRTY` local entry is none of
+those — it was measured and set aside — so it does not fail the run.
+`--update-baseline` records instead of comparing, so drift and new entries do
+not fail it: it exits `1` only when an entry itself failed (crash, report that
+breaks the invariants, timeout), and that entry's baseline is left as it was.
+`DIRTY` entries are not recorded either.
 
 ## What a run asserts
 
@@ -67,6 +69,14 @@ pinned `commit`; clones are cached under `target/tmp/zoo/cache` and only reused
 for the same commit. `kind: "local"` entries name an absolute `path` on the
 machine — a machine that does not have it records the entry as skipped with
 that reason, never as a pass.
+
+A local entry whose working tree has uncommitted changes is measured and shown
+as `DIRTY`: its findings are reported like any other entry's, but it is not
+compared with the baseline and `--update-baseline` does not record it. A tree
+somebody is editing is a moving target — comparing it would report the edits as
+regression, and recording it would freeze a transient state as expected. The
+same rule is not applied to `kind: "git"` entries: their tree is the pinned
+commit, and a dirty clone means the pin is not what was measured.
 
 `profiles` decide what a run may do: `static` inspects (commands are planned and
 honestly recorded as not run); `dynamic` allows running the project's own
