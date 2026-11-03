@@ -735,4 +735,45 @@ mod tests {
             "a declared scope skip is not a loss of coverage"
         );
     }
+
+    #[test]
+    fn a_tools_run_output_directory_is_skipped_as_build_output_and_not_scanned() {
+        // Measured on Dream-RSI/open-dream-rsi (2026-11-03): the generated run
+        // tree under `.runtime/runs/<id>/` was read as project source and
+        // produced most of that report's findings. `.runtime` is BuildOutput; a
+        // plain `runtime/` directory a project wrote itself stays in the scan.
+        let root = sure_testkit::scratch::directory("scan runtime output", "run output");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/app.js"), b"export const x = 1;\n").expect("src app");
+        fs::create_dir_all(root.join(".runtime/runs/run-1")).expect(".runtime runs");
+        fs::write(
+            root.join(".runtime/runs/run-1/page.js"),
+            b"const status = 200;\n",
+        )
+        .expect("generated page");
+        fs::create_dir_all(root.join("runtime")).expect("runtime");
+        fs::write(root.join("runtime/engine.rs"), b"").expect("runtime engine");
+
+        let scan = scan(&root, ScanOptions::default()).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/app.js"), "{paths:?}");
+        assert!(
+            paths.iter().any(|path| path == "runtime/engine.rs"),
+            "a project's own runtime/ stays in the scan: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with(".runtime")),
+            "the tool's run output was scanned: {paths:?}"
+        );
+        let skip = scan
+            .skipped()
+            .iter()
+            .find(|skip| skip.path == Path::new(".runtime"))
+            .unwrap_or_else(|| panic!(".runtime was not recorded: {:?}", scan.skipped()));
+        assert_eq!(skip.reason, SkipReason::BuildOutput);
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
+    }
 }
