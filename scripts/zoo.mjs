@@ -37,10 +37,11 @@
 //     --offline mode) is recorded as skipped with the reason — never as a
 //     pass, never as a silent absence.
 //   * A local entry whose working tree has uncommitted changes is measured and
-//     set aside as DIRTY: its findings are reported, but it is neither compared
-//     with the baseline nor recorded into it. A tree somebody is editing is a
-//     moving target, and freezing it as "expected" would be worse than saying
-//     it was not compared.
+//     set aside as DIRTY: its findings are reported, but it is not compared
+//     with the baseline. `--update-baseline` records it, because running the
+//     update is a person's deliberate act and the reading is what they chose to
+//     record — the compare path, which runs unattended, is where a moving tree
+//     must not be allowed to report itself as the expected state.
 //   * The settings file the zoo writes disables the analysis provider, so two
 //     runs of the same commit compare without model variance.
 //   * Clones are cached under target/tmp and reused only at the same commit.
@@ -488,7 +489,9 @@ function main() {
       entries: { ...(baseline.platforms?.[platform]?.entries ?? {}) },
     };
     for (const result of results) {
-      if (['MATCH', 'NEW', 'CHANGED'].includes(result.status)) {
+      // `--update-baseline` 是人的明确动作:比较模式把脏的本地条目搁置,但
+      // 人主动记录时照他要的记(带 DIRTY 的原因写在报告里)。
+      if (['MATCH', 'NEW', 'CHANGED', 'DIRTY'].includes(result.status)) {
         current.entries[result.id] = {
           sure_version: sureVersion,
           severity: result.severity,
