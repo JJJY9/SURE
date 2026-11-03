@@ -223,6 +223,14 @@ pub struct Finding {
     pub user_impact: String,
     /// What SURE thinks should happen next.
     pub next_step: String,
+    /// The store row of the person's acceptance, for a finding whose status is
+    /// [`FindingStatus::AcceptedRisk`] (ADR 0019).
+    ///
+    /// This is the row `sure acknowledge --undo` takes. The report carries it
+    /// so a panel can offer that undo from a later run's report, without
+    /// having kept the answer to the call that recorded the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_record: Option<i64>,
     /// The evidence that grounds this finding.
     pub evidence: Vec<Evidence>,
     /// Which project state the finding was raised against.
@@ -487,6 +495,7 @@ impl FindingBuilder {
             explanation: self.explanation.unwrap_or_default(),
             user_impact: self.user_impact.unwrap_or_default(),
             next_step: self.next_step.unwrap_or_default(),
+            accepted_record: None,
             evidence: self.evidence,
             fingerprint,
             technical_details: self.technical_details,

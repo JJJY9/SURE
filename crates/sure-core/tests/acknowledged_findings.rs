@@ -118,7 +118,7 @@ fn an_accepted_candidate_turns_the_run_green_and_comes_back_when_the_evidence_mo
 
     // 2. The person reviews it and records the decision.
     let root_text = root.to_string_lossy().into_owned();
-    acknowledge(
+    let record = acknowledge(
         &store,
         &root_text,
         &before.verdict.fingerprint,
@@ -132,6 +132,11 @@ fn an_accepted_candidate_turns_the_run_green_and_comes_back_when_the_evidence_mo
     let after = check(&root, Some(&store));
     let accepted = the_candidate(&after);
     assert_eq!(accepted.status, FindingStatus::AcceptedRisk);
+    assert_eq!(
+        accepted.accepted_record,
+        Some(record.row),
+        "the accepted finding names the store row an undo takes"
+    );
     assert!(
         !accepted.status.needs_attention(),
         "an accepted finding is not unresolved"
@@ -178,6 +183,10 @@ fn an_accepted_candidate_turns_the_run_green_and_comes_back_when_the_evidence_mo
         back.status,
         FindingStatus::CannotConfirm,
         "an acceptance must not outlive the evidence it was made about"
+    );
+    assert_eq!(
+        back.accepted_record, None,
+        "the decision's row is not carried by a finding it no longer matches"
     );
     assert_eq!(
         moved.verdict.aggregate.severity,

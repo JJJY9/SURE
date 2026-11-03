@@ -842,7 +842,9 @@ record, so a record written against a settled finding's identity never matches:
 the refusal at record time is a courtesy, and the application is the guarantee.
 
 `--undo` deletes exactly the row it names, and only if that row is an
-acknowledgement of this project. Exit 0 for all three endings, including an
+acknowledgement of this project. A machine-form report whose finding carries the
+person's decision also carries `accepted_record`, the row `--undo` takes, so a
+caller holding a later run's report can offer that undo. Exit 0 for all three endings, including an
 `--undo` whose id names nothing: the question asked is *is that record gone*, and
 it is; the sentence says which happened. A refusal or an unreadable store exits
 5.

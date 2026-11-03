@@ -6635,6 +6635,8 @@ fn a_finding_sure_repair_recorded_can_be_acknowledged_by_id_alone() {
         &store,
         &settings,
         &[
+            "--format",
+            "json",
             "acknowledge",
             &project_text,
             "--finding",
@@ -6648,6 +6650,10 @@ fn a_finding_sure_repair_recorded_can_be_acknowledged_by_id_alone() {
         "acknowledging by recorded id failed:\n{}",
         accepted.stderr
     );
+    let accepted_frame = frame_of(&accepted);
+    let record = accepted_frame["details"]["record"]
+        .as_i64()
+        .expect("the acknowledge answer names the store row");
 
     // The re-check applies the decision, and the comparison the loop keeps does
     // not report the accepted finding as still open.
@@ -6675,5 +6681,20 @@ fn a_finding_sure_repair_recorded_can_be_acknowledged_by_id_alone() {
     assert!(
         still_open.is_empty(),
         "an accepted finding was reported as still open: {still_open:?}"
+    );
+    let accepted_finding = frame["details"]["report"]["findings"]
+        .as_array()
+        .expect("the report lists findings")
+        .iter()
+        .find(|finding| finding["accepted_record"].is_i64())
+        .expect("the accepted finding stays in the report");
+    assert_eq!(
+        accepted_finding["status"], "Accepted risk",
+        "the report names the finding as the person's decision, not a fix"
+    );
+    assert_eq!(
+        accepted_finding["accepted_record"].as_i64(),
+        Some(record),
+        "the report names the row an undo takes, in the same run that applied it"
     );
 }
