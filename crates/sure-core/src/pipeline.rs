@@ -2250,6 +2250,7 @@ fn accept_finding(
     recorded: &crate::acknowledgement::RecordedAcknowledgement,
 ) {
     finding.status = FindingStatus::AcceptedRisk;
+    finding.accepted_record = Some(recorded.row);
     finding.user_impact = "You reviewed this and accepted the risk. SURE still cannot settle \
         it, and your decision is recorded outside the project."
         .to_owned();

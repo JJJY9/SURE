@@ -147,6 +147,14 @@ pub struct JsonFinding {
     /// error and a check that did not run are never acknowledgeable, and a
     /// caller offering the choice is offering a decision SURE would refuse.
     pub acknowledgeable: bool,
+    /// The store row of the person's acceptance (ADR 0019), present only when
+    /// the finding's status is `accepted_risk`.
+    ///
+    /// `sure acknowledge --undo` takes this row, so a panel can offer that
+    /// undo from a later run's report without having kept the answer to the
+    /// call that recorded the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_record: Option<i64>,
     /// Simplified list of checkable evidence anchors.
     pub evidence_anchors: Vec<JsonEvidenceAnchor>,
 }
@@ -274,6 +282,7 @@ pub fn build_json_report(verdict: &ProjectVerdict) -> JsonReport {
                 next_action: plain.next_action,
                 is_model_only: plain.is_model_only,
                 acknowledgeable: finding.can_be_acknowledged(),
+                accepted_record: finding.accepted_record,
                 evidence_anchors: plain
                     .evidence_anchors
                     .iter()

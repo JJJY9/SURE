@@ -587,6 +587,7 @@ mod tests {
             explanation: String::new(),
             user_impact: String::new(),
             next_step: String::new(),
+            accepted_record: None,
             evidence: vec![Evidence::new(
                 class,
                 "s",

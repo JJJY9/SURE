@@ -89,6 +89,12 @@ acceptance is applied, so the record-time answer — the store row's or the
 report's — is a courtesy, not the guarantee: an acceptance that names a settled
 finding's identity never matches one.
 
+The pointer runs both ways. When a machine-form report lists a finding with the
+person's decision applied (`Accepted risk`), that finding carries
+`accepted_record`, the store row `--undo` takes. A panel showing a later run's
+report can therefore offer the undo without having kept the answer to the call
+that recorded the decision.
+
 ## Consequences
 
 - A project whose only non-green results are reviewed candidates can be `green`,

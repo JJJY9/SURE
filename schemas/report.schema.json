@@ -193,6 +193,9 @@
           "acknowledgeable": {
             "type": "boolean"
           },
+          "accepted_record": {
+            "type": "integer"
+          },
           "evidence_anchors": {
             "type": "array",
             "items": {
