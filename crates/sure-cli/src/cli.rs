@@ -442,8 +442,10 @@ pub enum HookAction {
         /// A harness that asks its own user declares `harness`: the
         /// execution-mode and consent outcomes stop blocking (the decision is a
         /// warning carrying what the engine said), and the danger rules are the
-        /// only ones that still block. A hook that cannot ask keeps the
-        /// default, where those outcomes block.
+        /// only ones that still block — including for a request the execution
+        /// mode or the permissions deny, which no one-time allowance may
+        /// answer. A hook that cannot ask keeps the default, where those
+        /// outcomes block.
         #[arg(long, value_name = "OWNER")]
         consent_owner: Option<String>,
     },
