@@ -226,6 +226,32 @@ pub enum CheckReason {
         /// The context SURE read around the pattern.
         context: String,
     },
+    /// Several declarations of one kind of user-facing action in one file,
+    /// read together as one candidate.
+    ///
+    /// **The set is the claim, not any one line.** A single-page app binds
+    /// dozens of click handlers in one component file; reporting each as its own
+    /// candidate turned one honest question — SURE has not watched what these do
+    /// — into hundreds of rows and hundreds of separate acceptances. The variant
+    /// names the file, the kind, how many declarations the group holds, the
+    /// first one's line and context, and a digest of the declarations' own text.
+    /// The digest is what the acceptance identity needs: adding, removing or
+    /// replacing a binding changes it and brings the question back, while moving
+    /// the file's contents around without changing what was declared does not.
+    UiActionsFound {
+        /// The file the declarations were read from, relative to the project root.
+        path: String,
+        /// `click` or `submit`.
+        kind: String,
+        /// How many declarations the group holds.
+        count: usize,
+        /// The first declaration's line, counting from one.
+        first_line: usize,
+        /// The context SURE read around the first declaration.
+        first_context: String,
+        /// A digest of the declarations' text, line numbers excluded.
+        set_digest: String,
+    },
     /// The check applies to the project as a whole.
     ProjectWide,
 }
@@ -263,6 +289,20 @@ impl CheckReason {
                 crate::redact::escape_control_characters(context),
                 crate::redact::escape_control_characters(path)
             ),
+            Self::UiActionsFound {
+                path,
+                kind,
+                count,
+                first_line,
+                first_context,
+                ..
+            } => format!(
+                "SURE found {count} {kind} handler{} in {}, the first being `{}` on line \
+                 {first_line}.",
+                if *count == 1 { "" } else { "s" },
+                crate::redact::escape_control_characters(path),
+                crate::redact::escape_control_characters(first_context)
+            ),
             Self::ProjectWide => "This is about the project as a whole.".to_owned(),
         }
     }
@@ -297,6 +337,18 @@ impl CheckReason {
             } => !declared_in.trim().is_empty() && !route.trim().is_empty() && *line != 0,
             Self::CandidateFound { path, context, .. } => {
                 !path.trim().is_empty() && !context.trim().is_empty()
+            }
+            Self::UiActionsFound {
+                path,
+                kind,
+                count,
+                first_context,
+                ..
+            } => {
+                !path.trim().is_empty()
+                    && !kind.trim().is_empty()
+                    && *count > 0
+                    && !first_context.trim().is_empty()
             }
             Self::ProjectWide => true,
         }
@@ -371,6 +423,20 @@ impl CheckReason {
                 format!(
                     "the candidate `{}` on line {line}",
                     crate::redact::escape_control_characters(context)
+                ),
+            )),
+            Self::UiActionsFound {
+                path,
+                kind,
+                count,
+                set_digest,
+                ..
+            } => Some(EvidenceAnchor::new(
+                AnchorSubject::LineRange,
+                crate::redact::escape_control_characters(path),
+                format!(
+                    "the {count} {kind} handler{} declared in this file (set {set_digest})",
+                    if *count == 1 { "" } else { "s" },
                 ),
             )),
             Self::ProjectWide => None,
