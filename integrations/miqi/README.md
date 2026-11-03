@@ -95,6 +95,14 @@ safe (what must happen when SURE is missing, times out, or cannot be verified)
 is a separate project with its own test matrix. Until that lands and its tests
 pass, the decision is documentary evidence, not protection.
 
+The SURE side now offers the decision mode that bridge needs: `sure hook
+ingest --consent-owner harness` (ADR 0020) makes SURE judge only the danger
+rules, reports the execution-mode and consent outcomes as a warning, and leaves
+obtaining consent to the harness's own approval flow. MiQi v1 does **not** pass
+it yet, and the plugin still sends no tool arguments (see above), so a decision
+it did enforce could not name a command's danger. Both are part of the Tier 2
+work, not of this contract.
+
 ## Binary resolution, installation, and rights
 
 There is nothing to install from this package, and no administrator rights are

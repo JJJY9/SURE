@@ -139,6 +139,36 @@ impl ProtectionDecisionKind {
     }
 }
 
+/// Who owns the consent a tool request needs.
+///
+/// **`Sure` is the default, and the only owner a hook has had so far.** A
+/// request the execution engine holds for consent is answered `block`, because
+/// a hook cannot ask. A harness that can ask its own user — MiQi's approval
+/// panel is one — declares `Harness`: the execution-mode and consent outcomes
+/// stop blocking, the decision is a `warn` carrying what the engine said, and
+/// the danger rules are the only ones that still block. That distinction is
+/// what the protection tier needs: SURE judges danger, the harness obtains
+/// consent (ADR 0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsentOwner {
+    /// SURE may not ask, so a request needing consent is blocked (the default).
+    #[default]
+    Sure,
+    /// The harness asks its own user; enforcement rests on the danger rules.
+    Harness,
+}
+
+impl ConsentOwner {
+    /// The stable wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sure => "sure",
+            Self::Harness => "harness",
+        }
+    }
+}
+
 /// A protection decision with an optional human-readable reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtectionDecision {
@@ -358,8 +388,9 @@ pub fn decide_cursor_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> ProtectionDecision {
-    assess_cursor_tool(request, mode, permissions, protection).decision
+    assess_cursor_tool(request, mode, permissions, protection, consent).decision
 }
 
 /// [`decide_cursor_tool`], and which danger it named on the way.
@@ -369,6 +400,7 @@ pub fn assess_cursor_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> Assessment {
     assess_request(
         cursor_tool_to_action_kind(request.tool),
@@ -376,6 +408,7 @@ pub fn assess_cursor_tool(
         mode,
         permissions,
         protection,
+        consent,
     )
 }
 
@@ -440,8 +473,9 @@ pub fn decide_claude_code_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> ProtectionDecision {
-    assess_claude_code_tool(request, mode, permissions, protection).decision
+    assess_claude_code_tool(request, mode, permissions, protection, consent).decision
 }
 
 /// [`decide_claude_code_tool`], and which danger it named on the way.
@@ -451,6 +485,7 @@ pub fn assess_claude_code_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> Assessment {
     assess_request(
         claude_code_tool_to_action_kind(request.tool),
@@ -458,6 +493,7 @@ pub fn assess_claude_code_tool(
         mode,
         permissions,
         protection,
+        consent,
     )
 }
 
@@ -518,8 +554,9 @@ pub fn decide_miqi_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> ProtectionDecision {
-    assess_miqi_tool(request, mode, permissions, protection).decision
+    assess_miqi_tool(request, mode, permissions, protection, consent).decision
 }
 
 /// [`decide_miqi_tool`], and which danger it named on the way.
@@ -529,6 +566,7 @@ pub fn assess_miqi_tool(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> Assessment {
     assess_request(
         miqi_tool_to_action_kind(request.tool),
@@ -536,6 +574,7 @@ pub fn assess_miqi_tool(
         mode,
         permissions,
         protection,
+        consent,
     )
 }
 
@@ -580,6 +619,7 @@ fn assess_request(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> Assessment {
     let base = decide(action_kind, mode, permissions);
 
@@ -597,8 +637,7 @@ fn assess_request(
     if !base.is_allowed() {
         // The danger is read here too, and it is read off a refusal rather than
         // off an allow because that is where a shell request always lands: the
-        // domain holds every arbitrary command for consent, and a hook cannot
-        // ask for consent.
+        // domain holds every arbitrary command for consent.
         //
         // It is read for `NeedsConsent` and for nothing else. `Denied` is the
         // execution mode or the permissions refusing, and a one-time allowance
@@ -607,9 +646,20 @@ fn assess_request(
             ExecutionDecision::NeedsConsent => claimed_danger(action_kind, request),
             ExecutionDecision::Allowed | ExecutionDecision::Denied => None,
         };
-        let decision = match danger {
-            Some(danger) => ProtectionDecision::block(danger_reason(danger)),
-            None => base_decision(base),
+        // A named danger is SURE's own question and blocks under either owner:
+        // the danger rule is what the harness declared it was delegating here.
+        if let Some(danger) = danger {
+            return Assessment {
+                decision: ProtectionDecision::block(danger_reason(danger)),
+                danger: Some(danger),
+            };
+        }
+        let decision = match consent {
+            // SURE may not ask, so a request needing consent cannot proceed.
+            ConsentOwner::Sure => base_decision(base),
+            // The harness asks its own user. The engine's answer is reported,
+            // not enforced: the decision is a warning carrying what happened.
+            ConsentOwner::Harness => ProtectionDecision::warn(harness_consent_reason(base)),
         };
         return Assessment { decision, danger };
     }
@@ -1105,8 +1155,15 @@ fn acts_for_kind(
         if action_kind != kind {
             continue;
         }
-        let Some(danger) =
-            assess_request(action_kind, &request, mode, permissions, protection).danger
+        let Some(danger) = assess_request(
+            action_kind,
+            &request,
+            mode,
+            permissions,
+            protection,
+            ConsentOwner::Sure,
+        )
+        .danger
         else {
             continue;
         };
@@ -1544,6 +1601,26 @@ const NAME_THE_WRITE_PERMISSION: &str = "Name `execution.allow_project_write: tr
 /// Neither sentence mentions the protection mode, and that is deliberate: the
 /// execution mode and the permissions are what stopped the action, and naming
 /// the protection setting would tell a user to change the wrong thing.
+/// The sentence a `ConsentOwner::Harness` warning carries.
+///
+/// The decision is a warning rather than a block: the execution engine held the
+/// request, and under this owner that is information for the harness — which
+/// asks its own user — not a verdict SURE enforces. The danger rules still
+/// block, and their sentence is their own.
+fn harness_consent_reason(decision: ExecutionDecision) -> String {
+    match decision {
+        ExecutionDecision::NeedsConsent => "This action needs the user's approval. SURE's own \
+             settings do not decide that for a harness that asks its own user; the harness must \
+             obtain the consent this hook cannot ask for."
+            .to_owned(),
+        ExecutionDecision::Denied => "SURE's own execution settings do not permit this action \
+             for SURE itself. This harness runs its own approval flow and decides what to ask \
+             its user; SURE's protection rules are the only ones enforced here."
+            .to_owned(),
+        ExecutionDecision::Allowed => "This action is allowed.".to_owned(),
+    }
+}
+
 fn base_decision(decision: ExecutionDecision) -> ProtectionDecision {
     match decision {
         ExecutionDecision::Allowed => ProtectionDecision::allow(),
@@ -1921,6 +1998,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
         // An allow reached by the rule explains itself; `None` is reserved for
@@ -1935,6 +2013,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -1947,6 +2026,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -1959,6 +2039,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -1971,6 +2052,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &writer(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
     }
@@ -1982,6 +2064,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &writer(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
     }
@@ -1995,6 +2078,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &permissions,
             standard(),
+            ConsentOwner::Sure,
         );
         // ArbitraryCommand always returns NeedsConsent. A hook that cannot ask
         // for consent must fail closed, so it maps to Block rather than Warn.
@@ -2009,6 +2093,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
     }
@@ -2020,6 +2105,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -2032,6 +2118,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
     }
@@ -2043,6 +2130,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -2055,6 +2143,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -2067,6 +2156,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         assert!(decision.reason.is_some());
@@ -2079,6 +2169,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &writer(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
     }
@@ -2090,6 +2181,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &writer(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
     }
@@ -2103,6 +2195,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &permissions,
             standard(),
+            ConsentOwner::Sure,
         );
         // ArbitraryCommand always returns NeedsConsent. A hook that cannot ask
         // for consent must fail closed, so it maps to Block rather than Warn.
@@ -2117,6 +2210,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             standard(),
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
     }
@@ -2137,12 +2231,14 @@ mod tests {
             ExecutionMode::InspectOnly,
             &inspect,
             ProtectionMode::Standard,
+            ConsentOwner::Sure,
         );
         let under_strict = decide_cursor_tool(
             &read,
             ExecutionMode::InspectOnly,
             &inspect,
             ProtectionMode::Strict,
+            ConsentOwner::Sure,
         );
 
         assert_eq!(under_standard.decision, ProtectionDecisionKind::Allow);
@@ -2199,12 +2295,14 @@ mod tests {
                 ExecutionMode::HostConfirmed,
                 &writer(),
                 ProtectionMode::Standard,
+                ConsentOwner::Sure,
             );
             let under_strict = decide_cursor_tool(
                 &ToolRequest::at("Write", path),
                 ExecutionMode::HostConfirmed,
                 &writer(),
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(
                 under_standard.decision,
@@ -2245,6 +2343,7 @@ mod tests {
                 ExecutionMode::InspectOnly,
                 &inspect,
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(
                 under_strict.decision == ProtectionDecisionKind::Block,
@@ -2262,6 +2361,7 @@ mod tests {
                 ExecutionMode::HostConfirmed,
                 &writer(),
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(
                 decision.decision,
@@ -2282,6 +2382,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &inspect,
             ProtectionMode::Strict,
+            ConsentOwner::Sure,
         );
         assert_eq!(read.decision, ProtectionDecisionKind::Allow);
 
@@ -2290,6 +2391,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &writer(),
             ProtectionMode::Strict,
+            ConsentOwner::Sure,
         );
         assert_eq!(change.decision, ProtectionDecisionKind::Block);
     }
@@ -2312,6 +2414,7 @@ mod tests {
                 ExecutionMode::InspectOnly,
                 &inspect,
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(
                 decision.decision,
@@ -2331,6 +2434,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &inspect,
             ProtectionMode::Strict,
+            ConsentOwner::Sure,
         );
         assert_eq!(denied.decision, ProtectionDecisionKind::Block);
         assert_eq!(
@@ -2351,6 +2455,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             ProtectionMode::Custom,
+            ConsentOwner::Sure,
         );
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
         let reason = decision.reason.expect("a refusal says why");
@@ -2568,6 +2673,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &permissions,
             ProtectionMode::Standard,
+            ConsentOwner::Sure,
         );
         assert_eq!(assessment.decision.decision, ProtectionDecisionKind::Block);
         assert_eq!(assessment.danger, Some(Danger::BroadDelete));
@@ -2577,6 +2683,60 @@ mod tests {
             !reason.contains("rm -rf") && !reason.contains("build"),
             "a field of the request was echoed into a sentence SURE writes: {reason}"
         );
+    }
+
+    /// **Consent can belong to the harness (ADR 0020).** A request the
+    /// execution engine holds for consent is a warning under
+    /// `ConsentOwner::Harness` — the harness asks its own user — while a named
+    /// danger still blocks, because that is the rule the harness delegated to
+    /// SURE.
+    #[test]
+    fn a_harness_owned_consent_warns_on_consent_and_still_blocks_a_danger() {
+        let mut permissions = ExecutionPermissions::inspect_only();
+        permissions.run_project_code = true;
+
+        let held = decide_miqi_tool(
+            &ToolRequest::of("exec"),
+            ExecutionMode::HostConfirmed,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            held.decision,
+            ProtectionDecisionKind::Warn,
+            "a harness that asks its own user is told, not blocked: {held:?}"
+        );
+        assert!(
+            held.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("harness")),
+            "{:?}",
+            held.reason
+        );
+
+        // The same request under SURE's own consent is what a hook has always
+        // answered: blocked, because SURE cannot ask.
+        let sure = decide_miqi_tool(
+            &ToolRequest::of("exec"),
+            ExecutionMode::HostConfirmed,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Sure,
+        );
+        assert_eq!(sure.decision, ProtectionDecisionKind::Block);
+
+        // A danger the request names still blocks under the harness owner: the
+        // danger rules are the ones the harness delegated.
+        let destructive = assess_miqi_tool(
+            &ToolRequest::running("exec", "rm -rf build/"),
+            ExecutionMode::HostConfirmed,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(destructive.decision.decision, ProtectionDecisionKind::Block);
+        assert!(destructive.danger.is_some(), "{destructive:?}");
     }
 
     /// A request SURE cannot read is answered exactly as it was before this
@@ -2594,6 +2754,7 @@ mod tests {
                 ExecutionMode::HostConfirmed,
                 &permissions,
                 ProtectionMode::Standard,
+                ConsentOwner::Sure,
             );
             assert_eq!(assessment.danger, None, "{command:?}");
             assert_eq!(
@@ -2622,6 +2783,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &inspect,
             ProtectionMode::Standard,
+            ConsentOwner::Sure,
         );
         assert_eq!(allowed.decision.decision, ProtectionDecisionKind::Allow);
         assert_eq!(allowed.danger, None);
@@ -2653,6 +2815,7 @@ mod tests {
             ExecutionMode::InspectOnly,
             &ExecutionPermissions::inspect_only(),
             ProtectionMode::Strict,
+            ConsentOwner::Sure,
         );
         assert_eq!(denied.decision.decision, ProtectionDecisionKind::Block);
         assert_eq!(denied.danger, None);
@@ -2662,6 +2825,7 @@ mod tests {
             ExecutionMode::HostConfirmed,
             &ExecutionPermissions::inspect_only(),
             ProtectionMode::Custom,
+            ConsentOwner::Sure,
         );
         assert_eq!(refused_mode.danger, None);
     }
@@ -2691,6 +2855,7 @@ mod tests {
                 ExecutionMode::HostConfirmed,
                 &permissions,
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(assessment.danger, expected, "{tool} {path}");
             assert_eq!(
@@ -2789,6 +2954,7 @@ mod tests {
                 ExecutionMode::HostConfirmed,
                 &permissions,
                 ProtectionMode::Strict,
+                ConsentOwner::Sure,
             );
             assert_eq!(
                 assessment.danger,
@@ -3522,7 +3688,14 @@ mod tests {
             for protection in ProtectionMode::ALL {
                 for permissions in every_permission_set() {
                     let base = decide(kind, *mode, &permissions);
-                    let assessed = assess_request(kind, &change, *mode, &permissions, *protection);
+                    let assessed = assess_request(
+                        kind,
+                        &change,
+                        *mode,
+                        &permissions,
+                        *protection,
+                        ConsentOwner::Sure,
+                    );
                     let listed =
                         acts_a_tool_could_be_held_for("Write", *mode, &permissions, *protection);
 

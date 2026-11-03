@@ -169,7 +169,7 @@ use sure_core::external_service::ExternalServiceChecks;
 use sure_core::false_completion_aggregator::aggregate;
 use sure_core::harness_event::{IngestedEvent, ingest_event_str};
 use sure_core::hook_protection::{
-    Assessment, Danger, ToolRequest, acts_a_request_could_be_held_for,
+    Assessment, ConsentOwner, Danger, ToolRequest, acts_a_request_could_be_held_for,
     acts_a_tool_could_be_held_for, assess_claude_code_tool, assess_cursor_tool, danger_reason,
 };
 use sure_core::ids::{CheckId, ClaimId, EventId, FingerprintId};
@@ -5448,8 +5448,12 @@ fn assess_declared_run(id: &str, block: &Value, kind: &str, run: &Value) -> Asse
         command: run.get("command").and_then(Value::as_str),
     };
     match harness {
-        "claude_code" => assess_claude_code_tool(&request, mode, &permissions, protection),
-        "cursor" => assess_cursor_tool(&request, mode, &permissions, protection),
+        "claude_code" => {
+            assess_claude_code_tool(&request, mode, &permissions, protection, ConsentOwner::Sure)
+        }
+        "cursor" => {
+            assess_cursor_tool(&request, mode, &permissions, protection, ConsentOwner::Sure)
+        }
         other => panic!(
             "{id}: the `{kind}` run names the harness {other:?}, and this tree has two \
              integrations: `claude_code` and `cursor`"

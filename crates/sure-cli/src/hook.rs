@@ -76,9 +76,9 @@ use sure_core::full_recording::{
 };
 use sure_core::harness_event::ingest_event_str;
 use sure_core::hook_protection::{
-    Assessment, Danger, ProtectionDecision, ToolRequest, acts_a_tool_could_be_held_for,
-    allowance_could_not_be_spent_reason, allowance_reason, allowance_unreadable_reason,
-    assess_claude_code_tool, assess_cursor_tool, assess_miqi_tool,
+    Assessment, ConsentOwner, Danger, ProtectionDecision, ToolRequest,
+    acts_a_tool_could_be_held_for, allowance_could_not_be_spent_reason, allowance_reason,
+    allowance_unreadable_reason, assess_claude_code_tool, assess_cursor_tool, assess_miqi_tool,
 };
 use sure_core::ids::{EventId, FingerprintId};
 use sure_core::normalizer::{claude_code, codex, cursor, miqi};
@@ -113,7 +113,11 @@ use crate::report::{Failed, HookAllowance, Report};
 #[must_use]
 pub fn run(action: &HookAction, named: Named<'_>) -> Report {
     match action {
-        HookAction::Ingest { source, event_kind } => {
+        HookAction::Ingest {
+            source,
+            event_kind,
+            consent_owner,
+        } => {
             let mut stdin = String::new();
             if let Err(error) = io::stdin().read_to_string(&mut stdin) {
                 return failed("SURE could not read standard input.", error.to_string());
@@ -127,7 +131,13 @@ pub fn run(action: &HookAction, named: Named<'_>) -> Report {
                 );
             }
 
-            run_ingest(source.as_deref(), event_kind.as_deref(), event_text, named)
+            run_ingest(
+                source.as_deref(),
+                event_kind.as_deref(),
+                consent_owner.as_deref(),
+                event_text,
+                named,
+            )
         }
         HookAction::AllowOnce {
             tool,
@@ -378,6 +388,7 @@ fn without_byte_order_mark(text: &str) -> &str {
 fn run_ingest(
     source: Option<&str>,
     event_kind: Option<&str>,
+    consent_owner: Option<&str>,
     stdin: &str,
     named: Named<'_>,
 ) -> Report {
@@ -390,15 +401,26 @@ fn run_ingest(
             );
         }
     };
-    run_ingest_with_paths(source, event_kind, stdin, &paths)
+    run_ingest_with_paths(source, event_kind, consent_owner, stdin, &paths)
 }
 
 fn run_ingest_with_paths(
     source: Option<&str>,
     event_kind: Option<&str>,
+    consent_owner: Option<&str>,
     stdin: &str,
     paths: &Paths,
 ) -> Report {
+    let consent = match consent_owner {
+        None | Some("sure") => ConsentOwner::Sure,
+        Some("harness") => ConsentOwner::Harness,
+        Some(other) => {
+            return failed(
+                "SURE does not know that consent owner.",
+                format!("`{other}` is not a consent owner; use `sure` or `harness`."),
+            );
+        }
+    };
     // Normalise based on source.
     let envelope = match source {
         Some("cursor") => match cursor::normalize(stdin) {
@@ -570,12 +592,12 @@ fn run_ingest_with_paths(
             // passing. `integrations/codex/README.md` records that limitation
             // and why the decision is advisory on this harness.
             Some("claude-code" | "codex") => {
-                assess_claude_code_tool(&request, mode, &permissions, protection)
+                assess_claude_code_tool(&request, mode, &permissions, protection, consent)
             }
-            Some("miqi") => assess_miqi_tool(&request, mode, &permissions, protection),
+            Some("miqi") => assess_miqi_tool(&request, mode, &permissions, protection, consent),
             // `Some("cursor")`, and anything else: the match above has already
             // refused a source SURE does not know.
-            _ => assess_cursor_tool(&request, mode, &permissions, protection),
+            _ => assess_cursor_tool(&request, mode, &permissions, protection, consent),
         };
         return Report::HookDecision(record_the_decision(
             with_any_allowance(&assessment, &request, &project_root, paths),
@@ -1000,6 +1022,7 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("cursor"),
             Some("pre-tool-use"),
+            None,
             &text,
             &store_of_our_own("cursor-pre-tool-use"),
         );
@@ -1022,6 +1045,7 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("cursor"),
             Some("session-start"),
+            None,
             &session_event_at(&text, &project),
             &paths,
         );
@@ -1044,6 +1068,7 @@ mod tests {
         let (paths, project) = roots_and_project_of_our_own("miqi-agent-claim");
         let report = run_ingest_with_paths(
             Some("miqi"),
+            None,
             None,
             &session_event_at(&text, &project),
             &paths,
@@ -1069,12 +1094,47 @@ mod tests {
     }
 
     #[test]
+    fn miqi_ingest_with_harness_owned_consent_warns_instead_of_blocking() {
+        // ADR 0020: a harness that asks its own user gets a warning where
+        // SURE's own hook blocks, and the default keeps blocking.
+        let text = miqi_fixture("pre-tool-use.json");
+        let (paths, project) = roots_and_project_of_our_own("miqi-consent-owner");
+        let event = session_event_at(&text, &project);
+
+        let sure = run_ingest_with_paths(Some("miqi"), Some("pre-tool-use"), None, &event, &paths);
+        let Report::HookDecision(sure) = sure else {
+            panic!("{sure:?}")
+        };
+        assert_eq!(sure.decision, ProtectionDecisionKind::Block);
+
+        let harness = run_ingest_with_paths(
+            Some("miqi"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &event,
+            &paths,
+        );
+        let Report::HookDecision(harness) = harness else {
+            panic!("{harness:?}")
+        };
+        assert_eq!(harness.decision, ProtectionDecisionKind::Warn);
+        assert!(
+            harness
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("harness")),
+            "{:?}",
+            harness.reason
+        );
+    }
+
+    #[test]
     fn missing_source_fails() {
         // The four refusals below happen before SURE reaches a store at all —
         // there is nothing to read, nothing to normalise, nothing to record — so
         // they name none, which is also the honest statement that the store is
         // not what they are about.
-        let report = run_ingest(None, Some("pre-tool-use"), "{}", Named::default());
+        let report = run_ingest(None, Some("pre-tool-use"), None, "{}", Named::default());
         assert!(
             matches!(report, Report::Failed(_)),
             "expected Failed, got {report:?}"
@@ -1086,6 +1146,7 @@ mod tests {
         let report = run_ingest(
             Some("unknown"),
             Some("pre-tool-use"),
+            None,
             "{}",
             Named::default(),
         );
@@ -1100,6 +1161,7 @@ mod tests {
         let report = run_ingest(
             Some("cursor"),
             Some("pre-tool-use"),
+            None,
             "{not json",
             Named::default(),
         );
@@ -1111,7 +1173,13 @@ mod tests {
 
     #[test]
     fn empty_stdin_fails() {
-        let report = run_ingest(Some("cursor"), Some("pre-tool-use"), "", Named::default());
+        let report = run_ingest(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            None,
+            "",
+            Named::default(),
+        );
         assert!(
             matches!(report, Report::Failed(_)),
             "expected Failed, got {report:?}"
@@ -1125,6 +1193,7 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("claude-code"),
             Some("session-start"),
+            None,
             &session_event_at(&text, &project),
             &paths,
         );
@@ -1144,6 +1213,7 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             &text,
             &store_of_our_own("claude-code-pre-tool-use"),
         );
@@ -1171,6 +1241,7 @@ mod tests {
         let report = run_ingest(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             "{not json",
             Named::default(),
         );
@@ -1470,7 +1541,7 @@ mod tests {
         ];
 
         for (kind, json) in &events {
-            let report = run_ingest_with_paths(Some("claude-code"), Some(kind), json, &paths);
+            let report = run_ingest_with_paths(Some("claude-code"), Some(kind), None, json, &paths);
             if *kind == "pre-tool-use" {
                 let decision = match &report {
                     Report::HookDecision(d) => d,
@@ -1696,7 +1767,7 @@ mod tests {
         ];
 
         for (kind, json, expected) in &events {
-            let report = run_ingest_with_paths(Some("cursor"), Some(kind), json, &paths);
+            let report = run_ingest_with_paths(Some("cursor"), Some(kind), None, json, &paths);
             let decision = match &report {
                 Report::HookDecision(d) => d,
                 other => panic!("expected HookDecision for {kind}, got {other:?}"),
@@ -1827,6 +1898,7 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("codex"),
             None,
+            None,
             &codex_event_at("session-start.json", &project.to_string_lossy()),
             &paths,
         );
@@ -1852,6 +1924,7 @@ mod tests {
         // the mode is the safest one and a shell command is blocked.
         let report = run_ingest_with_paths(
             Some("codex"),
+            None,
             None,
             &codex_event_at("pre-tool-use.json", &project.to_string_lossy()),
             &paths,
@@ -1881,7 +1954,7 @@ mod tests {
         value["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
         value["tool_name"] = serde_json::Value::String("update_plan".to_owned());
 
-        let report = run_ingest_with_paths(Some("codex"), None, &value.to_string(), &paths);
+        let report = run_ingest_with_paths(Some("codex"), None, None, &value.to_string(), &paths);
         let decision = match &report {
             Report::HookDecision(d) => d,
             other => panic!("expected HookDecision, got {other:?}"),
@@ -1904,6 +1977,7 @@ mod tests {
         // behind: an event SURE cannot mean must not become evidence.
         let refused = run_ingest_with_paths(
             Some("codex"),
+            None,
             None,
             &codex_event_at("stop-not-mapped.json", &project_root),
             &paths,
@@ -1928,6 +2002,7 @@ mod tests {
         // is the mapped one.
         let accepted = run_ingest_with_paths(
             Some("codex"),
+            None,
             None,
             &codex_event_at("session-end.json", &project_root),
             &paths,
@@ -1970,6 +2045,7 @@ mod tests {
         ] {
             let report = run_ingest_with_paths(
                 Some("codex"),
+                None,
                 None,
                 &codex_event_at(name, &project_root),
                 &paths,
@@ -2041,7 +2117,7 @@ mod tests {
 
         // Handed over as-is it is not JSON, which is the failure `run()` exists
         // to avoid.
-        match run_ingest_with_paths(Some("codex"), None, &marked, &paths) {
+        match run_ingest_with_paths(Some("codex"), None, None, &marked, &paths) {
             Report::Failed(failure) => assert!(
                 failure.detail.contains("not valid JSON"),
                 "a byte-order mark should be the reason the payload is refused: {}",
@@ -2054,6 +2130,7 @@ mod tests {
         // holds the one event.
         let report = run_ingest_with_paths(
             Some("codex"),
+            None,
             None,
             without_byte_order_mark(&marked),
             &paths,
@@ -2145,7 +2222,8 @@ mod tests {
         path: Option<&str>,
     ) -> (ProtectionDecisionKind, String) {
         let text = cursor_request_at(project, tool, path);
-        let report = run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), &text, paths);
+        let report =
+            run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
             Report::HookDecision(decision) => (
                 decision.decision,
@@ -2424,7 +2502,8 @@ mod tests {
         command: &str,
     ) -> (ProtectionDecisionKind, String) {
         let text = cursor_shell_request_at(project, tool, command);
-        let report = run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), &text, paths);
+        let report =
+            run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
             Report::HookDecision(decision) => (
                 decision.decision,
@@ -3176,6 +3255,7 @@ mod tests {
         let claude = run_ingest_with_paths(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             &claude_edit,
             &paths,
         );

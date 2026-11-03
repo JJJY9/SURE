@@ -57,6 +57,20 @@ tier 1 (Observed) and their manifests do not confirm that the harness interprets
 or enforces the response, so a decision states what SURE *would* do and not what
 the harness did. Nothing in this build can establish the second sentence.
 
+## Who owns consent
+
+`sure hook ingest --consent-owner harness` declares that the harness asks its
+own user before an action runs — MiQi's approval panel does. Under that owner
+the execution-mode and consent outcomes stop blocking: the decision is a `warn`
+carrying what the engine said, and obtaining consent is the harness's job. The
+**danger rules still block** — a broad delete, a force push, a read of
+credentials — because judging danger is the part of the answer the harness
+delegated to SURE, and `sure hook allow-once` still spends against those blocks
+(ADR 0020). The default, `sure`, keeps the older answer: a request SURE would
+hold for consent is blocked, because a hook cannot ask. Whether a harness
+enforces either answer is still the harness's own claim to make, with its own
+tests.
+
 ## The one-time override, and what it reaches
 
 The example above shows `[Allow once]`. In this release the way a user gives
