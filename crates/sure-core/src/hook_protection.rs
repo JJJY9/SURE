@@ -677,6 +677,21 @@ fn assess_request(
                 allowance_reachable: base == ExecutionDecision::NeedsConsent,
             };
         }
+        // A strict-mode hold is the user's protection instruction, not SURE's
+        // own authorisation, so under the harness owner it applies even where
+        // the engine denied the action: the harness may run what SURE itself
+        // would not. Without this a strict user on the default `inspect_only`
+        // settings would get no protection for the areas `strict` names.
+        if consent == ConsentOwner::Harness
+            && protection == ProtectionMode::Strict
+            && let Some((area, role)) = sensitive_area(action_kind, request.path)
+        {
+            return Assessment {
+                decision: ProtectionDecision::block(strict_reason(area, role)),
+                danger: danger_of(area, role),
+                allowance_reachable: false,
+            };
+        }
         let decision = match consent {
             // SURE may not ask, so a request needing consent cannot proceed.
             ConsentOwner::Sure => base_decision(base),
@@ -2815,6 +2830,56 @@ mod tests {
         );
         assert_eq!(ordinary.decision.decision, ProtectionDecisionKind::Warn);
         assert_eq!(ordinary.danger, None);
+
+        // A strict-mode hold is the user's protection instruction and applies
+        // under the harness owner even where the engine denied the action: a
+        // write to credentials blocks on the default inspect-only settings,
+        // and a whole-location change names its danger.
+        let strict_write = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".env")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Strict,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            strict_write.decision.decision,
+            ProtectionDecisionKind::Block,
+            "{strict_write:?}"
+        );
+        assert_eq!(
+            strict_write.danger, None,
+            "a write to a secret is a strict hold"
+        );
+        assert!(!strict_write.allowance_reachable);
+
+        let strict_broad = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Strict,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            strict_broad.decision.decision,
+            ProtectionDecisionKind::Block
+        );
+        assert_eq!(strict_broad.danger, Some(Danger::BroadDelete));
+        assert!(!strict_broad.allowance_reachable);
+
+        // The same request under the default protection mode is only held by
+        // the engine, and the harness owner answers that with a warning.
+        let standard_write = assess_miqi_tool(
+            &ToolRequest::of("write_file").and_path(Some(".env")),
+            ExecutionMode::InspectOnly,
+            &permissions,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert_eq!(
+            standard_write.decision.decision,
+            ProtectionDecisionKind::Warn
+        );
 
         // Under SURE's own consent nothing changes: the mode refuses, and no
         // danger is named for an allowance to spend.

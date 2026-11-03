@@ -67,13 +67,15 @@ carrying what the engine said, and obtaining consent is the harness's job. The
 credentials — because judging danger is the part of the answer the harness
 delegated to SURE, and that danger is read even where the execution mode or the
 permissions **denied** the action: the harness may still run it after its own
-approval. `sure hook allow-once` still spends against a danger block that
-answers a request held for consent; a danger named beside a denied action is
-still a block, but no allowance may answer it, because an allowance is not a
-way to run under settings the user did not change (ADR 0020). The default,
-`sure`, keeps the older answer: a request SURE would hold for consent is
-blocked, because a hook cannot ask. Whether a harness enforces either answer is
-still the harness's own claim to make, with its own tests.
+approval. A `strict`-mode hold on a sensitive area is the user's protection
+instruction and applies under the harness owner in the same way. `sure hook
+allow-once` still spends against a danger block that answers a request held for
+consent; a danger named beside a denied action is still a block, but no
+allowance may answer it, because an allowance is not a way to run under
+settings the user did not change (ADR 0020). The default, `sure`, keeps the
+older answer: a request SURE would hold for consent is blocked, because a hook
+cannot ask. Whether a harness enforces either answer is still the harness's own
+claim to make, with its own tests.
 
 ## The one-time override, and what it reaches
 

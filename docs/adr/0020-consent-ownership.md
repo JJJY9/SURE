@@ -46,7 +46,11 @@ sure hook ingest --consent-owner harness
   is read even where the engine **denied** the action — the harness may still
   run it after its own approval, so the danger is worth naming — and that
   block cannot be answered by a one-time allowance, which remains tied to the
-  consent question (`needs consent`) and not to a mode denial.
+  consent question (`needs consent`) and not to a mode denial. The same holds
+  for a `strict`-mode hold on a sensitive area (migrations, CI configuration,
+  credentials, a whole-location change): it is the user's protection
+  instruction, so under `harness` it applies even where the engine denied the
+  action.
 - The one-time allowance (`sure hook allow-once`) still spends against a
   danger block, under either owner. It is the person's answer to the one
   question SURE can still name.
