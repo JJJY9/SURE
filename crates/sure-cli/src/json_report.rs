@@ -155,6 +155,13 @@ pub struct JsonFinding {
     /// call that recorded the decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_record: Option<i64>,
+    /// Why the person accepted the risk, in their own words, present only when
+    /// the finding's status is `accepted_risk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_reason: Option<String>,
+    /// When the decision was recorded, milliseconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at_ms: Option<i64>,
     /// Simplified list of checkable evidence anchors.
     pub evidence_anchors: Vec<JsonEvidenceAnchor>,
 }
@@ -283,6 +290,8 @@ pub fn build_json_report(verdict: &ProjectVerdict) -> JsonReport {
                 is_model_only: plain.is_model_only,
                 acknowledgeable: finding.can_be_acknowledged(),
                 accepted_record: finding.accepted_record,
+                accepted_reason: finding.accepted_reason.clone(),
+                accepted_at_ms: finding.accepted_at_ms,
                 evidence_anchors: plain
                     .evidence_anchors
                     .iter()

@@ -231,6 +231,18 @@ pub struct Finding {
     /// having kept the answer to the call that recorded the decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_record: Option<i64>,
+    /// Why the person accepted the risk, in their own words, for a finding whose
+    /// status is [`FindingStatus::AcceptedRisk`] (ADR 0019).
+    ///
+    /// Control characters are escaped where the decision is applied; the text
+    /// itself is the person's and is not rewritten. The report carries it so a
+    /// reader of a later run can see why a finding is not counted against the
+    /// project without going back to the command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_reason: Option<String>,
+    /// When the decision was recorded, in milliseconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at_ms: Option<i64>,
     /// The evidence that grounds this finding.
     pub evidence: Vec<Evidence>,
     /// Which project state the finding was raised against.
@@ -496,6 +508,8 @@ impl FindingBuilder {
             user_impact: self.user_impact.unwrap_or_default(),
             next_step: self.next_step.unwrap_or_default(),
             accepted_record: None,
+            accepted_reason: None,
+            accepted_at_ms: None,
             evidence: self.evidence,
             fingerprint,
             technical_details: self.technical_details,

@@ -6697,4 +6697,13 @@ fn a_finding_sure_repair_recorded_can_be_acknowledged_by_id_alone() {
         Some(record),
         "the report names the row an undo takes, in the same run that applied it"
     );
+    assert_eq!(
+        accepted_finding["accepted_reason"].as_str(),
+        Some("a real HTTP 200 in an API handler"),
+        "the report carries the person's own reason"
+    );
+    assert!(
+        accepted_finding["accepted_at_ms"].is_i64(),
+        "the report carries when the decision was recorded"
+    );
 }

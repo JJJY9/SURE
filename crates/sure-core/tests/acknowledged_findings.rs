@@ -137,6 +137,15 @@ fn an_accepted_candidate_turns_the_run_green_and_comes_back_when_the_evidence_mo
         Some(record.row),
         "the accepted finding names the store row an undo takes"
     );
+    assert_eq!(
+        accepted.accepted_reason.as_deref(),
+        Some("a real HTTP 200 in an API handler"),
+        "the report carries the person's own reason"
+    );
+    assert!(
+        accepted.accepted_at_ms.is_some(),
+        "the report carries when the decision was recorded"
+    );
     assert!(
         !accepted.status.needs_attention(),
         "an accepted finding is not unresolved"
@@ -187,6 +196,10 @@ fn an_accepted_candidate_turns_the_run_green_and_comes_back_when_the_evidence_mo
     assert_eq!(
         back.accepted_record, None,
         "the decision's row is not carried by a finding it no longer matches"
+    );
+    assert_eq!(
+        back.accepted_reason, None,
+        "nor is the reason it was recorded with"
     );
     assert_eq!(
         moved.verdict.aggregate.severity,
