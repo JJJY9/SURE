@@ -36,6 +36,11 @@
 //   * An entry this machine cannot run (missing local path, no clone in
 //     --offline mode) is recorded as skipped with the reason — never as a
 //     pass, never as a silent absence.
+//   * A local entry whose working tree has uncommitted changes is measured and
+//     set aside as DIRTY: its findings are reported, but it is neither compared
+//     with the baseline nor recorded into it. A tree somebody is editing is a
+//     moving target, and freezing it as "expected" would be worse than saying
+//     it was not compared.
 //   * The settings file the zoo writes disables the analysis provider, so two
 //     runs of the same commit compare without model variance.
 //   * Clones are cached under target/tmp and reused only at the same commit.
@@ -440,6 +445,15 @@ function main() {
       if (problems.length > 0) {
         result.status = 'FAILED';
         result.note = problems.join('; ');
+        continue;
+      }
+      // 本地条目衡量的是这台机器上的实时项目。工作区有未提交改动时,它是一个
+      // 移动靶:测到的发现项属于当前编辑中的状态,与基线比较只会把"别人正在
+      // 改代码"报成回归,而 `--update-baseline` 会把一个瞬时状态固化成预期。
+      // 照常测量、照常列出发现项,但标成 DIRTY:不参与比较,也不写进基线。
+      if (entry.kind === 'local' && result.gitDirty) {
+        result.status = 'DIRTY';
+        result.note = '工作区有未提交改动——本次只测量,不与基线比较';
         continue;
       }
       const previous = baseline.platforms?.[platform]?.entries?.[entry.id];
