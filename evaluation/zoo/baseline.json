@@ -100,14 +100,23 @@
         },
         "chailv": {
           "sure_version": "sure 0.1.3",
-          "severity": "green",
-          "findings": [],
+          "severity": "needs_attention",
+          "findings": [
+            "Can fix later | Open | project contains mock usage in production code",
+            "Must fix | Cannot confirm | UI action: 17 click handlers in `webapp/static/app.js` that SURE has not watched",
+            "Must fix | Cannot confirm | UI action: submit handler on form in `webapp/static/app.js`",
+            "Note | Open | project contains placeholder user or content IDs in tests"
+          ],
           "notChecked": [],
           "checkResults": [
             "pass | build the distribution",
             "pass | check the code for style and likely mistakes",
             "pass | check the types without running the code",
-            "pass | run the tests"
+            "pass | run the tests",
+            "warning | UI action: 17 click handlers in `webapp/static/app.js` that SURE has not watched",
+            "warning | UI action: submit handler on form in `webapp/static/app.js`",
+            "warning | project contains mock usage in production code",
+            "warning | project contains placeholder user or content IDs in tests"
           ]
         },
         "open-dream-rsi": {
