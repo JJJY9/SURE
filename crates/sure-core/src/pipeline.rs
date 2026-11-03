@@ -1005,8 +1005,15 @@ impl Pipeline<'_> {
         );
 
         // ---- 8. Grounded model assessment ------------------------------------
-        let (model_outcome, model_results, model_findings) =
-            self.model_assessment(&fingerprint, &candidates);
+        // The candidates this run already turned into check results are named
+        // here: the model's verdict on one of them annotates that finding instead
+        // of becoming a second one (see `assess_candidates`).
+        let existing_check_ids: BTreeSet<String> = results
+            .iter()
+            .map(|result| result.id.as_str().to_owned())
+            .collect();
+        let (model_outcome, model_results, model_findings, model_annotations) =
+            self.model_assessment(&fingerprint, &candidates, &existing_check_ids);
         results.extend(model_results);
         stages.push(Stage::ModelAssessment, model_outcome);
 
@@ -1110,6 +1117,7 @@ impl Pipeline<'_> {
             report.results(),
             &schedule,
             model_findings,
+            &model_annotations,
         );
         let aggregate = if accepted_checks.is_empty() {
             report.aggregate().clone()
@@ -1318,6 +1326,7 @@ impl Pipeline<'_> {
         results: &[CheckResult],
         schedule: &CheckSchedule,
         model_findings: Vec<Finding>,
+        model_annotations: &[ModelVerdict],
     ) -> (Vec<Finding>, BTreeSet<CheckId>, Option<String>) {
         let mut pairs = findings_with_checks(results, schedule);
         let mut accepted = BTreeSet::new();
@@ -1346,6 +1355,7 @@ impl Pipeline<'_> {
                 }
             }
         }
+        annotate_candidate_findings(&mut pairs, model_annotations);
         let mut findings: Vec<Finding> = pairs.into_iter().map(|(finding, _)| finding).collect();
         findings.extend(model_findings);
         (findings, accepted, note)
@@ -1364,7 +1374,13 @@ impl Pipeline<'_> {
         &self,
         fingerprint: &FingerprintId,
         candidates: &Candidates,
-    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
+        existing_check_ids: &BTreeSet<String>,
+    ) -> (
+        StageOutcome,
+        Vec<CheckResult>,
+        Vec<Finding>,
+        Vec<ModelVerdict>,
+    ) {
         let analysis = &self.analysis;
         let not_checked = |reason: NotCheckedReason, detail: &str| {
             CheckResult::not_run(
@@ -1392,6 +1408,7 @@ impl Pipeline<'_> {
                     detail,
                 )],
                 Vec::new(),
+                Vec::new(),
             );
         }
 
@@ -1400,7 +1417,12 @@ impl Pipeline<'_> {
             // 的分析器做 grounded 评估——每条候选要么被确认(成为一条
             // model_assessment 证据类的 finding),要么被判为噪音(不加 finding,
             // 但原样保留在阶段明细里)。没有候选时如实记录"没有可评估的东西"。
-            Ok(analyzer) => self.assess_candidates(analyzer.as_ref(), fingerprint, candidates),
+            Ok(analyzer) => self.assess_candidates(
+                analyzer.as_ref(),
+                fingerprint,
+                candidates,
+                existing_check_ids,
+            ),
             // The project asked for a provider SURE cannot build — a local-command
             // provider with no command, say. That is a configuration fault rather
             // than a scope limit, it is visible as one, and it is not a crash.
@@ -1416,6 +1438,7 @@ impl Pipeline<'_> {
                         &detail,
                     )],
                     Vec::new(),
+                    Vec::new(),
                 )
             }
         }
@@ -1428,14 +1451,25 @@ impl Pipeline<'_> {
     /// 具体项目位置可指,不可核——`is_model_only` 判据据此命中),严重度按
     /// `docs/adr/0005-evidence-hierarchy.md` 以 ShouldFixFirst 为上限
     /// (模型独证不能支撑 must_fix),rationale 与之自动配对(builder 校验)。
-    /// 上游预留的 planned-check 管道(`disabled_result`/模型检查提案)接线
-    /// 后,这里迁回检查结果通道。
+    ///
+    /// **已经被本次运行变成检查结果的候选不再产出第二条发现。** 它们本来
+    /// 就以候选发现的形式出现在报告里(阶段 7 把同一批提案排进了计划);再为
+    /// 它们造一条 `Model assessment:` 发现,等于把同一件事说两遍(2026-11-03
+    /// 实测:60 个 UI 组对上 59 条重复)。这些候选的模型判定以
+    /// [`ModelVerdict`] 返回,由 [`annotate_candidate_findings`] 写进原发现
+    /// 的说明里;状态与严重度不变——模型证据不能升级它们(ADR 0005)。
     fn assess_candidates(
         &self,
         analyzer: &dyn analysis_provider::Analyzer,
         fingerprint: &FingerprintId,
         candidates: &Candidates,
-    ) -> (StageOutcome, Vec<CheckResult>, Vec<Finding>) {
+        existing_check_ids: &BTreeSet<String>,
+    ) -> (
+        StageOutcome,
+        Vec<CheckResult>,
+        Vec<Finding>,
+        Vec<ModelVerdict>,
+    ) {
         if candidates.material.is_empty() {
             return (
                 StageOutcome::NotPartOfWork {
@@ -1443,6 +1477,7 @@ impl Pipeline<'_> {
                              analysis found no candidate for a model to assess."
                         .to_owned(),
                 },
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             );
@@ -1472,12 +1507,14 @@ impl Pipeline<'_> {
                         .with_reason(detail),
                     ],
                     Vec::new(),
+                    Vec::new(),
                 );
             }
         };
         let verdicts = parse_assessment(&response.text, candidates);
         let flagged = verdicts.iter().filter(|verdict| verdict.is_problem).count();
         let mut findings = Vec::new();
+        let mut annotations = Vec::new();
         for verdict in verdicts.iter().filter(|verdict| verdict.is_problem) {
             let Some(candidate) = candidates
                 .material
@@ -1486,6 +1523,16 @@ impl Pipeline<'_> {
             else {
                 continue;
             };
+            // A candidate this run already turned into a check result is already
+            // a finding; the verdict annotates it instead of doubling it.
+            if existing_check_ids.contains(&verdict.candidate_id) {
+                annotations.push(ModelVerdict {
+                    candidate_id: verdict.candidate_id.clone(),
+                    is_problem: true,
+                    reason: verdict.reason.clone(),
+                });
+                continue;
+            }
             // 第一版直接以 Finding 进入报告(见函数 doc 的迁移说明)。
             let severity = model_supported_severity(candidate.severity);
             if let Ok(finding) = FindingBuilder::new(
@@ -1520,13 +1567,16 @@ impl Pipeline<'_> {
             StageOutcome::Ran {
                 detail: format!(
                     "the configured model provider assessed {} completeness candidate(s): \
-                     {flagged} flagged as problems, {} judged style noise.",
+                     {flagged} flagged as problems ({} already carried by their candidate \
+                     findings), {} judged style noise.",
                     candidates.material.len(),
+                    annotations.len(),
                     verdicts.len() - flagged,
                 ),
             },
             Vec::new(),
             findings,
+            annotations,
         )
     }
 
@@ -2264,6 +2314,36 @@ fn accept_finding(
          review it again.",
         recorded.row
     );
+}
+
+/// Attach the model's assessment to the candidate finding it was about.
+///
+/// The candidate is already a finding from its own check; a second
+/// `Model assessment:` finding would say the same thing twice (measured
+/// 2026-11-03: 59 duplicate findings against 60 UI-action groups). The verdict
+/// becomes a sentence in the finding's explanation instead — the model's opinion
+/// stays visible, and the status stays the candidate's, because model evidence
+/// cannot upgrade it (ADR 0005).
+fn annotate_candidate_findings(pairs: &mut [(Finding, CheckId)], annotations: &[ModelVerdict]) {
+    for (finding, check_id) in pairs.iter_mut() {
+        let Some(verdict) = annotations
+            .iter()
+            .find(|verdict| verdict.candidate_id == check_id.as_str())
+        else {
+            continue;
+        };
+        let reason = verdict.reason.trim();
+        let sentence = if reason.is_empty() {
+            "A model assessed this candidate as a problem worth fixing first.".to_owned()
+        } else {
+            format!("A model assessed this candidate as a problem worth fixing first: {reason}")
+        };
+        finding.explanation = if finding.explanation.trim().is_empty() {
+            sentence
+        } else {
+            format!("{} {sentence}", finding.explanation.trim_end())
+        };
+    }
 }
 
 fn completeness(discovery: &Discovery, intent: &ProjectIntent) -> Candidates {
@@ -3306,9 +3386,10 @@ mod tests {
         let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
         let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
 
-        let (outcome, results, findings) =
-            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &BTreeSet::new());
         assert!(results.is_empty(), "{results:?}");
+        assert!(annotations.is_empty(), "{annotations:?}");
 
         assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
         assert_eq!(findings.len(), 1, "{findings:?}");
@@ -3332,6 +3413,61 @@ mod tests {
     }
 
     #[test]
+    fn a_candidate_already_reported_gets_an_annotation_instead_of_a_second_finding() {
+        // Measured on MiQi Desktop (2026-11-03): 60 UI-action groups produced 59
+        // `Model assessment:` duplicates. A candidate this run already turned
+        // into a check result is already a finding; the verdict annotates it.
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
+        let mut existing = BTreeSet::new();
+        existing.insert("cand_todo".to_owned());
+
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &existing);
+        assert!(results.is_empty(), "{results:?}");
+        assert!(
+            findings.is_empty(),
+            "the candidate is already a finding: {findings:?}"
+        );
+        assert_eq!(annotations.len(), 1, "{annotations:?}");
+        assert_eq!(annotations[0].candidate_id, "cand_todo");
+        assert_eq!(annotations[0].reason, "unfinished work");
+        let StageOutcome::Ran { detail } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(detail.contains("already carried"), "{detail}");
+    }
+
+    #[test]
+    fn the_model_annotation_is_written_into_the_candidate_finding() {
+        let finding = a_stored_finding("TODO comment in production code", "src/main.rs");
+        let check = check_id("src/main.rs", "candidate_todo");
+        let mut pairs = vec![(finding, check.clone())];
+        annotate_candidate_findings(
+            &mut pairs,
+            &[ModelVerdict {
+                candidate_id: check.as_str().to_owned(),
+                is_problem: true,
+                reason: "unfinished work".to_owned(),
+            }],
+        );
+        let explanation = &pairs[0].0.explanation;
+        assert!(
+            explanation.contains("the send path returns before the provider is called"),
+            "the finding's own words stay: {explanation}"
+        );
+        assert!(
+            explanation.contains("A model assessed this candidate"),
+            "{explanation}"
+        );
+        assert!(explanation.contains("unfinished work"), "{explanation}");
+    }
+
+    #[test]
     fn a_noise_verdict_produces_no_result() {
         let directory = std::env::temp_dir();
         let config = Config::default();
@@ -3340,9 +3476,10 @@ mod tests {
         let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
         let analyzer = ScriptedAnalyzer("cand_todo: noise — style only\n".to_owned());
 
-        let (outcome, results, findings) =
-            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate());
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &BTreeSet::new());
         assert!(results.is_empty(), "{results:?}");
+        assert!(annotations.is_empty(), "{annotations:?}");
 
         assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
         assert!(findings.is_empty(), "{findings:?}");
@@ -3357,8 +3494,12 @@ mod tests {
         let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
         let analyzer = ScriptedAnalyzer(String::new());
 
-        let (outcome, results, findings) =
-            pipeline.assess_candidates(&analyzer, &fingerprint, &Candidates::default());
+        let (outcome, results, findings, annotations) = pipeline.assess_candidates(
+            &analyzer,
+            &fingerprint,
+            &Candidates::default(),
+            &BTreeSet::new(),
+        );
 
         assert!(
             matches!(outcome, StageOutcome::NotPartOfWork { .. }),
@@ -3366,6 +3507,7 @@ mod tests {
         );
         assert!(results.is_empty());
         assert!(findings.is_empty());
+        assert!(annotations.is_empty());
     }
 
     #[test]
