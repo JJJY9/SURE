@@ -599,18 +599,9 @@ pub struct Assessment {
     /// mode that does not permit it, the one mode this release refuses, a
     /// migration or CI configuration. Under [`ConsentOwner::Harness`] a
     /// request the engine *denied* can carry a danger too — the harness may
-    /// still run it after its own approval, so the danger is worth naming —
-    /// and [`allowance_reachable`](Self::allowance_reachable) says whether a
-    /// recorded allowance may answer this particular block.
+    /// still run it after its own approval, so the danger is worth naming, and
+    /// the person's one-time allowance is the answer to it (ADR 0020).
     pub danger: Option<Danger>,
-    /// Whether a one-time allowance may spend against this block.
-    ///
-    /// True only where the request was held for consent
-    /// ([`ExecutionDecision::NeedsConsent`]): that is the question an allowance
-    /// answers. A danger named beside a *denied* action is protective
-    /// information for a harness that owns consent; it is not a way to run
-    /// under settings the user did not change.
-    pub allowance_reachable: bool,
 }
 
 /// The one decision path both integrations share.
@@ -645,7 +636,6 @@ fn assess_request(
         return Assessment {
             decision: ProtectionDecision::block(custom_reason()),
             danger: None,
-            allowance_reachable: false,
         };
     }
 
@@ -656,13 +646,11 @@ fn assess_request(
         //
         // It is read for `NeedsConsent` always. `Denied` is the execution mode
         // or the permissions refusing, and under the default owner no danger is
-        // read and an allowance cannot answer that refusal. Under
-        // [`ConsentOwner::Harness`] the danger *is* read for `Denied`: the
-        // harness may run the action after its own approval, so naming the
-        // danger is the part of the question it delegated to SURE — and the
-        // block such a naming produces is marked not `allowance_reachable`,
-        // because an allowance is still not a way to run under settings the
-        // user did not change.
+        // read. Under [`ConsentOwner::Harness`] the danger *is* read for
+        // `Denied`: the harness may run the action after its own approval, so
+        // naming the danger is the part of the question it delegated to SURE —
+        // and the person's one-time allowance is the answer to that danger,
+        // whichever refusal produced it.
         let danger = match (base, consent) {
             (ExecutionDecision::NeedsConsent, _) => claimed_danger(action_kind, request),
             (ExecutionDecision::Denied, ConsentOwner::Harness) => {
@@ -678,7 +666,6 @@ fn assess_request(
             return Assessment {
                 decision: ProtectionDecision::block(danger_reason(danger)),
                 danger: Some(danger),
-                allowance_reachable: base == ExecutionDecision::NeedsConsent,
             };
         }
         // A strict-mode hold is the user's protection instruction, not SURE's
@@ -693,7 +680,6 @@ fn assess_request(
             return Assessment {
                 decision: ProtectionDecision::block(strict_reason(area, role)),
                 danger: danger_of(area, role),
-                allowance_reachable: false,
             };
         }
         let decision = match consent {
@@ -703,11 +689,7 @@ fn assess_request(
             // not enforced: the decision is a warning carrying what happened.
             ConsentOwner::Harness => ProtectionDecision::warn(harness_consent_reason(base)),
         };
-        return Assessment {
-            decision,
-            danger,
-            allowance_reachable: false,
-        };
+        return Assessment { decision, danger };
     }
 
     match protection {
@@ -718,12 +700,10 @@ fn assess_request(
         ProtectionMode::Custom => Assessment {
             decision: ProtectionDecision::block(custom_reason()),
             danger: None,
-            allowance_reachable: false,
         },
         ProtectionMode::Standard => Assessment {
             decision: ProtectionDecision::allow_with(STANDARD_ALLOWS),
             danger: None,
-            allowance_reachable: false,
         },
         ProtectionMode::Strict => match sensitive_area(action_kind, request.path) {
             Some((area, role)) => Assessment {
@@ -733,14 +713,10 @@ fn assess_request(
                 // two chances to disagree.
                 decision: ProtectionDecision::block(strict_reason(area, role)),
                 danger: danger_of(area, role),
-                // A strict-mode hold is a hold for consent: `allow-once` is
-                // the person's answer to it, as it has been since `P13-T005`.
-                allowance_reachable: true,
             },
             None => Assessment {
                 decision: ProtectionDecision::allow_with(STRICT_ALLOWS),
                 danger: None,
-                allowance_reachable: false,
             },
         },
     }
@@ -1144,7 +1120,13 @@ pub fn acts_a_request_could_be_held_for(
 ) -> Vec<Danger> {
     let mut acts: Vec<Danger> = Vec::new();
     for (action_kind, _) in DANGER_WITNESSES {
-        for danger in acts_for_kind(action_kind, mode, permissions, protection) {
+        for danger in acts_for_kind(
+            action_kind,
+            mode,
+            permissions,
+            protection,
+            ConsentOwner::Sure,
+        ) {
             if !acts.contains(&danger) {
                 acts.push(danger);
             }
@@ -1183,11 +1165,26 @@ pub fn acts_a_tool_could_be_held_for(
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
 ) -> Vec<Danger> {
+    acts_a_tool_could_be_held_for_owner(tool, mode, permissions, protection, ConsentOwner::Sure)
+}
+
+/// The same, under a declared consent owner: under [`ConsentOwner::Harness`] a
+/// denied request can name a danger too, so the acts a tool can be held for are
+/// the ones its witnesses name whichever refusal produced them.
+#[must_use]
+pub fn acts_a_tool_could_be_held_for_owner(
+    tool: &str,
+    mode: ExecutionMode,
+    permissions: &ExecutionPermissions,
+    protection: ProtectionMode,
+    consent: ConsentOwner,
+) -> Vec<Danger> {
     acts_for_kind(
         action_kind_a_tool_name_names(tool),
         mode,
         permissions,
         protection,
+        consent,
     )
 }
 
@@ -1202,6 +1199,7 @@ fn acts_for_kind(
     mode: ExecutionMode,
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
+    consent: ConsentOwner,
 ) -> Vec<Danger> {
     let mut acts: Vec<Danger> = Vec::new();
     for (action_kind, request) in DANGER_WITNESSES {
@@ -1214,7 +1212,7 @@ fn acts_for_kind(
             mode,
             permissions,
             protection,
-            ConsentOwner::Sure,
+            consent,
         )
         .danger
         else {
@@ -1284,7 +1282,27 @@ pub fn allowance_could_not_be_spent_reason(
     permissions: &ExecutionPermissions,
     protection: ProtectionMode,
 ) -> Option<String> {
-    if !acts_a_tool_could_be_held_for(tool, mode, permissions, protection).is_empty() {
+    allowance_could_not_be_spent_reason_for_owner(
+        tool,
+        mode,
+        permissions,
+        protection,
+        ConsentOwner::Sure,
+    )
+}
+
+/// The same refusal under a declared consent owner, for the writer that reads
+/// the owner from its own command line.
+#[must_use]
+pub fn allowance_could_not_be_spent_reason_for_owner(
+    tool: &str,
+    mode: ExecutionMode,
+    permissions: &ExecutionPermissions,
+    protection: ProtectionMode,
+    consent: ConsentOwner,
+) -> Option<String> {
+    if !acts_a_tool_could_be_held_for_owner(tool, mode, permissions, protection, consent).is_empty()
+    {
         return None;
     }
 
@@ -1343,10 +1361,21 @@ pub fn allowance_could_not_be_spent_reason(
     let with_project_code = {
         let mut permissions = permissions.clone();
         permissions.run_project_code = true;
-        acts_a_tool_could_be_held_for(tool, ExecutionMode::HostConfirmed, &permissions, protection)
+        acts_a_tool_could_be_held_for_owner(
+            tool,
+            ExecutionMode::HostConfirmed,
+            &permissions,
+            protection,
+            consent,
+        )
     };
-    let with_strict =
-        acts_a_tool_could_be_held_for(tool, mode, permissions, ProtectionMode::Strict);
+    let with_strict = acts_a_tool_could_be_held_for_owner(
+        tool,
+        mode,
+        permissions,
+        ProtectionMode::Strict,
+        consent,
+    );
 
     // The third permission a tool's action can need and not have, and the only
     // one whose remedy can be **two** settings rather than one.
@@ -1367,24 +1396,31 @@ pub fn allowance_could_not_be_spent_reason(
     // `write_project` granted, a `Read` reaches strict's credentials danger
     // whether or not a change was ever involved, and a sentence built on that
     // would tell a user to set a permission their read has no use for.
-    let (with_project_write, the_permission_alone_is_not_enough) =
-        if action_kind.required_permission() == Permission::WriteProject
-            && !permissions.allows(Permission::WriteProject)
-        {
-            let mut granted = permissions.clone();
-            granted.write_project = true;
-            let alone = acts_a_tool_could_be_held_for(tool, mode, &granted, protection);
-            if alone.is_empty() {
-                (
-                    acts_a_tool_could_be_held_for(tool, mode, &granted, ProtectionMode::Strict),
-                    true,
-                )
-            } else {
-                (alone, false)
-            }
+    let (with_project_write, the_permission_alone_is_not_enough) = if action_kind
+        .required_permission()
+        == Permission::WriteProject
+        && !permissions.allows(Permission::WriteProject)
+    {
+        let mut granted = permissions.clone();
+        granted.write_project = true;
+        let alone = acts_a_tool_could_be_held_for_owner(tool, mode, &granted, protection, consent);
+        if alone.is_empty() {
+            (
+                acts_a_tool_could_be_held_for_owner(
+                    tool,
+                    mode,
+                    &granted,
+                    ProtectionMode::Strict,
+                    consent,
+                ),
+                true,
+            )
         } else {
-            (Vec::new(), false)
-        };
+            (alone, false)
+        }
+    } else {
+        (Vec::new(), false)
+    };
 
     let mut reason = opening;
 
@@ -2730,10 +2766,6 @@ mod tests {
         );
         assert_eq!(assessment.decision.decision, ProtectionDecisionKind::Block);
         assert_eq!(assessment.danger, Some(Danger::BroadDelete));
-        assert!(
-            assessment.allowance_reachable,
-            "a danger named beside consent is what an allowance answers"
-        );
         let reason = assessment.decision.reason.expect("a block says why");
         assert!(reason.contains("whole location"), "{reason}");
         assert!(
@@ -2819,10 +2851,6 @@ mod tests {
             "{denied:?}"
         );
         assert_eq!(denied.danger, Some(Danger::BroadDelete));
-        assert!(
-            !denied.allowance_reachable,
-            "a mode denial is not a consent question an allowance answers"
-        );
 
         // An ordinary command under the same mode stays a warning: nothing in
         // it names one of the three dangers.
@@ -2856,7 +2884,6 @@ mod tests {
             strict_write.danger, None,
             "a write to a secret is a strict hold"
         );
-        assert!(!strict_write.allowance_reachable);
 
         let strict_broad = assess_miqi_tool(
             &ToolRequest::of("write_file").and_path(Some(".")),
@@ -2870,7 +2897,6 @@ mod tests {
             ProtectionDecisionKind::Block
         );
         assert_eq!(strict_broad.danger, Some(Danger::BroadDelete));
-        assert!(!strict_broad.allowance_reachable);
 
         // The same request under the default protection mode is only held by
         // the engine, and the harness owner answers that with a warning.
@@ -2897,7 +2923,6 @@ mod tests {
         );
         assert_eq!(sure.decision.decision, ProtectionDecisionKind::Block);
         assert_eq!(sure.danger, None);
-        assert!(!sure.allowance_reachable);
     }
 
     /// A request SURE cannot read is answered exactly as it was before this
@@ -3311,6 +3336,56 @@ mod tests {
     /// The list the writer carries into its confirmation, at the settings that
     /// decide it, and the invariant that the list and the refusal can never
     /// disagree: a refusal is exactly the case where the list is empty.
+    /// **Under a harness that owns consent, a denied request still names its
+    /// danger**, so the acts a tool can reach do not depend on the execution
+    /// mode — and the writer's refusal follows the same rule.
+    #[test]
+    fn a_harness_owned_request_reaches_the_dangers_the_engine_denies() {
+        let inspect_only = ExecutionPermissions::inspect_only();
+        assert!(
+            acts_a_tool_could_be_held_for(
+                "exec",
+                ExecutionMode::InspectOnly,
+                &inspect_only,
+                ProtectionMode::Standard,
+            )
+            .is_empty(),
+            "under SURE's own consent a denied shell request names no danger"
+        );
+
+        let harness = acts_a_tool_could_be_held_for_owner(
+            "exec",
+            ExecutionMode::InspectOnly,
+            &inspect_only,
+            ProtectionMode::Standard,
+            ConsentOwner::Harness,
+        );
+        assert!(harness.contains(&Danger::BroadDelete), "{harness:?}");
+        assert!(harness.contains(&Danger::ForcePush), "{harness:?}");
+
+        assert!(
+            allowance_could_not_be_spent_reason(
+                "exec",
+                ExecutionMode::InspectOnly,
+                &inspect_only,
+                ProtectionMode::Standard,
+            )
+            .is_some(),
+            "the default owner leaves an exec grant unspendable here"
+        );
+        assert!(
+            allowance_could_not_be_spent_reason_for_owner(
+                "exec",
+                ExecutionMode::InspectOnly,
+                &inspect_only,
+                ProtectionMode::Standard,
+                ConsentOwner::Harness,
+            )
+            .is_none(),
+            "a harness-owned grant is spendable by the danger it answers"
+        );
+    }
+
     #[test]
     fn the_acts_left_for_an_allowance_are_read_off_the_rule() {
         let inspect_only = ExecutionPermissions::inspect_only();

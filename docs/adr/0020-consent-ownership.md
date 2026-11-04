@@ -44,16 +44,22 @@ sure hook ingest --consent-owner harness
   *names a danger* still blocks under either owner: the danger rules are the
   part of the answer the harness delegated to SURE. Under `harness` the danger
   is read even where the engine **denied** the action — the harness may still
-  run it after its own approval, so the danger is worth naming — and that
-  block cannot be answered by a one-time allowance, which remains tied to the
-  consent question (`needs consent`) and not to a mode denial. The same holds
-  for a `strict`-mode hold on a sensitive area (migrations, CI configuration,
-  credentials, a whole-location change): it is the user's protection
-  instruction, so under `harness` it applies even where the engine denied the
-  action.
-- The one-time allowance (`sure hook allow-once`) still spends against a
-  danger block, under either owner. It is the person's answer to the one
-  question SURE can still name.
+  run it after its own approval, so the danger is worth naming — and that block
+  **is** answerable by a one-time allowance: the danger is the question the
+  person answers, whichever refusal named it. Under the default `sure` owner a
+  denied request names no danger at all, so the older rule is unchanged there.
+  The same reading applies to a `strict`-mode hold on a sensitive area
+  (migrations, CI configuration, credentials, a whole-location change): it is
+  the user's protection instruction, so under `harness` it applies even where
+  the engine denied the action.
+- The one-time allowance (`sure hook allow-once`) spends against a danger
+  block under either owner. It is the person's answer to the one question SURE
+  can still name. `sure hook allow-once --consent-owner harness` records a
+  grant whose act the danger rules can name even where the engine would deny
+  the request (the default `sure` keeps the older reach, where only a request
+  SURE holds is within it), and `sure hook ingest` reports
+  `allowance_reachable` in its machine frame so a harness can offer that
+  answer only where it exists.
 - A command line SURE cannot read into one meaning (safety refuses it) names no
   danger; under `harness` it is a warning, under `sure` a block. The harness's
   own approval is what the request then needs.

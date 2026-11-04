@@ -533,7 +533,10 @@ pub enum Report {
     /// `sure hook ingest`, carrying a protection decision for a pre-action hook.
     ///
     /// The machine form is the decision JSON that the harness reads from stdout.
-    HookDecision(sure_core::hook_protection::ProtectionDecision),
+    HookDecision {
+        decision: sure_core::hook_protection::ProtectionDecision,
+        allowance_reachable: bool,
+    },
     /// `sure hook allow-once`, carrying the one-time allowance it recorded.
     ///
     /// Not a decision and not a setting: a grant the user made, on the command
@@ -635,7 +638,7 @@ impl Report {
             Self::Failed(_) => "failed",
             // A hook decision is an answer: the command ran and produced a result.
             // `not_green` for block because the answer is "do not proceed".
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow
                 | sure_core::hook_protection::ProtectionDecisionKind::Warn => "ok",
                 sure_core::hook_protection::ProtectionDecisionKind::Block => "not_green",
@@ -747,7 +750,7 @@ impl Report {
             Self::Failed(_) => exit::FAILED,
             // 0 for allow/warn so the launcher does not block the operation.
             // 1 for block so the launcher can relay the refusal.
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow
                 | sure_core::hook_protection::ProtectionDecisionKind::Warn => exit::OK,
                 sure_core::hook_protection::ProtectionDecisionKind::Block => exit::NOT_GREEN,
@@ -823,7 +826,7 @@ impl Report {
             Self::ConfigShow(_) | Self::Explain(_) => true,
             Self::Unavailable(_) | Self::Failed(_) => false,
             // A hook decision is an answer: the command ran and produced a result.
-            Self::HookDecision(_) => true,
+            Self::HookDecision { .. } => true,
             // The same, for the user's own command: `sure hook allow-once >
             // allowance.txt` has to put the sentence in the file, because the
             // sentence is the whole of what the command was asked for.
@@ -929,7 +932,7 @@ impl Report {
                     exit::OK
                 )
             }
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow => {
                     // An allow the rule reached carries the sentence it reached
                     // it with, and a user who reads the reason can tell a
@@ -1182,11 +1185,20 @@ impl Report {
             // nothing: an envelope built for a message and then thrown away
             // would be work whose only purpose was to be discarded.
             Self::Mcp(_) => {}
-            Self::HookDecision(decision) => {
+            Self::HookDecision {
+                decision,
+                allowance_reachable,
+            } => {
                 frame["decision"] = json!(decision.decision.as_str());
                 if let Some(ref reason) = decision.reason {
                     frame["reason"] = json!(reason);
                 }
+                // Whether the person's one-time allowance can answer this
+                // block: true exactly where a danger was named, so a harness
+                // that offers an "allow once" control offers it only where
+                // `sure hook allow-once` could record a grant this request
+                // would spend.
+                frame["allowance_reachable"] = json!(allowance_reachable);
             }
             // The grant the user just recorded, built from the same values the
             // human form renders. `grant` is the store row, so a script can find
@@ -1266,7 +1278,7 @@ impl Report {
             Self::Explain(_) => "explain",
             Self::Unavailable(not_yet) => not_yet.command,
             Self::Failed(failure) => failure.command,
-            Self::HookDecision(_) => "hook",
+            Self::HookDecision { .. } => "hook",
             // The same command name for the other half of `sure hook`: this is a
             // subcommand of the entry point a harness calls, and the frame names
             // the command the user typed, which is `hook` either way.
@@ -1704,13 +1716,22 @@ mod tests {
             a_check_that_did_not_finish(),
             a_failure(),
             Report::Unavailable(a_refusal()),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::allow()),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::warn(
-                "This action needs explicit approval before it can run.",
-            )),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::block(
-                "The current execution mode does not permit this action.",
-            )),
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::allow(),
+                allowance_reachable: false,
+            },
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::warn(
+                    "This action needs explicit approval before it can run.",
+                ),
+                allowance_reachable: false,
+            },
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::block(
+                    "The current execution mode does not permit this action.",
+                ),
+                allowance_reachable: true,
+            },
             a_recorded_allowance(),
             a_protocol_error(),
             a_tool_result(false),

@@ -463,9 +463,11 @@ pub enum HookAction {
     /// agent's output can say records an allowance, because a hook cannot ask a
     /// user for consent and this is that answer, given by a user, on purpose.
     ///
-    /// Both integrations are capability tier 1 (Observed): SURE records what it
-    /// would do, and cannot confirm what a harness does with the answer. See
-    /// `docs/security/PROTECTION_MODE.md`.
+    /// Under `--consent-owner harness` the allowance is the person's answer to
+    /// the danger a hook reported, whichever refusal named it — including one
+    /// the execution mode denied, because the harness may run what SURE itself
+    /// would not (ADR 0020). The default, `sure`, keeps the older answer: the
+    /// acts reachable are the ones a request SURE holds can reach.
     #[command(group(
         clap::ArgGroup::new("subject")
             .required(true)
@@ -484,6 +486,17 @@ pub enum HookAction {
         /// The path, exactly as the harness would send it.
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
+
+        /// Who owns the consent this allowance answers: `sure` (the default) or
+        /// `harness`.
+        ///
+        /// A harness that asks its own user declares `harness`: the act the
+        /// allowance answers is the danger the hook named, whether the engine
+        /// held the request for consent or denied it. The default keeps the
+        /// older answer, where only a held request is within an allowance's
+        /// reach.
+        #[arg(long, value_name = "OWNER")]
+        consent_owner: Option<String>,
 
         /// The project the allowance is for. Default: the current directory.
         ///

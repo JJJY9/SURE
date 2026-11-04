@@ -77,8 +77,9 @@ use sure_core::full_recording::{
 use sure_core::harness_event::ingest_event_str;
 use sure_core::hook_protection::{
     Assessment, ConsentOwner, Danger, ProtectionDecision, ToolRequest,
-    acts_a_tool_could_be_held_for, allowance_could_not_be_spent_reason, allowance_reason,
-    allowance_unreadable_reason, assess_claude_code_tool, assess_cursor_tool, assess_miqi_tool,
+    acts_a_tool_could_be_held_for_owner, allowance_could_not_be_spent_reason_for_owner,
+    allowance_reason, allowance_unreadable_reason, assess_claude_code_tool, assess_cursor_tool,
+    assess_miqi_tool,
 };
 use sure_core::ids::{EventId, FingerprintId};
 use sure_core::normalizer::{claude_code, codex, cursor, miqi};
@@ -145,12 +146,14 @@ pub fn run(action: &HookAction, named: Named<'_>) -> Report {
             path,
             project,
             minutes,
+            consent_owner,
         } => run_allow_once(
             tool,
             command.as_deref(),
             path.as_deref(),
             project.as_deref(),
             *minutes,
+            consent_owner.as_deref(),
             named,
         ),
     }
@@ -211,8 +214,13 @@ fn run_allow_once(
     path: Option<&str>,
     project: Option<&Path>,
     minutes: u32,
+    consent_owner: Option<&str>,
     named: Named<'_>,
 ) -> Report {
+    let consent = match consent_owner_argument(consent_owner) {
+        Ok(consent) => consent,
+        Err(report) => return report,
+    };
     let Some(subject) = command.or(path) else {
         // clap asks for exactly one of `--command` and `--path`, so this is
         // unreachable from a command line; it is here because an answer is
@@ -248,20 +256,38 @@ fn run_allow_once(
         }
     };
 
-    run_allow_once_with_paths(tool, subject, &project_root, minutes, &paths)
+    run_allow_once_with_paths_for_owner(tool, subject, &project_root, minutes, &paths, consent)
 }
 
-/// [`run_allow_once`], with the locations already resolved.
-///
-/// The same split [`run_ingest`] has and for the same reason: what the command
-/// *decides* is testable against locations a test named, and the only part that
-/// reaches the machine's own files is the wrapper above.
+/// [`run_allow_once_with_paths_for_owner`] under SURE-owned consent — the
+/// answer a hook that cannot ask has always given, and what a test that does
+/// not name an owner means.
+#[cfg(test)]
 fn run_allow_once_with_paths(
     tool: &str,
     subject: &str,
     project_root: &str,
     minutes: u32,
     paths: &Paths,
+) -> Report {
+    run_allow_once_with_paths_for_owner(
+        tool,
+        subject,
+        project_root,
+        minutes,
+        paths,
+        ConsentOwner::Sure,
+    )
+}
+
+/// [`run_allow_once_with_paths`] under the consent owner the caller declared.
+fn run_allow_once_with_paths_for_owner(
+    tool: &str,
+    subject: &str,
+    project_root: &str,
+    minutes: u32,
+    paths: &Paths,
+    consent: ConsentOwner,
 ) -> Report {
     if !allowance::window_is_allowed(minutes) {
         return failed(
@@ -316,7 +342,8 @@ fn run_allow_once_with_paths(
     // answered as that, whatever the project says: it is the one refusal a user
     // can fix without looking at anything but the command line they typed.
     let (mode, permissions, protection) = load_execution_config(project_root, paths);
-    if let Some(reason) = allowance_could_not_be_spent_reason(tool, mode, &permissions, protection)
+    if let Some(reason) =
+        allowance_could_not_be_spent_reason_for_owner(tool, mode, &permissions, protection, consent)
     {
         return failed(
             "SURE will not record an allowance that no request could spend.",
@@ -364,7 +391,13 @@ fn run_allow_once_with_paths(
             // confirmation cannot name an act those settings make unreachable —
             // for the tool it is about. Non-empty, because the refusal above
             // returned on the empty answer.
-            acts: acts_a_tool_could_be_held_for(tool, mode, &permissions, protection),
+            acts: acts_a_tool_could_be_held_for_owner(
+                tool,
+                mode,
+                &permissions,
+                protection,
+                consent,
+            ),
         })),
         Err(error) => failed("SURE could not record the allowance.", error.to_string()),
     }
@@ -383,6 +416,17 @@ fn run_allow_once_with_paths(
 /// invents nothing; everything after it is passed on exactly as it arrived.
 fn without_byte_order_mark(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+fn consent_owner_argument(consent_owner: Option<&str>) -> Result<ConsentOwner, Report> {
+    match consent_owner {
+        None | Some("sure") => Ok(ConsentOwner::Sure),
+        Some("harness") => Ok(ConsentOwner::Harness),
+        Some(other) => Err(failed(
+            "SURE does not know that consent owner.",
+            format!("`{other}` is not a consent owner; use `sure` or `harness`."),
+        )),
+    }
 }
 
 fn run_ingest(
@@ -411,15 +455,9 @@ fn run_ingest_with_paths(
     stdin: &str,
     paths: &Paths,
 ) -> Report {
-    let consent = match consent_owner {
-        None | Some("sure") => ConsentOwner::Sure,
-        Some("harness") => ConsentOwner::Harness,
-        Some(other) => {
-            return failed(
-                "SURE does not know that consent owner.",
-                format!("`{other}` is not a consent owner; use `sure` or `harness`."),
-            );
-        }
+    let consent = match consent_owner_argument(consent_owner) {
+        Ok(consent) => consent,
+        Err(report) => return report,
     };
     // Normalise based on source.
     let envelope = match source {
@@ -599,19 +637,29 @@ fn run_ingest_with_paths(
             // refused a source SURE does not know.
             _ => assess_cursor_tool(&request, mode, &permissions, protection, consent),
         };
-        return Report::HookDecision(record_the_decision(
-            with_any_allowance(&assessment, &request, &project_root, paths),
-            assessment.danger,
-            request.tool,
-            &event_id,
-            &event_write,
-            &project_root,
-            paths,
-        ));
+        let decided = with_any_allowance(&assessment, &request, &project_root, paths);
+        let allowance_reachable = assessment.danger.is_some()
+            && decided.decision.decision
+                == sure_core::hook_protection::ProtectionDecisionKind::Block;
+        return Report::HookDecision {
+            decision: record_the_decision(
+                decided,
+                assessment.danger,
+                request.tool,
+                &event_id,
+                &event_write,
+                &project_root,
+                paths,
+            ),
+            allowance_reachable,
+        };
     }
 
     // For non-pre-tool-use events, report success.
-    Report::HookDecision(sure_core::hook_protection::ProtectionDecision::allow())
+    Report::HookDecision {
+        decision: sure_core::hook_protection::ProtectionDecision::allow(),
+        allowance_reachable: false,
+    }
 }
 
 /// A decision, and the one-time allowance it spent if it spent one.
@@ -659,12 +707,10 @@ fn with_any_allowance(
         decision,
         allowance: None,
     };
-    // A danger named beside a *denied* action is protective information for a
-    // harness that owns consent; no grant may answer it. Only a request held
-    // for consent is within an allowance's reach (`Assessment`'s own rule).
-    if !assessment.allowance_reachable {
-        return unspent(assessment.decision.clone());
-    }
+    // A named danger is what a recorded allowance may answer — under either
+    // consent owner. Under `sure` a denied action names no danger at all; under
+    // `harness` it can, because the harness may run what SURE itself would not,
+    // and the person's allowance is the answer to that danger (ADR 0020).
     let (Some(danger), Some(subject)) = (assessment.danger, request.subject()) else {
         return unspent(assessment.decision.clone());
     };
@@ -1033,7 +1079,7 @@ mod tests {
             &store_of_our_own("cursor-pre-tool-use"),
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         // Default config is inspect_only, so Shell (ArbitraryCommand) is blocked.
@@ -1056,7 +1102,7 @@ mod tests {
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(
@@ -1079,7 +1125,7 @@ mod tests {
             &session_event_at(&text, &project),
             &paths,
         );
-        assert!(matches!(report, Report::HookDecision(_)), "{report:?}");
+        assert!(matches!(report, Report::HookDecision { .. }), "{report:?}");
 
         let store = Store::open(&paths, Path::new(&project)).expect("store");
         let fingerprint = project_fingerprint(Path::new(&project), &FingerprintOptions::default())
@@ -1108,7 +1154,7 @@ mod tests {
         let event = session_event_at(&text, &project);
 
         let sure = run_ingest_with_paths(Some("miqi"), Some("pre-tool-use"), None, &event, &paths);
-        let Report::HookDecision(sure) = sure else {
+        let Report::HookDecision { decision: sure, .. } = sure else {
             panic!("{sure:?}")
         };
         assert_eq!(sure.decision, ProtectionDecisionKind::Block);
@@ -1120,7 +1166,10 @@ mod tests {
             &event,
             &paths,
         );
-        let Report::HookDecision(harness) = harness else {
+        let Report::HookDecision {
+            decision: harness, ..
+        } = harness
+        else {
             panic!("{harness:?}")
         };
         assert_eq!(harness.decision, ProtectionDecisionKind::Warn);
@@ -1204,7 +1253,7 @@ mod tests {
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(
@@ -1224,7 +1273,7 @@ mod tests {
             &store_of_our_own("claude-code-pre-tool-use"),
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         // Default config is InspectOnly; Bash maps to ArbitraryCommand, which is
@@ -1550,7 +1599,7 @@ mod tests {
             let report = run_ingest_with_paths(Some("claude-code"), Some(kind), None, json, &paths);
             if *kind == "pre-tool-use" {
                 let decision = match &report {
-                    Report::HookDecision(d) => d,
+                    Report::HookDecision { decision: d, .. } => d,
                     other => panic!("expected HookDecision for {kind}, got {other:?}"),
                 };
                 assert_eq!(
@@ -1564,7 +1613,7 @@ mod tests {
                 );
             } else {
                 let decision = match &report {
-                    Report::HookDecision(d) => d,
+                    Report::HookDecision { decision: d, .. } => d,
                     other => panic!("expected HookDecision for {kind}, got {other:?}"),
                 };
                 assert_eq!(
@@ -1775,7 +1824,7 @@ mod tests {
         for (kind, json, expected) in &events {
             let report = run_ingest_with_paths(Some("cursor"), Some(kind), None, json, &paths);
             let decision = match &report {
-                Report::HookDecision(d) => d,
+                Report::HookDecision { decision: d, .. } => d,
                 other => panic!("expected HookDecision for {kind}, got {other:?}"),
             };
 
@@ -1909,7 +1958,7 @@ mod tests {
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
@@ -1936,7 +1985,7 @@ mod tests {
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
@@ -1962,7 +2011,7 @@ mod tests {
 
         let report = run_ingest_with_paths(Some("codex"), None, None, &value.to_string(), &paths);
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
@@ -2014,7 +2063,7 @@ mod tests {
             &paths,
         );
         assert!(
-            matches!(accepted, Report::HookDecision(_)),
+            matches!(accepted, Report::HookDecision { .. }),
             "expected the mapped event to ingest, got {accepted:?}"
         );
 
@@ -2057,7 +2106,7 @@ mod tests {
                 &paths,
             );
             assert!(
-                matches!(report, Report::HookDecision(_)),
+                matches!(report, Report::HookDecision { .. }),
                 "{name} should have ingested, got {report:?}"
             );
         }
@@ -2142,7 +2191,7 @@ mod tests {
             &paths,
         );
         assert!(
-            matches!(report, Report::HookDecision(_)),
+            matches!(report, Report::HookDecision { .. }),
             "the payload behind the mark should ingest, got {report:?}"
         );
         let store = Store::open(&paths, &project).expect("store opens");
@@ -2231,7 +2280,7 @@ mod tests {
         let report =
             run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
-            Report::HookDecision(decision) => (
+            Report::HookDecision { decision, .. } => (
                 decision.decision,
                 decision
                     .reason
@@ -2476,6 +2525,101 @@ mod tests {
         );
     }
 
+    /// **A harness-owned allowance answers a denied danger (ADR 0020).** With
+    /// the default `inspect_only` settings a shell request is denied before any
+    /// danger is read under SURE's own consent, and `allow-once` refuses to
+    /// record a grant nothing could spend. Under `--consent-owner harness` the
+    /// danger is named off the command line, the grant is recorded, and the
+    /// request it names spends it — while a second identical request is held
+    /// again.
+    #[test]
+    fn a_harness_owned_allowance_answers_a_denied_danger() {
+        let (project, paths) = a_project_with("harness-owned-allowance", "");
+        let project_root = project.to_string_lossy().into_owned();
+        let minutes = sure_core::allowance::DEFAULT_MINUTES;
+
+        // Under SURE's own consent nothing is reachable here, and the writer
+        // refuses rather than record a grant nothing could spend.
+        let refused = run_allow_once_with_paths_for_owner(
+            "exec",
+            "rm -rf build/",
+            &project_root,
+            minutes,
+            &paths,
+            ConsentOwner::Sure,
+        );
+        assert!(matches!(refused, Report::Failed(_)), "{refused:?}");
+
+        // Under the harness owner the same grant records: the danger is what
+        // the allowance answers, whichever refusal named it.
+        let recorded = run_allow_once_with_paths_for_owner(
+            "exec",
+            "rm -rf build/",
+            &project_root,
+            minutes,
+            &paths,
+            ConsentOwner::Harness,
+        );
+        assert!(matches!(recorded, Report::HookAllowance(_)), "{recorded:?}");
+
+        // The request the grant names spends it; the frame of the block that
+        // preceded it said the danger was answerable.
+        let text = cursor_shell_request_at(&project, "exec", "rm -rf build/");
+        let first = run_ingest_with_paths(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &text,
+            &paths,
+        );
+        let Report::HookDecision {
+            decision,
+            allowance_reachable,
+        } = &first
+        else {
+            panic!("expected HookDecision, got {first:?}");
+        };
+        assert_eq!(
+            decision.decision,
+            ProtectionDecisionKind::Allow,
+            "the allowance was not spent: {first:?}"
+        );
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some(allowance_reason(Danger::BroadDelete).as_str())
+        );
+        assert!(
+            !allowance_reachable,
+            "a spent allowance is not a held request"
+        );
+
+        // One request, one allowance: the next identical request is held again,
+        // and now the frame says an allowance could answer it.
+        let second = run_ingest_with_paths(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &text,
+            &paths,
+        );
+        let Report::HookDecision {
+            decision,
+            allowance_reachable,
+        } = &second
+        else {
+            panic!("expected HookDecision, got {second:?}");
+        };
+        assert_eq!(
+            decision.decision,
+            ProtectionDecisionKind::Block,
+            "{second:?}"
+        );
+        assert!(
+            allowance_reachable,
+            "a held danger must say an allowance can answer it: {second:?}"
+        );
+    }
+
     // --- the three dangers, and the one-time allowance that answers one -------
     //
     // Everything here runs through `run_ingest_with_paths` and
@@ -2511,7 +2655,7 @@ mod tests {
         let report =
             run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
-            Report::HookDecision(decision) => (
+            Report::HookDecision { decision, .. } => (
                 decision.decision,
                 decision
                     .reason
@@ -3266,7 +3410,7 @@ mod tests {
             &paths,
         );
         match &claude {
-            Report::HookDecision(decision) => assert_ne!(
+            Report::HookDecision { decision, .. } => assert_ne!(
                 decision.decision,
                 ProtectionDecisionKind::Allow,
                 "a request the settings in force refuse was allowed"

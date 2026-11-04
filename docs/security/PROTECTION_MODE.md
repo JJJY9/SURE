@@ -72,14 +72,17 @@ credentials — because judging danger is the part of the answer the harness
 delegated to SURE, and that danger is read even where the execution mode or the
 permissions **denied** the action: the harness may still run it after its own
 approval. A `strict`-mode hold on a sensitive area is the user's protection
-instruction and applies under the harness owner in the same way. `sure hook
-allow-once` still spends against a danger block that answers a request held for
-consent; a danger named beside a denied action is still a block, but no
-allowance may answer it, because an allowance is not a way to run under
-settings the user did not change (ADR 0020). The default, `sure`, keeps the
-older answer: a request SURE would hold for consent is blocked, because a hook
-cannot ask. Whether a harness enforces either answer is still the harness's own
-claim to make, with its own tests.
+instruction and applies under the harness owner in the same way. The one-time
+allowance is the person's answer to that danger — **including a danger named
+beside a denied action**, because the harness may run what SURE itself would
+not, and the allowance says the person lets this one request through. `sure
+hook ingest --consent-owner harness` reports whether that answer exists
+(`allowance_reachable`) so the harness can offer it only when it does. The
+default, `sure`, keeps the older answer: a request SURE would hold for consent
+is blocked, because a hook cannot ask, and a denied request names no danger at
+all — an allowance is not a way to run under settings the user did not change.
+Whether a harness enforces either answer is still the harness's own claim to
+make, with its own tests.
 
 ## The one-time override, and what it reaches
 
@@ -88,7 +91,7 @@ that answer is a command:
 
 ```
 sure hook allow-once --tool NAME (--command WORDS | --path PATH)
-                     [--project DIR] [--minutes N]
+                     [--project DIR] [--minutes N] [--consent-owner OWNER]
 ```
 
 It records a grant in SURE's store for **one** request: the tool name and the
@@ -101,11 +104,13 @@ on one allowance cannot both spend it.
 
 **The command reads the settings and the tool name before it writes, and refuses
 when together they leave nothing an allowance could be spent on.** An act is
-named only for a request SURE holds, and a grant is spent by a request that
-matches the tool and the words exactly, so whether any matching request could
-spend it is a question about `execution.mode`, the permissions, `protection.mode`
-and the tool the user named — and not about the words they typed. Under the
-default configuration no request can be held for any of the three acts below, so
+named only for a request SURE holds — or, under `--consent-owner harness`, for a
+request the danger rules name even where the engine would deny it — and a grant
+is spent by a request that matches the tool and the words exactly, so whether any
+matching request could spend it is a question about the consent owner,
+`execution.mode`, the permissions, `protection.mode` and the tool the user named
+— and not about the words they typed. Under the default configuration with the
+default `sure` owner no request can be held for any of the three acts below, so
 `sure hook allow-once` refuses, says what would have to change, and writes no
 row. A grant recorded there would sit in the store looking like a
 permission while being a promise SURE cannot keep, and the user would learn that
@@ -115,7 +120,10 @@ answers a grant whose *settings* leave an act that its *tool* cannot reach: with
 credentials live, and a grant recorded for a shell command under those settings
 is spent by nothing — a shell request is refused by the mode before any danger is
 read. The sentence a refusal is answered with names the tool, because that is
-half of what the grant promises.
+half of what the grant promises. With `--consent-owner harness` the question is
+asked the way the harness's requests are: the three dangers count as reachable
+wherever their witnesses name them, because the harness may run what SURE itself
+would not and the person's allowance is the answer to the danger.
 
 Where an act is reachable **for the tool that was named** the command records,
 and the sentence it answers with says which acts the settings in force **when it
@@ -173,7 +181,10 @@ CI/CD configuration, SURE's own configuration area — and neither can a request
 whose command line has more than one reading, or one SURE cannot call destructive
 from its own rule table. That is the fail-closed direction on purpose: an
 allowance answers a question a hook cannot ask, and it is not a way to run under
-settings the user did not change.
+settings the user did not change. The harness owner does not weaken that: the
+allowance answers a **named danger** the harness's request would commit (and
+under that owner a denied request can name one), not a mode or a permission
+question, which the harness still answers with its own approval.
 
 For Cursor and Claude Code — capability tier 1 (Observed) — nothing here is a
 claim that the harness honours the answer: a spent allowance produces a
