@@ -508,7 +508,7 @@ mod tests {
                 // `hook ingest` reads stdin and may return a decision or a failure
                 // when stdin is empty. It is in this list because the grammar
                 // accepts it, and its own tests cover the success paths.
-                Report::HookDecision(_) => {}
+                Report::HookDecision { .. } => {}
                 Report::Failed(failure) if failure.command == "hook" => {}
                 // `explain` with a store this test never wrote is a status-5
                 // failure by design: it looked and found nothing to explain.
