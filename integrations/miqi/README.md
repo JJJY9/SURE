@@ -37,29 +37,34 @@ Required fields: `event`, `harness_session_id` (MiQi's session key),
 `timestamp_utc` (RFC 3339), `source` (the literal string `miqi`).
 
 Optional fields: `project_root` (the session's project, an absolute path),
-`tool` (MiQi's own tool name — see the vocabulary below), `result` (v1 sends
-the string `ok`), `args`, `error`, `path`, `claim_id` / `claim_text` /
-`claim_type` (AgentClaim only; SURE stores the claim as a Claim document and
-checks it against the recorded events — `claim_text` is redacted before it is
-stored), `kind` / `target` / `success` / `subcommand` / `counts` (ExecClassified
-only — these are MiQi's own normalized classification, never the command
-line), and `server` / `agent_type` / `job_id` (McpCall / subagent lifecycle
-only — names MiQi already holds, never tool arguments or task text).
+`tool` (MiQi's own tool name — see the vocabulary below), `result` (the string
+`ok`), `args` (only when MiQi's argument-forwarding switch is on: the `exec`
+command line and nothing else), `error`, `path` (a write-like tool's target;
+carried on the pre-tool event and, since v1, on the post-tool one), `claim_id` /
+`claim_text` / `claim_type` (AgentClaim only; SURE stores the claim as a Claim
+document and checks it against the recorded events — `claim_text` is redacted
+before it is stored), `kind` / `target` / `success` / `subcommand` / `counts`
+(ExecClassified only — these are MiQi's own normalized classification, never
+the command line), and `server` / `agent_type` / `job_id` (McpCall / subagent
+lifecycle only — names MiQi already holds, never tool arguments or task text).
 
 A failed or refused tool call sends **no** `PostToolUse`: it appears in the
 record as a request without a completion, which is what it was. Nothing is
 reported as completed unless it completed.
 
-### What v1 does not send
+### What the integration does not send
 
-**`args`.** Tool arguments — a shell command line above all — stay in MiQi.
-The consequence is stated rather than hidden: a shell request from this
-harness carries no command line, so SURE holds it on the strength of the tool
-name alone, and no recorded allowance can name the command's own acts until a
-later version adds an explicit opt-in for forwarding arguments. `ExecClassified`
-does not weaken this: MiQi classifies the command locally and sends only the
-normalized label (`pytest`, `cargo build`, `git commit`), never the command
-text, its arguments, or the paths it named.
+**`args`, unless the user turns forwarding on.** The shell command line stays
+in MiQi by default. The current integration adds an explicit opt-in
+(`sure.forward_tool_arguments`): with it on, the `exec` command line is
+attached to the pre-tool event so SURE can name a command's danger. Without
+it a shell request carries no command line, and SURE holds it on the strength
+of the tool name alone. A write-like tool's target `path` is carried on the
+pre-tool event regardless — the same path its post-tool event has always
+carried, and the word SURE's `strict` rules are read from. `ExecClassified`
+does not weaken any of this: MiQi classifies the command locally and sends
+only the normalized label (`pytest`, `cargo build`, `git commit`), never the
+command text, its arguments, or the paths it named.
 
 **MCP arguments and results, and subagent prompts.** An `McpCall` carries the
 registered tool name and whether it succeeded, nothing the server returned and
@@ -87,23 +92,31 @@ reading, and not a claim about what the tool does.
 
 ## Capability tier
 
-MiQi is **Observed** (tier 1): SURE records what the agent did, after the
-fact. **Tier 2 (Protected) is not claimed.** SURE answers each `PreToolUse`
-request with a decision and v1 of the integration records that answer, but the
-harness does not act on it yet — the fail-closed bridge that would make acting
-safe (what must happen when SURE is missing, times out, or cannot be verified)
-is a separate project with its own test matrix. Until that lands and its tests
-pass, the decision is documentary evidence, not protection.
+MiQi is **Protected** (tier 2): its plugin asks before an action runs. For
+`exec` / `write_file` / `edit_file` / `apply_patch` it calls `sure hook ingest
+--consent-owner harness` (ADR 0020), reads the machine frame, and turns a
+`block` answer into a refused tool call — SURE's sentence is what the model and
+the user see. Consent stays with MiQi's own approval flow: SURE judges only the
+dangers it can name (a broad delete, a force push, a read of credentials, and
+the strict mode's sensitive areas), while the execution-mode and consent
+outcomes are reported as warnings rather than enforced.
 
-The SURE side now offers the decision mode that bridge needs: `sure hook
-ingest --consent-owner harness` (ADR 0020) makes SURE judge only the danger
-rules, reports the execution-mode and consent outcomes as a warning, and leaves
-obtaining consent to the harness's own approval flow. A danger is named even
-for an action the execution mode denies, because MiQi may still run it after
-its own approval; that block cannot be answered by a one-time allowance. MiQi
-v1 does **not** pass it yet, and the plugin still sends no tool arguments (see
-above), so a decision it did enforce could not name a command's danger. Both
-are part of the Tier 2 work, not of this contract.
+**The claim belongs to the integration and is earned there**, with its own
+tests: MiQi's repository carries a real-SURE matrix (`allow` / `warn` /
+`block`, argument forwarding, and the failure paths — missing SURE, timeout,
+refusal, an older build) and a real-LLM end-to-end test in which a blocked
+command surfaces as the tool's result (MiQi PR #1353). What this page records
+is the contract those tests hold MiQi to; whether a harness truly honours the
+answer remains the harness's own claim, not something SURE can observe from
+the outside.
+
+Failure policy is the integration's too: when SURE is missing, times out or
+refuses to answer, MiQi continues the call by default and says so (a warning,
+plus an audit entry in its acceptance panel); its strict switch makes the same
+failure a refusal instead. `read_file` is not put in front of SURE — the extra
+~250 ms on every read is not worth it — and its pre-tool event stays on the
+observation channel; the danger a read could name (credentials under `strict`)
+is checked when MiQi runs its own SURE checks.
 
 ## Binary resolution, installation, and rights
 

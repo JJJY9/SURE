@@ -9,11 +9,13 @@
 //!
 //! # Capability tier
 //!
-//! MiQi is **Observed** (tier 1): the integration records what the agent did,
-//! after the fact. The decision path (see `assess_miqi_tool` in
-//! [`sure_core::hook_protection`]) exists and is real, but v1 of the harness
-//! does not act on the answer — reading a decision and ignoring it is not
-//! protection — so this integration cannot honestly claim Protected (tier 2).
+//! MiQi is **Protected** (tier 2): its plugin asks `sure hook ingest
+//! --consent-owner harness` before a write or an execution and enforces a
+//! `block` answer, so SURE can decide before an action happens (ADR 0020).
+//! Obtaining consent stays with MiQi's own approval flow. The claim belongs
+//! to the integration and is earned there, with its own tests: the MiQi
+//! repository's real-SURE matrix and real-LLM E2E (MiQi PR #1353). This
+//! module only stamps the tier the documented contract declares.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,9 +25,11 @@ use sure_protocol::event::EventEnvelope;
 /// A raw event from the MiQi harness.
 ///
 /// Shape matches the fixtures in `integrations/miqi/fixtures/`. `args` is
-/// optional and v1 of the integration sends no arguments — MiQi's own layer
-/// leaves tool arguments out of the event, so a request from this harness
-/// carries a tool name and a session and no command line.
+/// optional: the integration sends no arguments by default, and with its
+/// argument-forwarding switch on it adds the shell command line for `exec`.
+/// A write-like tool's target `path` is carried on the pre-tool event as well
+/// as the post-tool one. Everything else — file contents, diffs, MCP
+/// arguments, subagent task text — stays in MiQi.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MiqiRawEvent {
     pub event: String,
@@ -120,8 +124,9 @@ impl std::error::Error for MiqiNormalizeError {}
 ///
 /// # Capability tier
 ///
-/// MiQi is **Observed** (tier 1); see the module comment for why tier 2 is not
-/// claimed.
+/// MiQi is **Protected** (tier 2): its plugin enforces SURE's `block` answer
+/// before an action runs, under the harness-owned consent of ADR 0020. The
+/// integration's own tests earn that claim; see `integrations/miqi/README.md`.
 pub fn normalize(text: &str) -> Result<EventEnvelope, MiqiNormalizeError> {
     let raw: MiqiRawEvent =
         serde_json::from_str(text).map_err(|error| MiqiNormalizeError::NotJson {
@@ -134,7 +139,7 @@ pub fn normalize(text: &str) -> Result<EventEnvelope, MiqiNormalizeError> {
 
     let event_type = map_event_type(&raw.event, raw.tool.as_deref(), raw.kind.as_deref())?;
     let mut envelope = EventEnvelope::new("miqi", event_type, &raw.timestamp_utc)
-        .with_capability_tier(CapabilityTier::Observed)
+        .with_capability_tier(CapabilityTier::Protected)
         .with_session_id(&raw.harness_session_id);
 
     if let Some(ref project_root) = raw.project_root {
@@ -297,7 +302,7 @@ mod tests {
             Some("D:\\work\\演示 项目")
         );
         assert_eq!(envelope.timestamp, "2026-10-12T09:00:00Z");
-        assert_eq!(envelope.capability_tier, Some(CapabilityTier::Observed));
+        assert_eq!(envelope.capability_tier, Some(CapabilityTier::Protected));
         assert_eq!(
             envelope.payload["miqi_event"],
             Value::String("SessionStart".to_owned())
