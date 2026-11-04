@@ -62,11 +62,13 @@
 //!
 //! [`Store::spend_allowance`]: crate::store::Store::spend_allowance
 //!
-//! **This is a statement about what SURE would do.** Both integrations are
-//! Observed (Tier 1), so nothing here establishes that a harness honours an
-//! allowance any more than it establishes that a harness honours a block. The
-//! sentence an allowance produces says *SURE would let this through*, and the
-//! limit is the same one every other answer in this module has.
+//! **This is a statement about what SURE would do.** For Cursor and Claude
+//! Code — Observed (Tier 1) — nothing here establishes that a harness honours
+//! an allowance any more than it establishes that a harness honours a block.
+//! MiQi is Protected (Tier 2) and enforces decisions in its own plugin, on the
+//! integration's own tests; even there the sentence an allowance produces says
+//! *SURE would let this through*, and what the harness then does is the
+//! harness's claim, not this module's.
 //!
 //! Since `P13-T010` the writer reads the settings as well as the words, because
 //! a grant is only worth recording where an act can be named at all: an act is
@@ -97,11 +99,14 @@
 //!
 //! # Capability tier honesty
 //!
-//! Both integrations are **Observed** (Tier 1) and neither can confirm the
+//! Cursor and Claude Code are **Observed** (Tier 1): neither can confirm the
 //! harness honours the answer, so what SURE has is a decision about what it
-//! would do, not a record of what the harness did. That is why a reason says
-//! *SURE does not allow it* rather than *it did not happen*: nothing in this
-//! build can establish the second sentence.
+//! would do, not a record of what the harness did. MiQi is **Protected**
+//! (Tier 2) — its plugin enforces a block before the action runs, which the
+//! integration documents and tests itself — and even there a sentence about
+//! the request says *SURE does not allow it* rather than *it did not happen*:
+//! the harness's enforcement is its own claim, and nothing SURE writes can
+//! establish it.
 
 use serde::{Deserialize, Serialize};
 use sure_domain::execution::{
@@ -541,13 +546,12 @@ fn miqi_tool_to_action_kind(tool: &str) -> ActionKind {
 ///
 /// # Capability tier honesty
 ///
-/// MiQi remains **Observed** (tier 1). v1 of the integration records events
-/// and the answers, and the harness does not act on a held decision yet: the
-/// fail-closed bridge that would make acting safe is a separate project with
-/// its own test matrix, and until that lands, reading a decision and not
-/// enforcing it is not protection. So this integration cannot honestly claim
-/// Protected (tier 2). The decision still uses the real mode and permissions
-/// so that the answer is truthful about what SURE would do.
+/// MiQi is **Protected** (tier 2). Its plugin calls this path with
+/// `--consent-owner harness` before a write or an execution and enforces a
+/// `block` answer; the integration documents and tests that enforcement itself
+/// (its real-SURE matrix and end-to-end tests). The decision still uses the
+/// real mode and permissions so that the answer is truthful about what SURE
+/// would do, and the harness's enforcement remains its own claim.
 #[must_use]
 pub fn decide_miqi_tool(
     request: &ToolRequest<'_>,
@@ -865,9 +869,10 @@ const FORCE_PUSH_CONSEQUENCE: &str = "This would replace commits that were alrea
 
 /// The half of a named-danger block that is the same for all three.
 ///
-/// It says what SURE answers rather than what the harness did. Both integrations
-/// are Observed (Tier 1), so a sentence claiming the command was stopped would
-/// be a false green.
+/// It says what SURE answers rather than what the harness did. Whether a
+/// harness enforces the answer is the harness's own claim — Cursor and Claude
+/// Code are Observed, MiQi is Protected on its own tests — so a sentence
+/// claiming the command was stopped would be a false green.
 const DANGER_TAIL: &str = " A harness hook cannot ask you about this, so SURE does not allow it.";
 
 /// The half of the sentence a spent allowance produces that is the same for all
@@ -1625,9 +1630,9 @@ const STRICT_ALLOWS: &str = "Strict protection does not hold this: it is not a d
 /// The half of a strict-mode block that is the same for every area.
 ///
 /// It says what the mode does — *asks you about this* — rather than what the
-/// harness did. Both integrations are Observed (Tier 1), so what SURE has is an
-/// answer, and a sentence claiming the action was prevented would be a false
-/// green.
+/// harness did. Whether a harness enforces the answer is the harness's own
+/// claim, so what SURE has is an answer, and a sentence claiming the action
+/// was prevented would be a false green.
 const STRICT_TAIL: &str = " Strict protection asks you about this, and a harness hook cannot ask \
      you, so SURE does not allow it.";
 

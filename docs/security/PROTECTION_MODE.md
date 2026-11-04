@@ -52,10 +52,14 @@ remove working code. An allowed request carries the sentence it was allowed
 with, so a decision with no sentence means no request was put to the rule at all
 — a lifecycle event, not a verdict on a tool.
 
-**The answer is advisory in this release.** Both integrations are capability
-tier 1 (Observed) and their manifests do not confirm that the harness interprets
-or enforces the response, so a decision states what SURE *would* do and not what
-the harness did. Nothing in this build can establish the second sentence.
+**Whether the answer is advisory depends on the integration.** Cursor and
+Claude Code are capability tier 1 (Observed): their manifests do not confirm
+that the harness interprets or enforces the response, so a decision states what
+SURE *would* do and not what the harness did — nothing in this build can
+establish the second sentence for them. MiQi is **Protected** (tier 2): its
+plugin enforces a `block` answer before the action runs, and that claim is the
+integration's own, held to its own real-SURE test matrix and end-to-end tests
+(see `integrations/miqi/README.md`, and MiQi PR #1353 for the tests).
 
 ## Who owns consent
 
@@ -171,10 +175,12 @@ from its own rule table. That is the fail-closed direction on purpose: an
 allowance answers a question a hook cannot ask, and it is not a way to run under
 settings the user did not change.
 
-Nothing here is a claim that a harness honours the answer. Both integrations are
-tier 1 (Observed) and a spent allowance produces a sentence saying SURE **would**
-let that one request through; whether anything then runs is not something this
-build can confirm — see the paragraph above.
+For Cursor and Claude Code — capability tier 1 (Observed) — nothing here is a
+claim that the harness honours the answer: a spent allowance produces a
+sentence saying SURE **would** let that one request through; whether anything
+then runs is not something this build can confirm. For MiQi — tier 2
+(Protected) — the harness documents and tests that it refuses the action a
+block names, which is that integration's claim and not this command's.
 
 `sure hook allow-once` is a command a **person** runs. Nothing a checked project
 can write and nothing an agent can say records an allowance: the grant is a row
