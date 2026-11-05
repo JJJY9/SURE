@@ -23,8 +23,11 @@ Required behavior (v0.1 reached tier 1; the protection release adds tier 2):
 - an event naming a tool SURE does not know fails closed (read as a shell);
 - protection: `exec` and the write-like tools ask before they run, through
   `sure hook ingest --consent-owner harness` (ADR 0020), and a `block` answer
-  becomes a refused tool call. The harness owns consent; SURE names only the
-  dangers it can read;
+  is enforced — a refused tool call, or, where the frame says
+  `allowance_reachable`, the harness's own approval card whose "allow once"
+  records the grant with `sure hook allow-once --consent-owner harness` and
+  spends it by replaying the request. Bypassed approvals keep the hard
+  refusal. The harness owns consent; SURE names only the dangers it can read;
 - SURE answering nothing, slowly, or unreadably must not silently disable
   protection: the integration's default is fail-open **and visible** (a
   warning plus an audit entry), and its strict switch fails closed instead.

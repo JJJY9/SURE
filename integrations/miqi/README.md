@@ -94,21 +94,38 @@ reading, and not a claim about what the tool does.
 
 MiQi is **Protected** (tier 2): its plugin asks before an action runs. For
 `exec` / `write_file` / `edit_file` / `apply_patch` it calls `sure hook ingest
---consent-owner harness` (ADR 0020), reads the machine frame, and turns a
-`block` answer into a refused tool call — SURE's sentence is what the model and
-the user see. Consent stays with MiQi's own approval flow: SURE judges only the
-dangers it can name (a broad delete, a force push, a read of credentials, and
-the strict mode's sensitive areas), while the execution-mode and consent
-outcomes are reported as warnings rather than enforced.
+--consent-owner harness` (ADR 0020), reads the machine frame, and enforces a
+`block` answer: either a refused tool call, or — for a danger the person's
+one-time allowance can answer — MiQi's own approval card. SURE's sentence is
+what the model and the user see. Consent stays with MiQi's own approval flow:
+SURE judges only the dangers it can name (a broad delete, a force push, a read
+of credentials, and the strict mode's sensitive areas), while the
+execution-mode and consent outcomes are reported as warnings rather than
+enforced.
+
+**A blocked danger can be answered by the person.** When the frame says
+`allowance_reachable`, MiQi offers the block as an approval card whose text is
+SURE's sentence and whose only affirmative is *allow once*. Approving records
+the grant with `sure hook allow-once --consent-owner harness --project
+<session> --tool <tool> (--command <words> | --path <path>)`, then re-runs
+`hook ingest` for the same request, which spends the grant — only then does the
+tool run. A session-wide or permanent grant is deliberately not offered,
+because SURE's allowance covers one exact request and not a standing
+permission. Where MiQi's approvals are bypassed — the all-bypass switch, or an
+auto/plan execution policy — the block stays a hard refusal: bypassing MiQi's
+prompts is not a decision to let SURE's danger rules through (MiQi PR #1355).
+An older MiQi that never passes the flag or never records an allowance still
+gets the hard refusal, which is the fail-closed reading.
 
 **The claim belongs to the integration and is earned there**, with its own
 tests: MiQi's repository carries a real-SURE matrix (`allow` / `warn` /
 `block`, argument forwarding, and the failure paths — missing SURE, timeout,
-refusal, an older build) and a real-LLM end-to-end test in which a blocked
-command surfaces as the tool's result (MiQi PR #1353). What this page records
-is the contract those tests hold MiQi to; whether a harness truly honours the
-answer remains the harness's own claim, not something SURE can observe from
-the outside.
+refusal, an older build) and real-LLM end-to-end tests — a blocked command
+surfaces as the tool's result (MiQi PR #1353), and the approval card records
+the one-time allowance and lets the command run (MiQi PR #1355). What this page
+records is the contract those tests hold MiQi to; whether a harness truly
+honours the answer remains the harness's own claim, not something SURE can
+observe from the outside.
 
 Failure policy is the integration's too: when SURE is missing, times out or
 refuses to answer, MiQi continues the call by default and says so (a warning,
