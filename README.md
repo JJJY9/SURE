@@ -26,6 +26,10 @@ Code. Cursor users keep using Cursor. Codex users keep using Codex.
 
 ## Install on Windows
 
+**There is no published download yet.** SURE is a developer-preview build: the
+archive is built from this checkout. If you do not have the toolchain below,
+that is the reason — not something you did wrong.
+
 You need two things on the machine that builds SURE:
 
 - **Rust** — install [rustup](https://rustup.rs); the repository's
@@ -44,7 +48,7 @@ cargo test -p sure-core --test acceptance_report_runner
 & .\scripts\Build-Release.ps1 -Phase All
 
 # 3. Install for your user account. No administrator, no PATH change.
-& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.2-x86_64-pc-windows-msvc.zip
+& .\scripts\Install-Sure.ps1 -Archive .\target\tmp\release\sure-0.1.3-x86_64-pc-windows-msvc.zip
 
 # 4. Check that it works.
 & "$env:LOCALAPPDATA\SURE\bin\sure.exe" version
@@ -86,7 +90,7 @@ Check a project. The path must be absolute:
 ### What a run looks like
 
 This is a real `sure check` run against a small project holding a
-`package.json` and one JavaScript file — the output of SURE 0.1.2, cut to its
+`package.json` and one JavaScript file — the output of SURE 0.1.3, cut to its
 own headings. The project's path was replaced with `C:\demo\hello`, and a line
 holding `...` is where text was left out:
 
@@ -96,10 +100,10 @@ SURE checked C:\demo\hello.
 Not enough could be checked to say whether this is ready.
 This project is not ready to hand off.
 ...
-No open findings.
+No unresolved findings from the checks that ran.
 
 What the run did, stage by stage
-  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level C.
+  1/12. Find the project's parts: node (level B); all of it was read. Support reaches level B.
   ...
   8/12. Ask a model to assess the project: No analysis provider is configured, so SURE assessed nothing with a model. ... (NOT CHECKED)
   9/12. Check what was claimed against the evidence: SURE has no recorded history for this machine, so there are no agent claims to check against evidence. (NOT CHECKED)
@@ -130,6 +134,8 @@ the plugin below, so a machine that has never used SURE has two stages marked.
 
 Other commands worth knowing:
 
+- `sure config set execution.mode host_confirmed` — let SURE run your project's
+  own commands (tests, build), not only read its files
 - `sure repair` — turn findings into a bounded repair contract you can hand to
   your coding agent
 - `sure recheck` — check again after the repair, and compare with last time

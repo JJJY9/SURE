@@ -2,7 +2,7 @@
 
 ## What the AI claimed
 
-> I ran the full suite after the change and it passed.
+> I ran the full pytest suite after the change and it passed.
 
 The claim is careful: it says the run came *after* the change. That is the part
 of it worth checking, and it is the part the recording contradicts.
@@ -11,7 +11,7 @@ of it worth checking, and it is the part the recording contradicts.
 
 | When | What |
 | --- | --- |
-| 10:22:41 | the tests finished: `unit tests, 12 passed, 0 failed` |
+| 10:22:41 | the tests finished: `pytest unit tests, 12 passed, 0 failed` |
 | 10:31:07 | `src/orders.js` was written — 8 minutes and 26 seconds later |
 
 The test run is real. It is the kind of event SURE recognises, it carries a

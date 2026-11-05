@@ -250,6 +250,21 @@ impl Scratch {
         store
     }
 
+    /// A `--settings-file` path with nothing at it.
+    ///
+    /// A named file that does not exist is [`ConfigSource::NoFile`] — SURE's
+    /// own answer for a user who has no settings file — so the default cases
+    /// read no user-level settings while the machine's real file is left alone.
+    /// The platform config directory cannot be moved by an environment variable,
+    /// and a suite that needed the developer's profile to be empty would be a
+    /// suite about the developer. The path is under the case's scratch
+    /// directory, outside the project.
+    ///
+    /// [`ConfigSource::NoFile`]: sure_core::config::ConfigSource::NoFile
+    fn absent_settings(&self) -> PathBuf {
+        self.path.join("no-user-settings.yaml")
+    }
+
     /// A settings file this case supplies, written where the case says.
     ///
     /// The path is the case's own `settings.file`, resolved inside the case's
@@ -473,19 +488,6 @@ fn assert_untouched(before: &MachineStore, case: &Value) {
     }
 }
 
-// --- the machine's own settings file ------------------------------------
-
-/// Where the user's own settings file is, on this machine.
-///
-/// Read through the same `Paths` the binary reads, so that the premise below is
-/// about the file a process would really load rather than about a guess at where
-/// it lives.
-fn user_settings_file() -> PathBuf {
-    Paths::discover()
-        .expect("this machine reports a per-user location for SURE's files")
-        .user_config_file()
-}
-
 // --- driving one case ---------------------------------------------------
 
 /// Run one case and return every way it failed, by name.
@@ -558,22 +560,24 @@ fn strings_from(values: &[&str]) -> Vec<String> {
 }
 
 /// The settings file a case supplies, written under its own scratch directory,
-/// or nothing.
+/// or the case's absent path when it supplies none.
 ///
-/// `None` means the run reads whatever the platform reports — the real file, on
-/// this machine — and that is what the default cases need: they are about a
-/// machine with no settings file of any kind, which
-/// [`no_settings_file_at_all_is_the_premise_the_binary_cases_run_under`] observes
-/// rather than assumes. A case that supplies one gets *that* file and says so in
-/// its own manifest entry, so the two kinds of case cannot be confused for each
-/// other by a reader or by this file.
+/// A case with no `settings` block is a default case: it is about a machine
+/// with no settings file of any kind. Naming a file that does not exist gives
+/// the run exactly that answer (`ConfigSource::NoFile`) on every machine,
+/// including one whose owner has a real file; without it the cases would be
+/// measuring the developer's profile. A case that supplies a file gets *that*
+/// file and says so in its own manifest entry, so the two kinds of case cannot
+/// be confused for each other by a reader or by this file.
 ///
 /// The path goes into the argument vector beside `--store-dir`, and nothing here
 /// sets an environment variable: the flag is the whole of the surface, which is
 /// what makes it a value a harness configuration cannot *set* — only put in a
 /// command line, where the inside-project refusal then judges it.
-fn settings_file_for(case: &Value, scratch: &Scratch) -> Option<PathBuf> {
-    let settings = case["settings"].as_object()?;
+fn settings_file_for(case: &Value, scratch: &Scratch) -> PathBuf {
+    let Some(settings) = case["settings"].as_object() else {
+        return scratch.absent_settings();
+    };
     let named = settings["file"]
         .as_str()
         .unwrap_or_else(|| panic!("{}: settings.file is not a path", case_id(case)));
@@ -583,7 +587,7 @@ fn settings_file_for(case: &Value, scratch: &Scratch) -> Option<PathBuf> {
     let file = scratch.settings(named);
     std::fs::write(&file, yaml)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", file.display()));
-    Some(file)
+    file
 }
 
 fn hook_ingest_case(case: &Value) -> Vec<String> {
@@ -599,10 +603,8 @@ fn hook_ingest_case(case: &Value) -> Vec<String> {
     // this is the order a harness launcher uses and the order the contract tests
     // the command line in.
     let mut args = Vec::new();
-    if let Some(file) = &settings {
-        args.push("--settings-file".to_owned());
-        args.push(file.to_string_lossy().into_owned());
-    }
+    args.push("--settings-file".to_owned());
+    args.push(settings.to_string_lossy().into_owned());
     args.extend(strings_from(&["--format", "json", "hook", "ingest"]));
     for argument in case["ingest"]["argv"]
         .as_array()
@@ -766,7 +768,13 @@ fn check_command_case(case: &Value) -> Vec<String> {
     // An absolute path, always: a relative one is refused as unfinished before
     // any of this is about privacy, and a case that quietly became a test of
     // stage one would still be green.
-    let mut args = vec!["check".to_owned(), project.to_string_lossy().into_owned()];
+    let settings = settings_file_for(case, &scratch);
+    let mut args = vec![
+        "--settings-file".to_owned(),
+        settings.to_string_lossy().into_owned(),
+        "check".to_owned(),
+        project.to_string_lossy().into_owned(),
+    ];
     if let Some(goal) = case["check"]["goal"].as_str() {
         args.push("--goal".to_owned());
         args.push(goal.to_owned());
@@ -1061,39 +1069,47 @@ fn every_case_binds_a_sentence_a_document_still_makes() {
 #[test]
 fn no_settings_file_at_all_is_the_premise_the_binary_cases_run_under() {
     // The premise of the recording cases, observed rather than assumed, and
-    // observed twice: this process reads the file, and `sure doctor` — the
-    // binary's own answer about the same location — reports whether it is there
+    // observed twice: the case's own settings path has no file at it, and `sure
+    // doctor` — the binary's own answer about the same path — reports it absent
     // and that the store the caller named is the one in use.
     //
-    // A machine whose owner has turned full recording on cannot answer the
-    // question "what does SURE do by default", and this fails loudly rather than
-    // passing on a premise that is not true. It is the same precondition
-    // `crates/sure-cli/tests/cli_contract.rs` states for the protection mode, for
-    // the same reason: the user's own file is one no test may write. `--settings-file`
-    // *can* move which file a run reads, which is how the consented case below
-    // runs at all (`a-full-recording-written-under-consent-is-redacted-on-disk`) —
-    // so the cases that do not name one are exactly the cases this premise is
-    // about, and the assertion at the end of this test is what keeps the two
-    // apart rather than the absence of a mechanism for moving it.
-    let settings = user_settings_file();
-    assert!(
-        !settings.is_file(),
-        "this machine has a user settings file at {}. The recording cases in this corpus are \
-         about the default — no settings file of any kind — and a file here would be answering \
-         instead. Read what it holds before believing anything below.",
-        settings.display()
-    );
-
+    // **Every default case names an absent file, and that is the point.** The
+    // platform config directory cannot be moved by an environment variable, so
+    // a suite that relied on the developer having no `sure.yaml` would be a
+    // suite about the developer's profile: it would refuse to run on a machine
+    // whose owner has any user setting at all, and say nothing extra on one that
+    // does not. A named file that does not exist is `ConfigSource::NoFile`, the
+    // same answer SURE gives a user with no file, so the cases measure the
+    // default on every machine. The consented case below names a real file
+    // instead, and the doctor fields asserted here are what keep the two kinds
+    // apart.
     let scratch = Scratch::new("doctor-settings-file");
     let store = scratch.store();
-    let run = run_sure(&store, &["--format", "json", "doctor"], None);
+    let settings = scratch.absent_settings();
+    assert!(
+        !settings.is_file(),
+        "{} exists, so a default case would be reading a settings file",
+        settings.display()
+    );
+    let settings_text = settings.to_string_lossy().into_owned();
+    let run = run_sure(
+        &store,
+        &[
+            "--settings-file",
+            &settings_text,
+            "--format",
+            "json",
+            "doctor",
+        ],
+        None,
+    );
     let answer = frame(&run, "sure doctor");
 
     assert_eq!(
         answer["details"]["places"]["settings_file"]["presence"].as_str(),
         Some("absent"),
         "`sure doctor` does not report the settings file this process just found to be missing, so \
-         the two of them disagree about which file the default is read from: {answer}"
+         the two of them disagree about which file a default case reads: {answer}"
     );
     let reported = PathBuf::from(
         answer["details"]["places"]["settings_file"]["path"]
@@ -1113,15 +1129,13 @@ fn no_settings_file_at_all_is_the_premise_the_binary_cases_run_under() {
         "the run did not use the store this test named, so the cases that name one are not the \
          mechanism they say they are: {answer}"
     );
-    // And the settings half of the same fact: this run named a store and no
-    // settings file, so the file it is about to read has to be reported as the
-    // platform's own. That is what tells the default cases here apart from the
-    // case that supplies one — an implementation that quietly defaulted to the
-    // last named settings file, or to a file this suite had written, would still
-    // satisfy every assertion above, and fails this one.
+    // The settings half of the same fact: the case named an absent file, so the
+    // binary has to report that path as the caller's rather than as the
+    // platform's. An implementation that quietly fell back to the platform file,
+    // or to a file this suite had written, would fail here.
     assert_eq!(
         answer["details"]["places"]["settings_location"].as_str(),
-        Some("platform"),
+        Some("caller"),
         "the run that named no settings file is reported as reading a file a caller named, so \
          either the default has moved or the report cannot tell the two apart: {answer}"
     );

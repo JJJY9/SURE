@@ -186,6 +186,14 @@ would suggest analysis is configured when it is not.
 A password inside `endpoint` is refused, and the value is never printed. Keep
 credentials in user-level configuration or an environment variable.
 
+Both layers may name these settings. A provider the checked project's own
+`sure.yaml` names is the one in force; when the project names none — the
+ordinary case for a project that never wrote the file — a provider your own
+settings file names is in force instead (`Authority::analysis`). Your layer is
+the one that can hand a behaviour to a run at all, and the rule follows it. A
+project cannot veto your provider by naming `disabled`: disabling is the
+absence of a request rather than a request.
+
 ### `project_intent`
 
 | Key | Type | Default | Accepted values |
@@ -332,11 +340,14 @@ in [CLI.md](CLI.md#sure-config-set-setting-value). What belongs here is which
 settings it will write and which it refuses, because that list is a fact about
 the schema rather than about the command.
 
-**It writes the eight settings a run reads from the user's own layer:**
+**It writes the nine settings a run reads from the user's own layer:**
 `execution.mode`, `execution.allow_dependency_install`, `execution.allow_network`,
 `execution.allow_project_write`, `privacy.full_recording`,
-`privacy.full_recording_retention_days`, `privacy.mode` and `protection.mode`.
-The accepted values for the four enums are the product's own `ALL` lists rather
+`privacy.full_recording_retention_days`, `privacy.mode`, `protection.mode` and
+`analysis.provider` (a provider the project's own file names is the one in
+force; yours is in force when the project names none — see the `analysis`
+section above).
+The accepted values for the enums are the product's own `ALL` lists rather
 than a second copy of them, so a mode added to a table above is a value the
 command accepts without anybody remembering to change it.
 
@@ -346,7 +357,7 @@ somewhere:**
 | Setting | Why it is not written |
 | --- | --- |
 | `privacy.telemetry` | nothing in this release implements telemetry — no code path sends usage data anywhere — so the setting could not take effect whatever it said. A file saying `telemetry: false` would look like a decision the person had made and be read by nothing |
-| `analysis.*` | the provider, endpoint and model are read from the checked project's own file. What the user's file decides about analysis is whether a project's request for an external provider is allowed at all |
+| `analysis.endpoint`, `analysis.model`, `analysis.command` | they are written by editing your settings file: this command writes settings that are a word, a flag or a number of days, and these are free text or a command list. `analysis.provider` is writable |
 | `project_intent.*` | the goal and the spec path are read from the project, and the place for the user's own words is `sure check --goal` |
 | `checks.*` | which optional checks run is read from the project, which may switch its own checks off |
 | `report.*` | the report format is decided by `--format` on the command line, and nothing reads this setting from any file |

@@ -13,7 +13,7 @@
     },
     "claim": {
       "id": "claim-unknown-evidence",
-      "claim_text": "I ran the suite and it passed.",
+      "claim_text": "I ran the pytest suite and it passed.",
       "claim_type": "test_ran",
       "timestamp": "2026-07-01T00:00:07Z"
     },
@@ -33,7 +33,7 @@
         "event_type": "test.finished",
         "timestamp": "2026-06-30T23:59:60Z",
         "payload": {
-          "target": "unit tests",
+          "target": "pytest unit tests",
           "success": true,
           "counts": {
             "passed": 12,
@@ -78,7 +78,7 @@
           "event_type": "test.finished",
           "timestamp": "2026-06-30T23:59:59Z",
           "payload": {
-            "target": "unit tests",
+            "target": "pytest unit tests",
             "success": true,
             "counts": {
               "passed": 12,

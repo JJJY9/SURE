@@ -1,0 +1,10 @@
+{
+  "event": "PostToolUse",
+  "harness_session_id": "c:s1",
+  "project_root": "D:\\work\\演示 项目",
+  "tool": "write_file",
+  "path": "D:\\work\\演示 项目\\src\\email\\send.rs",
+  "result": "ok",
+  "timestamp_utc": "2026-10-12T09:00:08Z",
+  "source": "miqi"
+}

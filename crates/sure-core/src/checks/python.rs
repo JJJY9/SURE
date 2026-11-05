@@ -467,11 +467,22 @@ impl PythonChecks {
         for &(role, check) in CHECKS {
             let id = check_id(&component, &format!("python{}", role.as_str()));
             let title = titled(role);
+            // The file this role's check points at. A tool named by its own
+            // config file names that file; a tool from a dependency table
+            // falls back to the manifest SURE read.
+            let declared_in = declared_in_for(project, role, &component);
             // **The plan, asked for once**, and both the line the reason carries
             // and the operation beside it are derived from it: `invocation_for`
             // is what `command_for` renders, so the row a report prints and the
             // program a runner would start cannot come from two decisions.
             let invocation = invocation_for(installer, role, &project.tooling);
+            // What the project declared for this role, when it declared a tool
+            // at all. The difference decides which sentence the report prints:
+            // "nothing declares this" versus "it declares a tool SURE cannot
+            // run".
+            let declared_for_role = tool_role(role)
+                .and_then(|wanted| project.tooling_of_role(wanted).next())
+                .map(|tool| tool.package);
 
             // The order is Node's and the reason is the same: *is the tool
             // declared* is asked before *can SURE tell where it lives*, because
@@ -482,19 +493,38 @@ impl PythonChecks {
                 (None, _) => checks.missing.push(MissingCommand::new(
                     id,
                     title,
-                    component.clone(),
+                    declared_in.clone(),
                     check.severity,
                     check.critical,
-                    gap_kind(project, role),
+                    match declared_for_role {
+                        Some(tool) => MissingKind::NotRunnable { tool },
+                        None => gap_kind(project, role),
+                    },
                 )),
                 (Some(_), Runner::Unknown { why }) => checks.missing.push(MissingCommand::new(
                     id,
                     title,
-                    component.clone(),
+                    declared_in.clone(),
                     check.severity,
                     check.critical,
                     MissingKind::NoRunner { why },
                 )),
+                // **The cross-layer invariant.** A command SURE's own safety
+                // classifier cannot read is refused under every mode, so a
+                // proposal carrying it could only become a check that runs
+                // nowhere and reports as the project's failure. The checks layer
+                // refuses it here instead; `tests/command_plan_conformance.rs`
+                // holds the same invariant over every ecosystem.
+                (Some(invocation), _) if !super::command_is_classifiable(&invocation) => {
+                    checks.missing.push(MissingCommand::new(
+                        id,
+                        title,
+                        declared_in.clone(),
+                        check.severity,
+                        check.critical,
+                        MissingKind::Unclassifiable,
+                    ))
+                }
                 (Some(invocation), _) => checks.proposed.push(PlannedWork::new(
                     CheckProposal::new(
                         id,
@@ -507,7 +537,7 @@ impl PythonChecks {
                         // answer.
                         EvidenceClass::DeterministicCheck,
                         CheckReason::DeclaredCommand {
-                            declared_in: component.clone(),
+                            declared_in,
                             // The rendered line, and only the rendered line: it is
                             // what a report prints, and the program that would run
                             // is the `CommandSpec` beside it. Nothing reads this
@@ -670,9 +700,28 @@ impl PythonChecks {
     }
 }
 
-/// The file SURE read this project from, or `None` when it read no manifest.
+/// The file a role's check points at.
 ///
-/// See [`PythonChecks::component`] for what this does and does not claim.
+/// A tool named by its own config file names that file; a tool from a
+/// dependency table falls back to the manifest SURE read. The check identifier
+/// still comes from [`component`], so adding `pytest.ini` to a project does not
+/// rename the check a previous run recorded.
+fn declared_in_for(project: &PythonProject, role: CommandRole, fallback: &str) -> String {
+    tool_role(role)
+        .and_then(|wanted| {
+            project
+                .tooling_of_role(wanted)
+                .find_map(|tool| tool.source.as_deref())
+        })
+        .map_or_else(|| fallback.to_owned(), display_path)
+}
+
+/// The file SURE read this project from, or `None` when nothing marks one.
+///
+/// See [`PythonChecks::component`] for what this does and does not claim. A
+/// project with no manifest and no requirements but a dedicated tool config
+/// (`pytest.ini`, `ruff.toml`, ...) falls back to that config, so its checks
+/// have a component instead of disappearing.
 fn component(project: &PythonProject) -> Option<String> {
     if project.manifest.project().is_some() {
         return Some(crate::discover::python::MANIFEST.to_owned());
@@ -684,6 +733,12 @@ fn component(project: &PythonProject) -> Option<String> {
         .requirements
         .first()
         .map(|file| display_path(&file.path))
+        .or_else(|| {
+            project
+                .tooling
+                .iter()
+                .find_map(|tool| tool.source.as_deref().map(display_path))
+        })
 }
 
 /// Why there is no command for a role, told apart from a project that declares
@@ -755,7 +810,7 @@ mod tests {
     use super::*;
     use crate::discover::python::{
         InstallerEvidence, InstallerFinding, ManifestState, PyProject, Requirement,
-        RequirementsFile, Tooling,
+        RequirementsFile, Tooling, ToolingEvidence,
     };
     use crate::planned_work::CheckOperation;
     use serde_json::json;
@@ -851,6 +906,8 @@ mod tests {
                 // Empty is what a root project's own tools carry; see
                 // `Tooling::from`.
                 from: "".into(),
+                source: None,
+                evidence: ToolingEvidence::Dependency,
             })
             .collect()
     }
@@ -1424,6 +1481,39 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_from_a_config_file_names_that_file_in_the_reason() {
+        let mut project = project(
+            json!({ "project": { "name": "demo" } }),
+            &[("pytest", ToolRole::TestRunner)],
+        );
+        project.tooling[0].source = Some(PathBuf::from("pytest.ini"));
+
+        let checks = checks_of(&project);
+        match work_for(&checks, CommandRole::Test).proposal().reason() {
+            CheckReason::DeclaredCommand {
+                declared_in,
+                command,
+            } => {
+                assert_eq!(declared_in, "pytest.ini");
+                assert_eq!(command, "python -m pytest");
+            }
+            other => panic!("a declared test check carries {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_only_project_has_a_component_and_is_not_silent() {
+        let mut project = project(
+            json!({ "project": { "name": "demo" } }),
+            &[("pytest", ToolRole::TestRunner)],
+        );
+        project.manifest = ManifestState::Absent;
+        project.tooling[0].source = Some(PathBuf::from("pytest.ini"));
+
+        assert_eq!(component(&project).as_deref(), Some("pytest.ini"));
+    }
+
+    #[test]
     fn a_declared_tool_becomes_a_check_carrying_its_own_line_and_its_own_identity() {
         // What a proposal has to be for the rest of the product to work: a
         // command a person can read before it runs, a reason naming the file
@@ -1445,7 +1535,10 @@ mod tests {
         let checks = checks_of(&found);
         assert_eq!(checks.planned().len(), 2, "{:?}", checks.missing());
         assert_eq!(command_of(&checks, CommandRole::Test), "uv run pytest");
-        assert_eq!(command_of(&checks, CommandRole::Lint), "uv run ruff");
+        assert_eq!(
+            command_of(&checks, CommandRole::Lint),
+            "uv run ruff check ."
+        );
 
         for proposal in proposals(&checks) {
             assert_eq!(
@@ -1504,8 +1597,8 @@ mod tests {
         let checks = checks_of(&a_complete_project());
         let expected: &[(CommandRole, &str, &[&str])] = &[
             (CommandRole::Test, "uv", &["run", "pytest"]),
-            (CommandRole::Lint, "uv", &["run", "ruff"]),
-            (CommandRole::TypeCheck, "uv", &["run", "mypy"]),
+            (CommandRole::Lint, "uv", &["run", "ruff", "check", "."]),
+            (CommandRole::TypeCheck, "uv", &["run", "mypy", "."]),
             // `setuptools` is a library rather than a command, so the plan is
             // the frontend's own subcommand.
             (CommandRole::Build, "uv", &["build"]),

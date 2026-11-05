@@ -207,12 +207,21 @@ fn copy_tree(from: &Path, to: &Path) {
 ///
 /// Under `target/tmp`, which the repository's `.gitignore` already covers, so a
 /// test killed before its cleanup leaves nothing for `git status` to report. The
-/// path carries a space and a non-ASCII character, which is the discipline
-/// `CLAUDE.md` asks for and `rust_checks.rs` established: a rule that happens to
-/// work on ordinary paths should fail here rather than on a user's.
+/// **project** path carries a space and a non-ASCII character, which is the
+/// discipline `CLAUDE.md` asks for and `rust_checks.rs` established: a rule that
+/// happens to work on ordinary paths should fail here rather than on a user's.
+///
+/// The build directory is a separate, ASCII path. `rustc` writes its scratch
+/// objects there, and the GNU linker this fork is built with on Windows cannot
+/// open objects under a non-ASCII path (measured: the same project builds with
+/// an ASCII `CARGO_TARGET_DIR` and fails with a Chinese one). The project path
+/// — what SURE reads, fingerprints and starts the commands in — is still the
+/// Unicode one, so the product behaviour under test is unchanged; only the
+/// compiler's own scratch output moved.
 struct CopyOfFixture {
     shipped: PathBuf,
     copy: PathBuf,
+    build: PathBuf,
 }
 
 impl CopyOfFixture {
@@ -234,16 +243,32 @@ impl CopyOfFixture {
             .join("target")
             .join("tmp")
             .join("sure 指纹 rust-fixture")
-            .join(unique);
+            .join(&unique);
+        let build = sure_testkit::repository_root()
+            .join("target")
+            .join("tmp")
+            .join("sure-rust-target")
+            .join(&unique);
         let _ = std::fs::remove_dir_all(&copy);
+        let _ = std::fs::remove_dir_all(&build);
         std::fs::create_dir_all(&copy)
             .unwrap_or_else(|error| panic!("cannot create {}: {error}", copy.display()));
+        std::fs::create_dir_all(&build)
+            .unwrap_or_else(|error| panic!("cannot create {}: {error}", build.display()));
         copy_tree(&shipped, &copy);
-        Self { shipped, copy }
+        Self {
+            shipped,
+            copy,
+            build,
+        }
     }
 
     fn path(&self) -> &Path {
         &self.copy
+    }
+
+    fn build_path(&self) -> &Path {
+        &self.build
     }
 
     fn shipped_path(&self) -> &Path {
@@ -266,6 +291,7 @@ impl Drop for CopyOfFixture {
     fn drop(&mut self) {
         // Failing to clean up must not turn a passing test into a failing one.
         drop(std::fs::remove_dir_all(&self.copy));
+        drop(std::fs::remove_dir_all(&self.build));
     }
 }
 
@@ -471,7 +497,7 @@ fn run_the_checks(copy: &CopyOfFixture) -> Run {
     let state = project_fingerprint(copy.path(), &FingerprintOptions::default())
         .unwrap_or_else(|error| panic!("cannot fingerprint {}: {error}", copy.path().display()))
         .id;
-    let build_directory = copy.path().join("cargo-target");
+    let build_directory = copy.build_path().to_path_buf();
 
     let mut results = Vec::new();
     let mut ran = Vec::new();
@@ -804,8 +830,12 @@ fn the_failing_half_fails_only_the_test_check_and_is_not_ready() {
         "a build directory appeared in the shipped fixture"
     );
     assert!(
-        copy.path().join("cargo-target").is_dir(),
-        "cargo wrote nothing to the copy, so the run cannot be the one that was measured"
+        copy.build_path().is_dir(),
+        "cargo wrote nothing to the build directory, so the run cannot be the one that was measured"
+    );
+    assert!(
+        !copy.path().join("cargo-target").exists() && !copy.path().join("target").exists(),
+        "cargo wrote build output into the project copy"
     );
 }
 

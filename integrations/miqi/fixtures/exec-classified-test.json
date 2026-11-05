@@ -1,0 +1,10 @@
+{
+  "event": "ExecClassified",
+  "harness_session_id": "c:s1",
+  "timestamp_utc": "2026-10-20T07:30:00Z",
+  "source": "miqi",
+  "project_root": "D:\\work\\演示 项目",
+  "kind": "test",
+  "target": "unittest",
+  "success": true
+}

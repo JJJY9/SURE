@@ -1,0 +1,10 @@
+{
+  "event": "ExecClassified",
+  "harness_session_id": "c:s1",
+  "project_root": "D:\\work\\演示 项目",
+  "timestamp_utc": "2026-10-27T02:00:00Z",
+  "source": "miqi",
+  "kind": "dependency",
+  "target": "npm install",
+  "success": true
+}

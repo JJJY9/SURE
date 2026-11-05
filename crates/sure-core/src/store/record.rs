@@ -61,8 +61,13 @@ pub const ALLOWANCE: &str = "allowance";
 
 /// The name [`RecordKind::Decision`] is stored under.
 ///
-/// A constant for the same reason the other three are.
+/// A constant for the same reason the other four are.
 pub const DECISION: &str = "decision";
+
+/// The name [`RecordKind::Acknowledgement`] is stored under.
+///
+/// A constant for the same reason the other five are.
+pub const ACKNOWLEDGEMENT: &str = "acknowledgement";
 
 /// One thing the store can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -129,6 +134,22 @@ pub enum RecordKind {
     /// approval is — it is about one request, and it hangs from the event that
     /// request produced.
     Decision,
+    /// A person's recorded decision to live with one finding (ADR 0019).
+    ///
+    /// **The sixth shape, and the first one that answers a finding.** A candidate
+    /// finding — one no check can settle — stays visible in every report, and
+    /// without a place for the person's verification to go, the run would read
+    /// `needs_attention` forever. This row is that place: it names the finding's
+    /// cross-run identity (title, anchor location, locator), the finding id it
+    /// was made from, a required reason and when it was made.
+    /// [`crate::acknowledgement`] is what is in the document.
+    ///
+    /// Its own kind rather than a [`Self::Decision`] for the reason above: the
+    /// two readers decode different shapes, and an acceptance is not about a
+    /// protected request. It is written to the **user-level** store and never to
+    /// the checked project, because the project is editable by the agent whose
+    /// work is being judged (ADR 0011).
+    Acknowledgement,
 }
 
 impl RecordKind {
@@ -149,6 +170,7 @@ impl RecordKind {
         RecordKind::Approval,
         RecordKind::Allowance,
         RecordKind::Decision,
+        RecordKind::Acknowledgement,
     ];
 
     /// The stable name, used as the value of the `kind` column.
@@ -160,6 +182,7 @@ impl RecordKind {
             Self::Approval => APPROVAL,
             Self::Allowance => ALLOWANCE,
             Self::Decision => DECISION,
+            Self::Acknowledgement => ACKNOWLEDGEMENT,
         }
     }
 
@@ -183,6 +206,9 @@ impl RecordKind {
         if name == DECISION {
             return Some(Self::Decision);
         }
+        if name == ACKNOWLEDGEMENT {
+            return Some(Self::Acknowledgement);
+        }
         documents::ALL
             .iter()
             .copied()
@@ -192,19 +218,24 @@ impl RecordKind {
 
     /// The document this kind stores, if it stores one.
     ///
-    /// A recording, an approval, an allowance and a decision have no schema, and
-    /// this is where that shows: there is nothing to validate them against,
-    /// which is why the write path treats them separately rather than as a
-    /// document with a missing schema. **The absence is not a gap — none of the
-    /// four is a statement about a project in the protocol's sense.** A recording
-    /// is not a statement at all, and an approval, an allowance and a decision
-    /// are statements about SURE's own behaviour and authority, which
+    /// A recording, an approval, an allowance, a decision and an acknowledgement
+    /// have no schema, and this is where that shows: there is nothing to
+    /// validate them against, which is why the write path treats them separately
+    /// rather than as a document with a missing schema. **The absence is not a
+    /// gap — none of the five is a statement about a project in the protocol's
+    /// sense.** A recording is not a statement at all; an approval, an
+    /// allowance, a decision and an acknowledgement are statements about SURE's
+    /// own behaviour, authority and the user's own decisions, which
     /// `sure-protocol` does not describe.
     #[must_use]
     pub const fn document(self) -> Option<DocumentKind> {
         match self {
             Self::Document(kind) => Some(kind),
-            Self::Recording | Self::Approval | Self::Allowance | Self::Decision => None,
+            Self::Recording
+            | Self::Approval
+            | Self::Allowance
+            | Self::Decision
+            | Self::Acknowledgement => None,
         }
     }
 
@@ -230,6 +261,13 @@ impl RecordKind {
     #[must_use]
     pub const fn is_decision(self) -> bool {
         matches!(self, Self::Decision)
+    }
+
+    /// Whether this is a recorded acceptance of one finding rather than a
+    /// document.
+    #[must_use]
+    pub const fn is_acknowledgement(self) -> bool {
+        matches!(self, Self::Acknowledgement)
     }
 
     /// Whether SURE will write this as a record about a project.
@@ -464,20 +502,36 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_recorded_kinds_lack_a_schema() {
-        // The drift guard, and it has already done its job three times: adding
+    fn the_name_of_an_acknowledgement_is_the_name_of_nothing_else() {
+        // The same rule as the four names above. `"acknowledgement"` is the
+        // word a person would reach for, which is exactly why it has to be
+        // checked against every name that already exists.
+        for &kind in documents::ALL {
+            assert_ne!(kind.as_str(), ACKNOWLEDGEMENT);
+        }
+        assert_ne!(ACKNOWLEDGEMENT, RECORDING);
+        assert_ne!(ACKNOWLEDGEMENT, APPROVAL);
+        assert_ne!(ACKNOWLEDGEMENT, ALLOWANCE);
+        assert_ne!(ACKNOWLEDGEMENT, DECISION);
+    }
+
+    #[test]
+    fn only_the_five_recorded_kinds_lack_a_schema() {
+        // The drift guard, and it has already done its job four times: adding
         // `Approval` broke the version of this test that said `is_recording`,
-        // adding `Allowance` broke the version that said two, and adding
-        // `Decision` broke the version that said three. What it now pins is that
-        // the schema-less kinds are exactly the four that were chosen rather
-        // than the four that happened to be there.
+        // adding `Allowance` broke the version that said two, adding `Decision`
+        // broke the version that said three, and adding `Acknowledgement` broke
+        // the version that said four. What it now pins is that the schema-less
+        // kinds are exactly the five that were chosen rather than the five that
+        // happened to be there.
         for &kind in RecordKind::ALL {
             assert_eq!(
                 kind.document().is_none(),
                 kind.is_recording()
                     || kind.is_approval()
                     || kind.is_allowance()
-                    || kind.is_decision(),
+                    || kind.is_decision()
+                    || kind.is_acknowledgement(),
                 "{kind} disagrees with itself about whether it has a schema"
             );
         }
@@ -486,8 +540,8 @@ mod tests {
                 .iter()
                 .filter(|kind| kind.document().is_none())
                 .count(),
-            4,
-            "a fifth schema-less kind arrived without this test being read"
+            5,
+            "a sixth schema-less kind arrived without this test being read"
         );
     }
 

@@ -1,6 +1,8 @@
 # ADR 0015 — The support ceiling, on the measurements that were taken
 
-Status: Accepted
+Status: Accepted — **superseded by ADR 0017 (2026-10-23)**, which raised the
+ceiling to `Generic` once the `Revisit when` reading existed. The readings below
+remain the evidence record; this record's decision is no longer the ship state.
 
 Date: 2026-09-22
 
@@ -8,8 +10,8 @@ Implementation: **`P18-T012` took the readings and left `support::CEILING` where
 Three files carry the consequence: `crates/sure-core/src/support.rs`'s module comment no
 longer says the macOS and Linux legs have never run (they have), `crates/sure-core/tests/
 browser_probe.rs`'s walk covers every crate rather than one, and this record is the
-measurement ADR 0014's last consequence pointed forward to. The constant itself is
-unchanged: `pub const CEILING: SupportLevel = SupportLevel::InspectOnly;`
+measurement ADR 0014's last consequence pointed forward to. The constant itself was
+unchanged at the time; ADR 0017 is the later record that moves it.
 (`crates/sure-core/src/support.rs:180` — it was `:152` before this task rewrote the
 module comment above it).
 
@@ -130,7 +132,7 @@ it would cover into three parts that do not agree.**
 
 | case | what was measured | level B's claim |
 | --- | --- | --- |
-| Windows, Node project | `npm` resolves to `npm.cmd`, `InterpreterRequired`, not startable; the check is stopped by the classifier | **false** |
+| Windows, Node project | `npm` resolves to `npm.cmd`, `InterpreterRequired`, not startable; the check is stopped by the classifier (superseded for command checks on 2026-10-22 — see the amendment at the end) | **false** |
 | Windows, Rust project | the plan admits `cargo.exe`, the runner is reached under a user's grant | **reachable, not demonstrated end to end** |
 | macOS and Linux | the table answers `Executable` for a bare name, and `cargo test` is green on the leg | **the table says yes; no run of a project's check happened** |
 
@@ -218,3 +220,33 @@ A measurement shows a project's own declared check running to completion under t
 product's real runner and passing, on a machine whose platform the claim would cover. That
 is a reading this repository can take — it is a test that starts a real project command —
 and it is the reading this record is missing rather than a reading it refused.
+
+## Amendment — 2026-10-22: the first row's "stopped" is no longer the product path
+
+The table row *"Windows, Node project — `npm` resolves to `npm.cmd`,
+`InterpreterRequired`, not startable; the check is stopped by the classifier"* records the
+reading taken when this record was written. On 2026-10-22 the product runner gained a
+launcher for the package managers Windows installs as batch shims
+(`crates/sure-core/src/package_launcher.rs`; ADR 0014's amendment). When `node` and the
+manager's own shipped JavaScript entry (or the corepack dispatcher) are present, a bare
+`npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` check is started as
+`node <entry> <the plan's arguments>`; real runs on this workstation produced `pass` for a
+succeeding `npm`/`pnpm`/`yarn` test and `fail` (exit 1) for a failing one. (`bun.cmd` is
+not translated; the launcher's list is the managers above.) The resolver's answer is
+unchanged — `ProgramPath` still says `InterpreterRequired` — so the row's first half
+still describes the plan; its second half ("the check is stopped") no longer describes
+the product path.
+
+**`CEILING` does not move in this amendment, and moving it is now an open decision.**
+The launcher changes the first row; it is not the only row that has moved since this
+record was written. `sure-cli/tests/finished_declared_check.rs` (added by `4ec2e2d`,
+P19-T005) drives the CLI under `host_confirmed`, runs a real Rust fixture's declared
+`cargo test`, asserts the report row is `pass`, and is part of the `cargo test
+--workspace` run on all three CI legs (the `ci` run at `d618d23` is green on all three).
+That is the reading the *Revisit when* section
+above asked for. Whether it earns level B for every project and every kind of check is a
+decision that needs its own record and its own reasoning — the reading covers one
+ecosystem's declared command, and this amendment is a launcher correction, not that
+record. `CEILING` therefore stays `InspectOnly` until that decision is taken rather than
+because the measurement is missing.
+

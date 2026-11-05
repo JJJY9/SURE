@@ -155,11 +155,20 @@ impl From<StoreError> for RecordError {
     }
 }
 
-/// Turn a goal supplied on the command line into the requirement it is.
+/// Turn a goal supplied on the command line into the requirement(s) it is.
 ///
-/// The text is kept exactly as it arrived. The emptiness test trims, because
-/// `--goal "   "` is a goal with no words in it however it was spelled; the
-/// stored value does not, because trimming is already an edit.
+/// A goal written on one line is one requirement and keeps the exact text it
+/// arrived with. A goal written on several non-empty lines is several
+/// requirements, one per line: otherwise a goal whose first clause is
+/// implemented and whose second is not is matched as a whole, and the missing
+/// half never reaches the report. The first line keeps [`EXPLICIT_GOAL_ID`];
+/// the rest are `goal-2`, `goal-3`, ... so a report can name one line without
+/// colliding with another.
+///
+/// The emptiness test trims, because `--goal "   "` is a goal with no words in
+/// it however it was spelled; a single-line value is stored without trimming,
+/// because trimming is already an edit. Multi-line values are stored per line,
+/// trimmed of surrounding whitespace.
 ///
 /// # Errors
 ///
@@ -168,10 +177,30 @@ pub fn explicit_goal(goal: &str) -> Result<ProjectIntent, IntentError> {
     if goal.trim().is_empty() {
         return Err(IntentError::EmptyGoal);
     }
-    Ok(ProjectIntent::from_requirements(vec![
-        Requirement::new(EXPLICIT_GOAL_ID, goal, IntentSource::ExplicitUserGoal)
-            .with_raw_retained(true),
-    ]))
+    let lines: Vec<&str> = goal
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() <= 1 {
+        return Ok(ProjectIntent::from_requirements(vec![
+            Requirement::new(EXPLICIT_GOAL_ID, goal, IntentSource::ExplicitUserGoal)
+                .with_raw_retained(true),
+        ]));
+    }
+    let requirements = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let id = if index == 0 {
+                EXPLICIT_GOAL_ID.to_owned()
+            } else {
+                format!("{EXPLICIT_GOAL_ID}-{}", index + 1)
+            };
+            Requirement::new(id, *line, IntentSource::ExplicitUserGoal).with_raw_retained(true)
+        })
+        .collect();
+    Ok(ProjectIntent::from_requirements(requirements))
 }
 
 /// Write every requirement in an intent to the store, against one project state.
@@ -188,9 +217,9 @@ pub fn explicit_goal(goal: &str) -> Result<ProjectIntent, IntentError> {
 /// Each requirement is one row and one transaction, because the schema describes
 /// one requirement. An intent with several requirements can therefore be written
 /// in part if the store refuses somewhere in the middle, and the rows already
-/// written stay. Nothing in this build produces more than one — the explicit goal
-/// is a single requirement — and the multi-source work owned by a later task is
-/// where that has to be answered rather than here.
+/// written stay. A multi-line explicit goal produces one requirement per line,
+/// so a partial failure to write leaves the rows already written; the multi-source
+/// work owned by a later task is where that has to be answered rather than here.
 ///
 /// # Errors
 ///
@@ -239,6 +268,35 @@ mod tests {
     }
 
     #[test]
+    fn a_multiline_goal_becomes_one_requirement_per_line() {
+        let intent = explicit_goal(
+            "项目提供 add 函数
+
+让结算页支持优惠券
+",
+        )
+        .unwrap();
+        assert_eq!(intent.requirements.len(), 2);
+        assert_eq!(intent.requirements[0].id, EXPLICIT_GOAL_ID);
+        assert_eq!(intent.requirements[0].text, "项目提供 add 函数");
+        assert_eq!(intent.requirements[1].id, "goal-2");
+        assert_eq!(intent.requirements[1].text, "让结算页支持优惠券");
+        assert!(
+            intent
+                .requirements
+                .iter()
+                .all(|requirement| requirement.source == IntentSource::ExplicitUserGoal)
+        );
+    }
+
+    #[test]
+    fn a_single_line_goal_keeps_its_exact_text() {
+        let intent = explicit_goal("  keep the spaces  ").unwrap();
+        assert_eq!(intent.requirements.len(), 1);
+        assert_eq!(intent.requirements[0].text, "  keep the spaces  ");
+    }
+
+    #[test]
     fn the_same_goal_keeps_the_same_identifier_however_many_times_it_is_stated() {
         // The property the identifier is fixed for, and the one a per-invocation
         // identifier would break: two runs of `sure check --goal` in one project
@@ -276,7 +334,6 @@ mod tests {
         // want, which is exactly when losing the rest matters most.
         for goal in [
             "  keep the leading spaces  ",
-            "line one\nline two",
             "quotes \"inside\" and a trailing tab\t",
             "stop the nightly job from double-charging. It runs twice when the clock \
              changes, and the second charge is not refunded.",
@@ -288,6 +345,13 @@ mod tests {
                 "the goal was edited on the way in"
             );
         }
+
+        // A multi-line goal is several requirements; each line is kept as the
+        // user wrote it (surrounding whitespace trimmed).
+        let lines = explicit_goal("line one\n  line two  ").unwrap();
+        assert_eq!(lines.requirements.len(), 2);
+        assert_eq!(lines.requirements[0].text, "line one");
+        assert_eq!(lines.requirements[1].text, "line two");
     }
 
     #[test]

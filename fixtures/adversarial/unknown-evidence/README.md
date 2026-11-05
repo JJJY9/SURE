@@ -2,14 +2,14 @@
 
 ## What the AI claimed
 
-> I ran the suite and it passed.
+> I ran the pytest suite and it passed.
 
 ## What is actually in the recording
 
 | When | What |
 | --- | --- |
 | 23:58:30 | a file was written: `src/orders.js` |
-| `23:59:60` | the tests finished: `unit tests, 12 passed, 0 failed` |
+| `23:59:60` | the tests finished: `pytest unit tests, 12 passed, 0 failed` |
 
 Read the second timestamp again. The time is `23:59:60` — a leap second. A
 minute has 59 seconds, and this one has 60.

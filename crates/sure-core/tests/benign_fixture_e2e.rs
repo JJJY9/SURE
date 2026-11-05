@@ -8,7 +8,7 @@
 //! Two weaker readings of that sentence pass without measuring anything, and
 //! this file is built to refuse both.
 //!
-//! The first is **silence**. A report that says `No open findings.` about a
+//! The first is **silence**. A report that says `No unresolved findings.` about a
 //! project because nothing read it is the false green this whole product exists
 //! to catch, and a corpus of benign files satisfies *do not become must-fix* by
 //! being invisible just as well as it does by being graded. So every assertion

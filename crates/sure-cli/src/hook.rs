@@ -76,12 +76,13 @@ use sure_core::full_recording::{
 };
 use sure_core::harness_event::ingest_event_str;
 use sure_core::hook_protection::{
-    Assessment, Danger, ProtectionDecision, ToolRequest, acts_a_tool_could_be_held_for,
-    allowance_could_not_be_spent_reason, allowance_reason, allowance_unreadable_reason,
-    assess_claude_code_tool, assess_cursor_tool,
+    Assessment, ConsentOwner, Danger, ProtectionDecision, ToolRequest,
+    acts_a_tool_could_be_held_for_owner, allowance_could_not_be_spent_reason_for_owner,
+    allowance_reason, allowance_unreadable_reason, assess_claude_code_tool, assess_cursor_tool,
+    assess_miqi_tool,
 };
 use sure_core::ids::{EventId, FingerprintId};
-use sure_core::normalizer::{claude_code, codex, cursor};
+use sure_core::normalizer::{claude_code, codex, cursor, miqi};
 use sure_core::paths::Paths;
 use sure_core::protection_history::{DecisionRecord, NotRecorded, not_recorded_reason};
 use sure_core::session_event_store::SessionEventStore;
@@ -113,7 +114,11 @@ use crate::report::{Failed, HookAllowance, Report};
 #[must_use]
 pub fn run(action: &HookAction, named: Named<'_>) -> Report {
     match action {
-        HookAction::Ingest { source, event_kind } => {
+        HookAction::Ingest {
+            source,
+            event_kind,
+            consent_owner,
+        } => {
             let mut stdin = String::new();
             if let Err(error) = io::stdin().read_to_string(&mut stdin) {
                 return failed("SURE could not read standard input.", error.to_string());
@@ -127,7 +132,13 @@ pub fn run(action: &HookAction, named: Named<'_>) -> Report {
                 );
             }
 
-            run_ingest(source.as_deref(), event_kind.as_deref(), event_text, named)
+            run_ingest(
+                source.as_deref(),
+                event_kind.as_deref(),
+                consent_owner.as_deref(),
+                event_text,
+                named,
+            )
         }
         HookAction::AllowOnce {
             tool,
@@ -135,12 +146,14 @@ pub fn run(action: &HookAction, named: Named<'_>) -> Report {
             path,
             project,
             minutes,
+            consent_owner,
         } => run_allow_once(
             tool,
             command.as_deref(),
             path.as_deref(),
             project.as_deref(),
             *minutes,
+            consent_owner.as_deref(),
             named,
         ),
     }
@@ -201,8 +214,13 @@ fn run_allow_once(
     path: Option<&str>,
     project: Option<&Path>,
     minutes: u32,
+    consent_owner: Option<&str>,
     named: Named<'_>,
 ) -> Report {
+    let consent = match consent_owner_argument(consent_owner) {
+        Ok(consent) => consent,
+        Err(report) => return report,
+    };
     let Some(subject) = command.or(path) else {
         // clap asks for exactly one of `--command` and `--path`, so this is
         // unreachable from a command line; it is here because an answer is
@@ -238,20 +256,38 @@ fn run_allow_once(
         }
     };
 
-    run_allow_once_with_paths(tool, subject, &project_root, minutes, &paths)
+    run_allow_once_with_paths_for_owner(tool, subject, &project_root, minutes, &paths, consent)
 }
 
-/// [`run_allow_once`], with the locations already resolved.
-///
-/// The same split [`run_ingest`] has and for the same reason: what the command
-/// *decides* is testable against locations a test named, and the only part that
-/// reaches the machine's own files is the wrapper above.
+/// [`run_allow_once_with_paths_for_owner`] under SURE-owned consent — the
+/// answer a hook that cannot ask has always given, and what a test that does
+/// not name an owner means.
+#[cfg(test)]
 fn run_allow_once_with_paths(
     tool: &str,
     subject: &str,
     project_root: &str,
     minutes: u32,
     paths: &Paths,
+) -> Report {
+    run_allow_once_with_paths_for_owner(
+        tool,
+        subject,
+        project_root,
+        minutes,
+        paths,
+        ConsentOwner::Sure,
+    )
+}
+
+/// [`run_allow_once_with_paths`] under the consent owner the caller declared.
+fn run_allow_once_with_paths_for_owner(
+    tool: &str,
+    subject: &str,
+    project_root: &str,
+    minutes: u32,
+    paths: &Paths,
+    consent: ConsentOwner,
 ) -> Report {
     if !allowance::window_is_allowed(minutes) {
         return failed(
@@ -306,7 +342,8 @@ fn run_allow_once_with_paths(
     // answered as that, whatever the project says: it is the one refusal a user
     // can fix without looking at anything but the command line they typed.
     let (mode, permissions, protection) = load_execution_config(project_root, paths);
-    if let Some(reason) = allowance_could_not_be_spent_reason(tool, mode, &permissions, protection)
+    if let Some(reason) =
+        allowance_could_not_be_spent_reason_for_owner(tool, mode, &permissions, protection, consent)
     {
         return failed(
             "SURE will not record an allowance that no request could spend.",
@@ -354,7 +391,13 @@ fn run_allow_once_with_paths(
             // confirmation cannot name an act those settings make unreachable —
             // for the tool it is about. Non-empty, because the refusal above
             // returned on the empty answer.
-            acts: acts_a_tool_could_be_held_for(tool, mode, &permissions, protection),
+            acts: acts_a_tool_could_be_held_for_owner(
+                tool,
+                mode,
+                &permissions,
+                protection,
+                consent,
+            ),
         })),
         Err(error) => failed("SURE could not record the allowance.", error.to_string()),
     }
@@ -375,9 +418,21 @@ fn without_byte_order_mark(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
+fn consent_owner_argument(consent_owner: Option<&str>) -> Result<ConsentOwner, Report> {
+    match consent_owner {
+        None | Some("sure") => Ok(ConsentOwner::Sure),
+        Some("harness") => Ok(ConsentOwner::Harness),
+        Some(other) => Err(failed(
+            "SURE does not know that consent owner.",
+            format!("`{other}` is not a consent owner; use `sure` or `harness`."),
+        )),
+    }
+}
+
 fn run_ingest(
     source: Option<&str>,
     event_kind: Option<&str>,
+    consent_owner: Option<&str>,
     stdin: &str,
     named: Named<'_>,
 ) -> Report {
@@ -390,15 +445,20 @@ fn run_ingest(
             );
         }
     };
-    run_ingest_with_paths(source, event_kind, stdin, &paths)
+    run_ingest_with_paths(source, event_kind, consent_owner, stdin, &paths)
 }
 
 fn run_ingest_with_paths(
     source: Option<&str>,
     event_kind: Option<&str>,
+    consent_owner: Option<&str>,
     stdin: &str,
     paths: &Paths,
 ) -> Report {
+    let consent = match consent_owner_argument(consent_owner) {
+        Ok(consent) => consent,
+        Err(report) => return report,
+    };
     // Normalise based on source.
     let envelope = match source {
         Some("cursor") => match cursor::normalize(stdin) {
@@ -416,6 +476,14 @@ fn run_ingest_with_paths(
         // reason, in `crates/sure-core/src/normalizer/codex.rs` and in the table
         // in `integrations/codex/README.md`.
         Some("codex") => match codex::normalize(stdin) {
+            Ok(envelope) => envelope,
+            Err(error) => return failed("The event could not be normalised.", error.to_string()),
+        },
+        // MiQi's events are MiQi's own shape, sent from its plugin layer
+        // rather than from a shell launcher in a harness config file;
+        // `integrations/miqi/README.md` records the shape and what v1 of the
+        // integration does not send.
+        Some("miqi") => match miqi::normalize(stdin) {
             Ok(envelope) => envelope,
             Err(error) => return failed("The event could not be normalised.", error.to_string()),
         },
@@ -562,25 +630,36 @@ fn run_ingest_with_paths(
             // passing. `integrations/codex/README.md` records that limitation
             // and why the decision is advisory on this harness.
             Some("claude-code" | "codex") => {
-                assess_claude_code_tool(&request, mode, &permissions, protection)
+                assess_claude_code_tool(&request, mode, &permissions, protection, consent)
             }
+            Some("miqi") => assess_miqi_tool(&request, mode, &permissions, protection, consent),
             // `Some("cursor")`, and anything else: the match above has already
             // refused a source SURE does not know.
-            _ => assess_cursor_tool(&request, mode, &permissions, protection),
+            _ => assess_cursor_tool(&request, mode, &permissions, protection, consent),
         };
-        return Report::HookDecision(record_the_decision(
-            with_any_allowance(&assessment, &request, &project_root, paths),
-            assessment.danger,
-            request.tool,
-            &event_id,
-            &event_write,
-            &project_root,
-            paths,
-        ));
+        let decided = with_any_allowance(&assessment, &request, &project_root, paths);
+        let allowance_reachable = assessment.danger.is_some()
+            && decided.decision.decision
+                == sure_core::hook_protection::ProtectionDecisionKind::Block;
+        return Report::HookDecision {
+            decision: record_the_decision(
+                decided,
+                assessment.danger,
+                request.tool,
+                &event_id,
+                &event_write,
+                &project_root,
+                paths,
+            ),
+            allowance_reachable,
+        };
     }
 
     // For non-pre-tool-use events, report success.
-    Report::HookDecision(sure_core::hook_protection::ProtectionDecision::allow())
+    Report::HookDecision {
+        decision: sure_core::hook_protection::ProtectionDecision::allow(),
+        allowance_reachable: false,
+    }
 }
 
 /// A decision, and the one-time allowance it spent if it spent one.
@@ -628,6 +707,10 @@ fn with_any_allowance(
         decision,
         allowance: None,
     };
+    // A named danger is what a recorded allowance may answer — under either
+    // consent owner. Under `sure` a denied action names no danger at all; under
+    // `harness` it can, because the harness may run what SURE itself would not,
+    // and the person's allowance is the answer to that danger (ADR 0020).
     let (Some(danger), Some(subject)) = (assessment.danger, request.subject()) else {
         return unspent(assessment.decision.clone());
     };
@@ -757,6 +840,21 @@ fn persist_event_with_paths(
     session_store
         .persist(ingested, project_root, &fingerprint.id, event_id)
         .map_err(|e| e.to_string())?;
+
+    // 2026-10-20: an agent completion claim is also a Claim document, not only
+    // an event. claim_checker reads Claim documents, so without this call the
+    // event would be recorded and never checked (capture_agent_claim used to
+    // have no production caller at all). Best-effort: a malformed claim is
+    // ignored here — the event is already persisted and the hook's decision
+    // must not change because of it.
+    if ingested.envelope.event_type == sure_core::claim_capture::AGENT_CLAIM_EVENT_TYPE {
+        let _ = sure_core::claim_capture::capture_agent_claim(
+            ingested,
+            &store,
+            project_root,
+            &fingerprint.id,
+        );
+    }
 
     // Best-effort full recording. Failure must not affect the hook decision.
     //
@@ -901,6 +999,15 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
+    fn miqi_fixture(name: &str) -> String {
+        let path = repository_root()
+            .join("integrations")
+            .join("miqi")
+            .join("fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
     /// Locations for an event this test ingests, so that the row it produces
     /// lands in a store this test named rather than in the store on the machine
     /// running the suite.
@@ -967,11 +1074,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("cursor"),
             Some("pre-tool-use"),
+            None,
             &text,
             &store_of_our_own("cursor-pre-tool-use"),
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         // Default config is inspect_only, so Shell (ArbitraryCommand) is blocked.
@@ -989,11 +1097,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("cursor"),
             Some("session-start"),
+            None,
             &session_event_at(&text, &project),
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(
@@ -1003,12 +1112,84 @@ mod tests {
     }
 
     #[test]
+    fn miqi_agent_claim_is_captured_as_a_claim_document() {
+        // 2026-10-20: before this wiring, agent.claim events were persisted as
+        // events and never became Claim documents, so claim_checker always saw
+        // an empty claim list.
+        let text = miqi_fixture("agent-claim.json");
+        let (paths, project) = roots_and_project_of_our_own("miqi-agent-claim");
+        let report = run_ingest_with_paths(
+            Some("miqi"),
+            None,
+            None,
+            &session_event_at(&text, &project),
+            &paths,
+        );
+        assert!(matches!(report, Report::HookDecision { .. }), "{report:?}");
+
+        let store = Store::open(&paths, Path::new(&project)).expect("store");
+        let fingerprint = project_fingerprint(Path::new(&project), &FingerprintOptions::default())
+            .expect("fingerprint");
+        let claims =
+            sure_core::claim_checker::check_claims_in_store(&store, &project, &fingerprint.id)
+                .expect("claims");
+        assert_eq!(claims.len(), 1, "the claim was not captured: {claims:?}");
+        assert_eq!(claims[0].id, "claim-1");
+        assert_eq!(claims[0].claim_text, "ran cargo test; 42 passed");
+        assert_eq!(claims[0].claim_type, "test_ran");
+        // No test.* event was recorded, so the claim cannot be confirmed — the
+        // honest reading, not a pass.
+        assert_eq!(
+            claims[0].assessment,
+            sure_core::evidence::ClaimAssessment::CannotConfirm
+        );
+    }
+
+    #[test]
+    fn miqi_ingest_with_harness_owned_consent_warns_instead_of_blocking() {
+        // ADR 0020: a harness that asks its own user gets a warning where
+        // SURE's own hook blocks, and the default keeps blocking.
+        let text = miqi_fixture("pre-tool-use.json");
+        let (paths, project) = roots_and_project_of_our_own("miqi-consent-owner");
+        let event = session_event_at(&text, &project);
+
+        let sure = run_ingest_with_paths(Some("miqi"), Some("pre-tool-use"), None, &event, &paths);
+        let Report::HookDecision { decision: sure, .. } = sure else {
+            panic!("{sure:?}")
+        };
+        assert_eq!(sure.decision, ProtectionDecisionKind::Block);
+
+        let harness = run_ingest_with_paths(
+            Some("miqi"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &event,
+            &paths,
+        );
+        let Report::HookDecision {
+            decision: harness, ..
+        } = harness
+        else {
+            panic!("{harness:?}")
+        };
+        assert_eq!(harness.decision, ProtectionDecisionKind::Warn);
+        assert!(
+            harness
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("harness")),
+            "{:?}",
+            harness.reason
+        );
+    }
+
+    #[test]
     fn missing_source_fails() {
         // The four refusals below happen before SURE reaches a store at all —
         // there is nothing to read, nothing to normalise, nothing to record — so
         // they name none, which is also the honest statement that the store is
         // not what they are about.
-        let report = run_ingest(None, Some("pre-tool-use"), "{}", Named::default());
+        let report = run_ingest(None, Some("pre-tool-use"), None, "{}", Named::default());
         assert!(
             matches!(report, Report::Failed(_)),
             "expected Failed, got {report:?}"
@@ -1020,6 +1201,7 @@ mod tests {
         let report = run_ingest(
             Some("unknown"),
             Some("pre-tool-use"),
+            None,
             "{}",
             Named::default(),
         );
@@ -1034,6 +1216,7 @@ mod tests {
         let report = run_ingest(
             Some("cursor"),
             Some("pre-tool-use"),
+            None,
             "{not json",
             Named::default(),
         );
@@ -1045,7 +1228,13 @@ mod tests {
 
     #[test]
     fn empty_stdin_fails() {
-        let report = run_ingest(Some("cursor"), Some("pre-tool-use"), "", Named::default());
+        let report = run_ingest(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            None,
+            "",
+            Named::default(),
+        );
         assert!(
             matches!(report, Report::Failed(_)),
             "expected Failed, got {report:?}"
@@ -1059,11 +1248,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("claude-code"),
             Some("session-start"),
+            None,
             &session_event_at(&text, &project),
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(
@@ -1078,11 +1268,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             &text,
             &store_of_our_own("claude-code-pre-tool-use"),
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         // Default config is InspectOnly; Bash maps to ArbitraryCommand, which is
@@ -1105,6 +1296,7 @@ mod tests {
         let report = run_ingest(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             "{not json",
             Named::default(),
         );
@@ -1404,10 +1596,10 @@ mod tests {
         ];
 
         for (kind, json) in &events {
-            let report = run_ingest_with_paths(Some("claude-code"), Some(kind), json, &paths);
+            let report = run_ingest_with_paths(Some("claude-code"), Some(kind), None, json, &paths);
             if *kind == "pre-tool-use" {
                 let decision = match &report {
-                    Report::HookDecision(d) => d,
+                    Report::HookDecision { decision: d, .. } => d,
                     other => panic!("expected HookDecision for {kind}, got {other:?}"),
                 };
                 assert_eq!(
@@ -1421,7 +1613,7 @@ mod tests {
                 );
             } else {
                 let decision = match &report {
-                    Report::HookDecision(d) => d,
+                    Report::HookDecision { decision: d, .. } => d,
                     other => panic!("expected HookDecision for {kind}, got {other:?}"),
                 };
                 assert_eq!(
@@ -1630,9 +1822,9 @@ mod tests {
         ];
 
         for (kind, json, expected) in &events {
-            let report = run_ingest_with_paths(Some("cursor"), Some(kind), json, &paths);
+            let report = run_ingest_with_paths(Some("cursor"), Some(kind), None, json, &paths);
             let decision = match &report {
-                Report::HookDecision(d) => d,
+                Report::HookDecision { decision: d, .. } => d,
                 other => panic!("expected HookDecision for {kind}, got {other:?}"),
             };
 
@@ -1761,11 +1953,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("codex"),
             None,
+            None,
             &codex_event_at("session-start.json", &project.to_string_lossy()),
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Allow);
@@ -1787,11 +1980,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("codex"),
             None,
+            None,
             &codex_event_at("pre-tool-use.json", &project.to_string_lossy()),
             &paths,
         );
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
@@ -1815,9 +2009,9 @@ mod tests {
         value["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
         value["tool_name"] = serde_json::Value::String("update_plan".to_owned());
 
-        let report = run_ingest_with_paths(Some("codex"), None, &value.to_string(), &paths);
+        let report = run_ingest_with_paths(Some("codex"), None, None, &value.to_string(), &paths);
         let decision = match &report {
-            Report::HookDecision(d) => d,
+            Report::HookDecision { decision: d, .. } => d,
             other => panic!("expected HookDecision, got {other:?}"),
         };
         assert_eq!(decision.decision, ProtectionDecisionKind::Block);
@@ -1838,6 +2032,7 @@ mod tests {
         // behind: an event SURE cannot mean must not become evidence.
         let refused = run_ingest_with_paths(
             Some("codex"),
+            None,
             None,
             &codex_event_at("stop-not-mapped.json", &project_root),
             &paths,
@@ -1863,11 +2058,12 @@ mod tests {
         let accepted = run_ingest_with_paths(
             Some("codex"),
             None,
+            None,
             &codex_event_at("session-end.json", &project_root),
             &paths,
         );
         assert!(
-            matches!(accepted, Report::HookDecision(_)),
+            matches!(accepted, Report::HookDecision { .. }),
             "expected the mapped event to ingest, got {accepted:?}"
         );
 
@@ -1905,11 +2101,12 @@ mod tests {
             let report = run_ingest_with_paths(
                 Some("codex"),
                 None,
+                None,
                 &codex_event_at(name, &project_root),
                 &paths,
             );
             assert!(
-                matches!(report, Report::HookDecision(_)),
+                matches!(report, Report::HookDecision { .. }),
                 "{name} should have ingested, got {report:?}"
             );
         }
@@ -1975,7 +2172,7 @@ mod tests {
 
         // Handed over as-is it is not JSON, which is the failure `run()` exists
         // to avoid.
-        match run_ingest_with_paths(Some("codex"), None, &marked, &paths) {
+        match run_ingest_with_paths(Some("codex"), None, None, &marked, &paths) {
             Report::Failed(failure) => assert!(
                 failure.detail.contains("not valid JSON"),
                 "a byte-order mark should be the reason the payload is refused: {}",
@@ -1989,11 +2186,12 @@ mod tests {
         let report = run_ingest_with_paths(
             Some("codex"),
             None,
+            None,
             without_byte_order_mark(&marked),
             &paths,
         );
         assert!(
-            matches!(report, Report::HookDecision(_)),
+            matches!(report, Report::HookDecision { .. }),
             "the payload behind the mark should ingest, got {report:?}"
         );
         let store = Store::open(&paths, &project).expect("store opens");
@@ -2079,9 +2277,10 @@ mod tests {
         path: Option<&str>,
     ) -> (ProtectionDecisionKind, String) {
         let text = cursor_request_at(project, tool, path);
-        let report = run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), &text, paths);
+        let report =
+            run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
-            Report::HookDecision(decision) => (
+            Report::HookDecision { decision, .. } => (
                 decision.decision,
                 decision
                     .reason
@@ -2326,6 +2525,101 @@ mod tests {
         );
     }
 
+    /// **A harness-owned allowance answers a denied danger (ADR 0020).** With
+    /// the default `inspect_only` settings a shell request is denied before any
+    /// danger is read under SURE's own consent, and `allow-once` refuses to
+    /// record a grant nothing could spend. Under `--consent-owner harness` the
+    /// danger is named off the command line, the grant is recorded, and the
+    /// request it names spends it — while a second identical request is held
+    /// again.
+    #[test]
+    fn a_harness_owned_allowance_answers_a_denied_danger() {
+        let (project, paths) = a_project_with("harness-owned-allowance", "");
+        let project_root = project.to_string_lossy().into_owned();
+        let minutes = sure_core::allowance::DEFAULT_MINUTES;
+
+        // Under SURE's own consent nothing is reachable here, and the writer
+        // refuses rather than record a grant nothing could spend.
+        let refused = run_allow_once_with_paths_for_owner(
+            "exec",
+            "rm -rf build/",
+            &project_root,
+            minutes,
+            &paths,
+            ConsentOwner::Sure,
+        );
+        assert!(matches!(refused, Report::Failed(_)), "{refused:?}");
+
+        // Under the harness owner the same grant records: the danger is what
+        // the allowance answers, whichever refusal named it.
+        let recorded = run_allow_once_with_paths_for_owner(
+            "exec",
+            "rm -rf build/",
+            &project_root,
+            minutes,
+            &paths,
+            ConsentOwner::Harness,
+        );
+        assert!(matches!(recorded, Report::HookAllowance(_)), "{recorded:?}");
+
+        // The request the grant names spends it; the frame of the block that
+        // preceded it said the danger was answerable.
+        let text = cursor_shell_request_at(&project, "exec", "rm -rf build/");
+        let first = run_ingest_with_paths(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &text,
+            &paths,
+        );
+        let Report::HookDecision {
+            decision,
+            allowance_reachable,
+        } = &first
+        else {
+            panic!("expected HookDecision, got {first:?}");
+        };
+        assert_eq!(
+            decision.decision,
+            ProtectionDecisionKind::Allow,
+            "the allowance was not spent: {first:?}"
+        );
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some(allowance_reason(Danger::BroadDelete).as_str())
+        );
+        assert!(
+            !allowance_reachable,
+            "a spent allowance is not a held request"
+        );
+
+        // One request, one allowance: the next identical request is held again,
+        // and now the frame says an allowance could answer it.
+        let second = run_ingest_with_paths(
+            Some("cursor"),
+            Some("pre-tool-use"),
+            Some("harness"),
+            &text,
+            &paths,
+        );
+        let Report::HookDecision {
+            decision,
+            allowance_reachable,
+        } = &second
+        else {
+            panic!("expected HookDecision, got {second:?}");
+        };
+        assert_eq!(
+            decision.decision,
+            ProtectionDecisionKind::Block,
+            "{second:?}"
+        );
+        assert!(
+            allowance_reachable,
+            "a held danger must say an allowance can answer it: {second:?}"
+        );
+    }
+
     // --- the three dangers, and the one-time allowance that answers one -------
     //
     // Everything here runs through `run_ingest_with_paths` and
@@ -2358,9 +2652,10 @@ mod tests {
         command: &str,
     ) -> (ProtectionDecisionKind, String) {
         let text = cursor_shell_request_at(project, tool, command);
-        let report = run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), &text, paths);
+        let report =
+            run_ingest_with_paths(Some("cursor"), Some("pre-tool-use"), None, &text, paths);
         match &report {
-            Report::HookDecision(decision) => (
+            Report::HookDecision { decision, .. } => (
                 decision.decision,
                 decision
                     .reason
@@ -3110,11 +3405,12 @@ mod tests {
         let claude = run_ingest_with_paths(
             Some("claude-code"),
             Some("pre-tool-use"),
+            None,
             &claude_edit,
             &paths,
         );
         match &claude {
-            Report::HookDecision(decision) => assert_ne!(
+            Report::HookDecision { decision, .. } => assert_ne!(
                 decision.decision,
                 ProtectionDecisionKind::Allow,
                 "a request the settings in force refuse was allowed"

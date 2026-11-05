@@ -141,8 +141,11 @@ fn the_run(fixture: &Fixture) -> (Config, PipelineOutcome) {
         purpose: Purpose::Check,
         config: &config,
         execution: authority.execution(),
+        scan_excludes: &[],
         store: None,
         goal: None,
+        analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run();
@@ -232,6 +235,8 @@ fn a_runtime_result_reaches_the_human_and_the_machine_report() {
             color: false,
             schedule: Some(&run.schedule),
             run_report: Some(&run.report),
+            every_stage_ran: true,
+            no_project_found: false,
         },
     );
     assert!(

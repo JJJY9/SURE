@@ -41,7 +41,7 @@ project either: there is nothing here to fix.
 ## Why this matters more than it looks
 
 The tempting failure is quiet. A report that shows a capability line, a headline
-and "No open findings." reads as a clean bill of health. On a project nobody
+and "No unresolved findings." reads as a clean bill of health. On a project nobody
 described, it is not a clean bill of health — it is silence, and a reader takes
 it for a verdict on work SURE never saw the description of.
 

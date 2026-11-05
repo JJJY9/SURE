@@ -112,10 +112,11 @@ pub fn content_fingerprint(
         });
     }
 
-    let walked = scan(root, options.scan).map_err(|error| FingerprintError::Unreadable {
-        path: root.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let walked =
+        scan(root, options.scan.clone()).map_err(|error| FingerprintError::Unreadable {
+            path: root.to_path_buf(),
+            message: error.to_string(),
+        })?;
 
     // Everything the walk found, and the links it declined to follow, as one
     // list. Collected before anything is read so that the two sources can be

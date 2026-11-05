@@ -36,9 +36,11 @@
 //! `.exe` and nothing else, so a bare `npm` is not found on a machine where
 //! `npm.cmd` is on `PATH`; and a `.cmd` named *with* its extension does start,
 //! by starting a command interpreter to run the text inside it. A plan that
-//! wrote `npm` would plan a command that cannot start and would report a spawn
-//! failure where the truth is that this build will not run a batch file. A plan
-//! that wrote `npm run build` would be the thing this module exists to prevent.
+//! wrote `npm` holds a name this layer cannot start; the product runner may
+//! still start the work through the program the shim itself runs
+//! ([`crate::package_launcher`]), and every other shape reaches the same honest
+//! not-startable result. A plan that wrote `npm run build` would be the thing
+//! this module exists to prevent.
 //!
 //! [`ProgramPath`] is therefore a value with a question — *what is this name,
 //! on this machine?* — and [`Resolution`] is its answer, in four parts that are
@@ -65,8 +67,9 @@
 //! **It does not make a resolved path trustworthy.** A name found on `PATH` is
 //! a file on this machine that something else could replace between the plan and
 //! the run. Resolving early is about saying the *honest* thing — "there is an
-//! `npm.cmd` here and this build will not start it" rather than "there is no
-//! `npm`" — and not about pinning a program down.
+//! `npm.cmd` here and this build will not start that file" rather than "there
+//! is no `npm`" — and not about pinning a program down. The runner may still
+//! start what the shim itself runs; see [`crate::package_launcher`].
 //!
 //! **It does not search the current directory, and Windows would.** An empty
 //! element of `PATH` means *the current directory* to `CreateProcess`, so a
@@ -735,6 +738,10 @@ pub struct CommandSpec {
     working_directory: PathBuf,
     environment: Environment,
     limits: Limits,
+    /// The user named this argv in a commands file, rather than SURE reading it
+    /// from a manifest. The flag reaches enforcement as
+    /// `Classification::declared_by_user` and nowhere else.
+    user_declared: bool,
 }
 
 impl CommandSpec {
@@ -756,7 +763,21 @@ impl CommandSpec {
             working_directory: working_directory.into(),
             environment,
             limits,
+            user_declared: false,
         }
+    }
+
+    /// Mark this command as one the user named in a commands file.
+    #[must_use]
+    pub fn with_user_declared(mut self, user_declared: bool) -> Self {
+        self.user_declared = user_declared;
+        self
+    }
+
+    /// Whether the user named this argv themselves.
+    #[must_use]
+    pub const fn is_user_declared(&self) -> bool {
+        self.user_declared
     }
 
     /// The arguments, in the order the program will receive them.
@@ -1059,10 +1080,12 @@ impl Resolution {
     /// What the plan should name as the program, if it names one.
     ///
     /// The **found** name and not the name that was asked for. That is the whole
-    /// point of resolving at all: a plan that wrote `npm` would name a program
-    /// Windows cannot start, and the failure would arrive at run time as a spawn
-    /// error rather than at plan time as the truth — there is an `npm.cmd` here,
-    /// and this build will not run it.
+    /// point of resolving at all: a plan that wrote `npm` names a program this
+    /// layer cannot start, and the failure would arrive at run time as a spawn
+    /// error rather than at plan time as the truth — there is an `npm.cmd`
+    /// here, and this build will not run that file. (The product runner may
+    /// still start the program the shim itself runs; see
+    /// [`crate::package_launcher`].)
     #[must_use]
     pub fn program_name(&self) -> Option<&Path> {
         self.path()

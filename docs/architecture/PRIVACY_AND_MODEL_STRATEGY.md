@@ -140,11 +140,13 @@ exists to prevent.
 of its table of claims each witnessed by a test: "`sure doctor` never reads the
 settings file".
 
-`sure config show` is the natural third candidate and is **not implemented in
-this release** — it answers `not_yet`. When it is built it is the right place to
-print both layers and the arbitration between them; the check report states the
-answer for the run that was actually made, which is what ADR 0006's "before
-anything is sent" asks for.
+`sure config show` is the natural third candidate and is implemented in this
+release: it is the right place to print both layers and the arbitration between
+them, and it reads the settings rather than the doctor doing so. The analysis
+endpoint, model and command are shown only as *set* or *not set*; their values
+never reach the output, so the command can report what is in force without
+handling a secret. The check report still states the policy for the run that was
+actually made, which is what ADR 0006's "before anything is sent" asks for.
 
 ## Model use per run
 

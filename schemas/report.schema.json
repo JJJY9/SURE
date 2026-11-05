@@ -162,6 +162,7 @@
           "status",
           "next_action",
           "is_model_only",
+          "acknowledgeable",
           "evidence_anchors"
         ],
         "properties": {
@@ -188,6 +189,18 @@
           },
           "is_model_only": {
             "type": "boolean"
+          },
+          "acknowledgeable": {
+            "type": "boolean"
+          },
+          "accepted_record": {
+            "type": "integer"
+          },
+          "accepted_reason": {
+            "type": "string"
+          },
+          "accepted_at_ms": {
+            "type": "integer"
           },
           "evidence_anchors": {
             "type": "array",

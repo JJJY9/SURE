@@ -54,14 +54,15 @@
 //! [`Authority::permissions`] says what the configuration grants rather than what
 //! may happen.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use sure_domain::execution::{ConsentGrantor, ExecutionMode, ExecutionPermissions};
 use sure_domain::variants::variants;
 
-use super::values::{PrivacyMode, ProjectRequest, ProtectionMode};
-use super::{Config, ConfigError, LoadedConfig};
+use super::values::{AnalysisProvider, PrivacyMode, ProjectRequest, ProtectionMode};
+use super::{AnalysisConfig, Config, ConfigError, ErrorKind, LoadedConfig};
 use crate::full_recording::DEFAULT_FULL_RECORDING_RETENTION_DAYS;
+use crate::paths::compare::CaseSensitivity;
 
 /// One layer of configuration.
 ///
@@ -237,6 +238,8 @@ impl Authority {
     pub fn load(project_root: &Path, user_config: &Path) -> Result<Self, ConfigError> {
         let user = Config::load_file(user_config)?;
         let project = Config::load(project_root)?;
+        refuse_project_scan_excludes(&project)?;
+        validate_scan_excludes(&user)?;
         Ok(Self {
             user: user.source.is_file().then_some(user),
             project,
@@ -250,6 +253,29 @@ impl Authority {
     #[must_use]
     pub const fn new(user: Option<LoadedConfig>, project: LoadedConfig) -> Self {
         Self { user, project }
+    }
+
+    /// The paths the user asked the scan to leave out of this project.
+    ///
+    /// Read from the user's own settings file only. A project file that names
+    /// the section is refused at [`Authority::load`] rather than quietly
+    /// ignored: an exclusion narrows the evidence a finding could come from, and
+    /// the project being checked may be controlled by the AI whose work is under
+    /// evaluation (ADR 0011).
+    #[must_use]
+    pub fn scan_excludes(&self, project_root: &Path) -> Vec<PathBuf> {
+        let Some(user) = self.user.as_ref() else {
+            return Vec::new();
+        };
+        let case = CaseSensitivity::platform();
+        let project = project_root.to_string_lossy();
+        user.config
+            .scan
+            .exclude
+            .iter()
+            .filter(|(root, _)| crate::recheck_lifecycle::same_project_root(root, &project, case))
+            .flat_map(|(_, paths)| paths.iter().map(PathBuf::from))
+            .collect()
     }
 
     /// The project's settings.
@@ -596,6 +622,50 @@ impl Authority {
         )
     }
 
+    /// The analysis settings in force, arbitrated between the two files.
+    ///
+    /// # The rule
+    ///
+    /// A provider the project's own file names is the one in force — it is the
+    /// project's request, and whether that request can act is what
+    /// [`ProjectRequest::ExternalAnalysis`] and the user's grant settle.
+    /// When the project names none — the ordinary case for a project that
+    /// never wrote a `sure.yaml` — the user's own file may name one, and what
+    /// it names is in force. This is the one analysis question the user's file
+    /// *decides* rather than merely allows, and the layer order says why:
+    /// [`Layer::User`] is the most trusted layer, and it is the layer
+    /// [`Layer::can_grant`] says may hand a behaviour to a run at all.
+    ///
+    /// A project file cannot *veto* the user's own provider by naming
+    /// `disabled`: disabling is the absence of a request rather than a
+    /// request, and a layer that can grant nothing elsewhere in this module
+    /// cannot take anything away here either.
+    #[must_use]
+    pub fn analysis(&self) -> Resolved<AnalysisConfig> {
+        let names_analysis = |config: &Config| {
+            config.analysis.provider != AnalysisProvider::Disabled
+                || config.analysis.endpoint.is_some()
+                || config.analysis.model.is_some()
+                || config.analysis.command.is_some()
+        };
+        if names_analysis(&self.project.config) {
+            return Resolved {
+                value: self.project.config.analysis.clone(),
+                by: Some(Layer::Project),
+            };
+        }
+        match self.user() {
+            Some(user) if names_analysis(user) => Resolved {
+                value: user.analysis.clone(),
+                by: Some(Layer::User),
+            },
+            _ => Resolved {
+                value: AnalysisConfig::default(),
+                by: None,
+            },
+        }
+    }
+
     /// The privacy mode in effect: the stricter of the two layers.
     ///
     /// `fully_local` wins over `local_first` whichever layer wrote it, because
@@ -681,6 +751,58 @@ fn resolve<T: Copy>(
     }
 }
 
+/// Refuse a project's own `scan.exclude`: narrowing the scan is the person's
+/// decision, and a project file that could make SURE stop reading paths would be
+/// a way to hide evidence (ADR 0011).
+fn refuse_project_scan_excludes(project: &LoadedConfig) -> Result<(), ConfigError> {
+    let count: usize = project.config.scan.exclude.values().map(Vec::len).sum();
+    if count == 0 {
+        return Ok(());
+    }
+    Err(ConfigError::new(ErrorKind::NotAvailable {
+        name: "scan.exclude".to_owned(),
+        value: format!("{count} path(s)"),
+        explanation: "An exclusion narrows what SURE reads, and the project being checked \
+                          may be controlled by the AI whose work is under evaluation; a \
+                          project file that could exclude a path would be a way to hide the \
+                          evidence a finding would come from.",
+        instead: "Put the exclusion in your own SURE settings file, outside the project.",
+    })
+    .at_file(&project.searched))
+}
+
+/// The user's excludes name absolute project roots and project-relative paths.
+fn validate_scan_excludes(user: &LoadedConfig) -> Result<(), ConfigError> {
+    for (project, paths) in &user.config.scan.exclude {
+        let root = Path::new(project);
+        if !root.is_absolute() {
+            return Err(ConfigError::new(ErrorKind::BadValue {
+                name: Some(format!("scan.exclude[{project}]")),
+                value: project.clone(),
+                expected: vec!["an absolute path to a project root".to_owned()],
+                suggestion: None,
+            })
+            .at_file(&user.searched));
+        }
+        for path in paths {
+            let relative = Path::new(path);
+            if relative.as_os_str().is_empty()
+                || relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(ConfigError::new(ErrorKind::OutsideProject {
+                    name: format!("scan.exclude[{project}]"),
+                    value: path.clone(),
+                })
+                .at_file(&user.searched));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -734,6 +856,57 @@ privacy:
 analysis:
   provider: claude_cli
 ";
+
+    #[test]
+    fn the_users_own_analysis_provider_is_in_force_when_the_project_names_none() {
+        // 常规项目没有 sure.yaml:用户在自己文件里指定分析通道后,检查必须
+        // 真的用它——这是"用户直接指定"通道存在的原因(MiQi 面板场景)。
+        let authority = both(
+            "analysis:\n  provider: local_command\n  command: [\"echo\", \"x\"]\n",
+            "",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::LocalCommand);
+        assert_eq!(analysis.by, Some(Layer::User));
+    }
+
+    #[test]
+    fn a_projects_own_analysis_provider_wins_over_the_users() {
+        // 项目自己也指定时,项目值在效(用户层不静默改写项目所请求的通道;
+        // 请求能否行动另由 ExternalAnalysis 的授予决定)。
+        let authority = both(
+            "analysis:\n  provider: local_command\n",
+            "analysis:\n  provider: claude_cli\n",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::ClaudeCli);
+        assert_eq!(analysis.by, Some(Layer::Project));
+    }
+
+    #[test]
+    fn a_project_cannot_veto_the_users_analysis_by_naming_disabled() {
+        // disabled 是"没有请求"而不是请求;项目层在本模块里什么都授予不了,
+        // 自然也收不走用户赋予自己的东西。
+        let authority = both(
+            "analysis:\n  provider: local_command\n",
+            "analysis:\n  provider: disabled\n",
+        );
+        let analysis = authority.analysis();
+        assert_eq!(analysis.value.provider, AnalysisProvider::LocalCommand);
+        assert_eq!(analysis.by, Some(Layer::User));
+    }
+
+    #[test]
+    fn no_file_naming_analysis_keeps_the_default() {
+        let authority = both("", "");
+        assert_eq!(
+            authority.analysis().value.provider,
+            AnalysisProvider::Disabled
+        );
+        assert_eq!(authority.analysis().by, None);
+        let alone = project_only("");
+        assert_eq!(alone.analysis().by, None);
+    }
 
     #[test]
     fn a_project_file_cannot_grant_itself_anything() {
@@ -1369,5 +1542,81 @@ analysis:
         assert_eq!(authority.protection().by, Some(Layer::User));
         assert_eq!(authority.privacy_mode().value, PrivacyMode::FullyLocal);
         assert_eq!(authority.privacy_mode().by, Some(Layer::User));
+    }
+
+    #[test]
+    fn a_user_exclude_is_read_for_the_project_it_names() {
+        let dir = scratch_dir("scan-exclude-user");
+        let project_root = dir.join("project");
+        std::fs::create_dir_all(&project_root).expect("create the project directory");
+        let user_config = dir.join("sure.yaml");
+        std::fs::write(
+            &user_config,
+            format!(
+                "scan:\n  exclude:\n    '{}':\n      - out\n",
+                project_root.display()
+            ),
+        )
+        .expect("write the user's file");
+
+        let authority = Authority::load(&project_root, &user_config).expect("both files are valid");
+        assert_eq!(
+            authority.scan_excludes(&project_root),
+            vec![PathBuf::from("out")]
+        );
+        let elsewhere = dir.join("elsewhere");
+        assert!(
+            authority.scan_excludes(&elsewhere).is_empty(),
+            "another project's exclusions applied here"
+        );
+    }
+
+    #[test]
+    fn a_project_file_cannot_exclude_paths_from_the_scan() {
+        // An exclusion narrows the evidence a finding could come from, and the
+        // project may be controlled by the agent under evaluation (ADR 0011).
+        let dir = scratch_dir("scan-exclude-project");
+        let project_root = dir.join("project");
+        std::fs::create_dir_all(&project_root).expect("create the project directory");
+        std::fs::write(
+            project_root.join("sure.yaml"),
+            "scan:\n  exclude:\n    'not-even-a-project':\n      - src\n",
+        )
+        .expect("write the project's file");
+
+        let error = Authority::load(&project_root, &dir.join("absent-user.yaml"))
+            .expect_err("a project file excluded paths and the run continued");
+        let text = error.to_string();
+        assert!(text.contains("scan.exclude"), "{text}");
+        assert!(text.contains("your own SURE settings"), "{text}");
+    }
+
+    #[test]
+    fn a_users_exclude_that_names_a_relative_root_or_leaves_the_project_is_refused() {
+        let dir = scratch_dir("scan-exclude-invalid");
+        let project_root = dir.join("project");
+        std::fs::create_dir_all(&project_root).expect("create the project directory");
+        let user_config = dir.join("sure.yaml");
+
+        std::fs::write(
+            &user_config,
+            "scan:\n  exclude:\n    'relative/project':\n      - out\n",
+        )
+        .expect("write the user's file");
+        let error = Authority::load(&project_root, &user_config)
+            .expect_err("a relative project root was accepted");
+        assert!(error.to_string().contains("scan.exclude"), "{error}");
+
+        std::fs::write(
+            &user_config,
+            format!(
+                "scan:\n  exclude:\n    '{}':\n      - ../src\n",
+                project_root.display()
+            ),
+        )
+        .expect("write the user's file");
+        let error = Authority::load(&project_root, &user_config)
+            .expect_err("a path that leaves the project was accepted");
+        assert!(error.to_string().contains("scan.exclude"), "{error}");
     }
 }

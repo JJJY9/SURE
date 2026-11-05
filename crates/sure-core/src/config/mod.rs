@@ -34,6 +34,7 @@ pub use values::{
     RedactionConfig, ReportFormat, ScopeReduction,
 };
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -242,6 +243,29 @@ impl Default for ChecksConfig {
     }
 }
 
+/// What the scan reads, as a person decides it.
+///
+/// **Only the user's own settings file may fill this in.** An exclusion narrows
+/// what SURE looks at, and the project being checked may be controlled by the AI
+/// whose work is under evaluation (ADR 0011): a project file that could exclude
+/// `src/` would be a way to hide the evidence a finding would come from.
+/// [`Authority::load`](crate::config::authority::Authority::load) refuses a
+/// project file that names this section.
+///
+/// The excludes are keyed by project, because a person's reason for not reading
+/// `out/` in one repository says nothing about another. Paths are relative to
+/// the project root.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScanConfig {
+    /// Paths the user asked SURE not to read, keyed by project root.
+    ///
+    /// A matching project root's list names project-relative paths; naming a
+    /// directory leaves out everything inside it. The scan reports each excluded
+    /// path as a declared scope skip rather than dropping it silently.
+    pub exclude: BTreeMap<String, Vec<String>>,
+}
+
 /// How reports are written out.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -270,6 +294,8 @@ pub struct Config {
     pub report: ReportConfig,
     /// Extra redaction rules.
     pub redaction: RedactionConfig,
+    /// What the scan reads, as the person decided it.
+    pub scan: ScanConfig,
 }
 
 /// Where a [`LoadedConfig`] came from.

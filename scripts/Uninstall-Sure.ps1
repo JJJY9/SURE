@@ -241,7 +241,13 @@ Write-Step 'What this install created'
 $manifest = $null
 if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
     try {
-        $candidate = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+        # `-Encoding UTF8` because the manifest this reads was written as
+        # BOM-less UTF-8; Install-Sure.ps1's `Read-PreviousManifest` carries the
+        # measured account. Without it, 5.1's ANSI decode turns a non-ASCII
+        # install root into mojibake, the parse fails, and this catch — meant
+        # for a manifest someone edited — answers "no manifest" about one this
+        # install wrote, leaving every file it created in place.
+        $candidate = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     } catch {
         $candidate = $null
     }

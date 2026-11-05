@@ -5,16 +5,14 @@
 //! API over real directories, which is where the parts have to add up to a
 //! sentence a person can read and check.
 //!
-//! # What this file can and cannot observe today
+//! # What this file observes today
 //!
-//! `sure_core::support::CEILING` is [`SupportLevel::InspectOnly`], so **every
-//! project classifies as level C** and the composition `weakest(understood,
-//! CEILING)` cannot be told apart from the ceiling alone by anything here. That
-//! is stated rather than hidden: the tests below assert the level *and* the
-//! reason, the reason names the reading that was capped, and
-//! `weakest_picks_the_weakest_whatever_order_it_arrives_in` is what holds the
-//! fold until a check exists to make it observable from outside. The day
-//! `CEILING` rises, the level assertions here fail — which is what they are for.
+//! `sure_core::support::CEILING` is [`SupportLevel::Generic`] since ADR 0017
+//! (2026-10-23). A project discovery grades `generic` is reported at B with the
+//! reason below; a project discovery grades `inspect_only` stays C because the
+//! discovery, not the ceiling, set it. The tests assert the level *and* the
+//! reason, so a reworded sentence or a moved ceiling fails here rather than
+//! reaching a person unreviewed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -84,7 +82,7 @@ fn classification(discovery: &Discovery) -> (SupportLevel, String) {
 }
 
 #[test]
-fn a_project_sure_can_only_read_is_classified_inspect_only_and_says_why() {
+fn a_project_sure_can_read_is_classified_generic_and_says_why() {
     let fixture = Fixture::new("rust-only");
     fixture.write(
         "Cargo.toml",
@@ -92,22 +90,22 @@ fn a_project_sure_can_only_read_is_classified_inspect_only_and_says_why() {
     );
     let (level, reason) = classification(&fixture.discovery());
 
-    assert_eq!(level, SupportLevel::InspectOnly);
+    assert_eq!(level, SupportLevel::Generic);
     assert_eq!(
         level, CEILING,
         "no project may be classified above the ceiling"
     );
     // The whole sentence, pinned. It is the one a user reads, it has to do three
-    // things at once — name what was read and what it was graded, say why that
-    // reading is not the answer, and give the answer — and a reworded one is
-    // meant to fail here rather than reach a person unreviewed.
+    // things at once — name what was read and what it was graded, say what the
+    // level means including the consent and startability caveats, and give the
+    // answer — and a reworded one is meant to fail here rather than reach a
+    // person unreviewed.
     assert_eq!(
         reason,
-        "SURE read one stack here, rust, and graded it generic (B). That reading alone would be \
-         level B (generic), but SURE has not run this project's checks: it runs none unless you \
-         grant it, and it has only been shown to work on one platform. Level A needs meaningful \
-         deterministic checks and level B needs approved generic checks, so the project is at \
-         level C (inspect_only). SURE can look at this project's files, but cannot safely run it."
+        "SURE read one stack here, rust, and graded it generic (B). So the project is at level B \
+         (generic). SURE can find how this project is built and run when you allow it, and can run \
+         approved generic checks, but does not understand everything about it. A check whose \
+         command cannot be started is reported as not checked, not passed."
     );
 }
 
@@ -124,9 +122,9 @@ fn a_directory_sure_read_nothing_in_is_classified_inspect_only_without_claiming_
     // adds a clause here — see `nothing_was_found`.)
     assert_eq!(
         reason,
-        "SURE looked for JavaScript or TypeScript, Python and Rust here and found nothing it \
-         reads. So the project is at level C (inspect_only). SURE can look at this project's \
-         files, but cannot safely run it."
+        "SURE looked for JavaScript or TypeScript, Python, Rust, Go, .NET and Java here and \
+         found nothing it reads. So the project is at level C (inspect_only). SURE can look at \
+         this project's files, but cannot safely run it."
     );
 }
 
@@ -171,15 +169,13 @@ fn a_project_whose_stacks_agree_is_described_as_having_graded_all_of_them() {
     );
     let (level, reason) = classification(&fixture.discovery());
 
-    assert_eq!(level, SupportLevel::InspectOnly);
+    assert_eq!(level, SupportLevel::Generic);
     assert_eq!(
         reason,
-        "SURE read 2 stacks here — node and rust — and graded all of them generic (B). That \
-         reading alone would be level B (generic), but SURE has not run this project's checks: it \
-         runs none unless you grant it, and it has only been shown to work on one platform. Level \
-         A needs meaningful deterministic checks and level B needs approved generic checks, so \
-         the project is at level C (inspect_only). SURE can look at this project's files, but \
-         cannot safely run it."
+        "SURE read 2 stacks here — node and rust — and graded all of them generic (B). So the \
+         project is at level B (generic). SURE can find how this project is built and run when you \
+         allow it, and can run approved generic checks, but does not understand everything about \
+         it. A check whose command cannot be started is reported as not checked, not passed."
     );
 }
 

@@ -39,7 +39,9 @@ choose it.
 - enable full transcript recording;
 - keep recorded content for longer than the user allowed;
 - provide/override secret credentials as an authority bypass;
-- delete authoritative history.
+- delete authoritative history;
+- exclude paths from the scan (`scan.exclude` is read from the user's file only,
+  see below).
 
 If project config requests a privileged behavior, SURE treats it as a request requiring higher-authority approval.
 
@@ -124,6 +126,18 @@ not the answer to whether an action may run: that is
 cannot classify as needing its own consent in every mode. `Authority::execution()`
 is the two of them together — this set and the mode — so that a caller cannot
 take one from each file.
+
+### Scan exclusions
+
+`scan.exclude` is resolved from the user's own file alone: a map from project
+root to project-relative paths the scan should not read. An exclusion narrows
+the evidence a finding could come from, so it is the person's decision and not
+the project's — `Authority::load` refuses a project file that names it, and the
+scan records each excluded path as `SkipReason::UserExcluded` rather than
+dropping it silently. A project's own `.gitignore` is deliberately not used for
+this: repository membership is a different question from what a check should
+read, and a file the agent under evaluation can edit must not decide what SURE
+reads (ADR 0011).
 
 ### Restrictions: the stricter of the two wins
 

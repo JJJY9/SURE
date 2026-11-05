@@ -64,7 +64,11 @@ pub fn render_markdown(verdict: &ProjectVerdict) -> String {
     let open: Vec<_> = verdict.open_findings().into_iter().cloned().collect();
     out.push_str("## Findings\n\n");
     if open.is_empty() {
-        out.push_str("No open findings.\n\n");
+        if verdict.not_checked.is_empty() {
+            out.push_str("No unresolved findings.\n\n");
+        } else {
+            out.push_str("No unresolved findings from the checks that ran.\n\n");
+        }
     } else {
         let plain = render_findings(&open);
         for finding in &plain {
@@ -100,7 +104,7 @@ pub fn render_markdown(verdict: &ProjectVerdict) -> String {
         "- Could not run: {}\n",
         counts.error + counts.unknown
     ));
-    out.push_str(&format!("- Open findings: {}\n", open.len()));
+    out.push_str(&format!("- Unresolved findings: {}\n", open.len()));
 
     out
 }
@@ -208,7 +212,11 @@ pub fn render_html(verdict: &ProjectVerdict) -> String {
     out.push_str("<section id=\"findings\">\n");
     out.push_str("<h2>Findings</h2>\n");
     if open.is_empty() {
-        out.push_str("<p>No open findings.</p>\n");
+        if verdict.not_checked.is_empty() {
+            out.push_str("<p>No unresolved findings.</p>\n");
+        } else {
+            out.push_str("<p>No unresolved findings from the checks that ran.</p>\n");
+        }
     } else {
         let plain = render_findings(&open);
         out.push_str("<ul class=\"findings\">\n");
@@ -253,7 +261,7 @@ pub fn render_html(verdict: &ProjectVerdict) -> String {
         "<li>Could not run: {}</li>\n",
         counts.error + counts.unknown
     ));
-    out.push_str(&format!("<li>Open findings: {}</li>\n", open.len()));
+    out.push_str(&format!("<li>Unresolved findings: {}</li>\n", open.len()));
     out.push_str("</ul>\n");
     out.push_str("</section>\n");
 
@@ -501,8 +509,8 @@ mod tests {
         let md = render_markdown(&verdict);
         assert!(md.contains("# SURE Report"), "markdown must have headline");
         assert!(
-            md.contains("Open findings:"),
-            "markdown must mention open findings"
+            md.contains("Unresolved findings:"),
+            "markdown must mention unresolved findings"
         );
         assert!(
             md.contains("cannot confirm that it matches your original request"),
@@ -723,7 +731,7 @@ mod tests {
         let html = render_html(&verdict);
 
         assert!(
-            md.contains("No open findings."),
+            md.contains("No unresolved findings."),
             "markdown must say no findings: {md}"
         );
         assert!(
@@ -732,7 +740,7 @@ mod tests {
         );
 
         assert!(
-            html.contains("No open findings."),
+            html.contains("No unresolved findings."),
             "html must say no findings: {html}"
         );
         assert!(

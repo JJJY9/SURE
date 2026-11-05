@@ -182,6 +182,16 @@ pub const IGNORED_DIRECTORIES: &[IgnoreRule] = &[
         name: ".output",
         reason: SkipReason::BuildOutput,
     },
+    // A tool's run output. `Dream-RSI/open-dream-rsi` keeps every agent run
+    // under `.runtime/runs/<id>/`, including the HTML and JS each run renders;
+    // measured 2026-11-03, 115 of that project's 122 findings were anchors
+    // inside this tree, every one of them a page the tool generated. The name
+    // is the tool's own (a dotted directory), not one a project gives its
+    // source, and the whole subtree is rebuilt by running the tool again.
+    IgnoreRule {
+        name: ".runtime",
+        reason: SkipReason::BuildOutput,
+    },
     IgnoreRule {
         name: "DerivedData",
         reason: SkipReason::BuildOutput,
@@ -444,6 +454,9 @@ mod tests {
             (".eggs", SkipReason::Vendored),
             (".pytest_cache", SkipReason::Cache),
             (".mypy_cache", SkipReason::Cache),
+            // The tool's own run output (measured on Dream-RSI/open-dream-rsi,
+            // 2026-11-03: most of its findings came from `.runtime/runs/**`).
+            (".runtime", SkipReason::BuildOutput),
         ];
         for (name, reason) in cases {
             assert_eq!(
@@ -544,6 +557,9 @@ mod tests {
             "targets",
             "dist-old",
             "builder",
+            // A plain `runtime/` is a directory a project may have written
+            // itself; only the tool's dotted `.runtime` is its output.
+            "runtime",
             "Cargo.toml",
             "build.rs",
         ] {

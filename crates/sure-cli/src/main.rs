@@ -57,6 +57,7 @@ fn run(cli: &Cli) -> u8 {
     let named = Named {
         store: cli.store_dir.as_deref(),
         settings_file: cli.settings_file.as_deref(),
+        commands_file: cli.commands_file.as_deref(),
     };
     let report = cli.command.report(named);
     match cli.format.emit(&report) {
@@ -122,8 +123,18 @@ mod tests {
         // asked. `mcp` is in both: the table lists `sure mcp serve`, so the
         // grammar accepting it is not a command nobody documented.
         const DOCUMENTED: &[&str] = &[
-            "check", "recheck", "repair", "history", "doctor", "config", "hook", "explain", "mcp",
-            "protocol", "version",
+            "check",
+            "recheck",
+            "repair",
+            "acknowledge",
+            "history",
+            "doctor",
+            "config",
+            "hook",
+            "explain",
+            "mcp",
+            "protocol",
+            "version",
         ];
         let command = Cli::command();
         let parsed: Vec<&str> = command

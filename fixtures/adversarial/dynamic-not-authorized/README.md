@@ -41,7 +41,7 @@ check that disappears:
 Not enough could be checked to say whether this is ready.
 This project is not ready to hand off.
 ...
-Open findings: 1 Must fix.
+Unresolved findings: 1 Must fix.
 4 check(s) could not run or were skipped. 2 of them are critical. (run the tests, build the project)
 ```
 

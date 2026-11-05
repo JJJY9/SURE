@@ -93,6 +93,19 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", global = true, value_parser = a_settings_file)]
     pub settings_file: Option<PathBuf>,
 
+    /// Read user-declared check commands from FILE instead of planning a
+    /// discovered stack's checks. FILE must be an absolute path outside the
+    /// project.
+    ///
+    /// The file names a program and its arguments per role (`test`, `build`,
+    /// `lint`, `typecheck`); SURE never splits a shell string. This is for a
+    /// project whose build system SURE does not discover — a Makefile, a shell
+    /// script — where the person running SURE is the only one who can say what
+    /// command answers a role. A role the file omits is recorded as not
+    /// declared rather than silently dropped.
+    #[arg(long, value_name = "FILE", global = true, value_parser = a_commands_file)]
+    pub commands_file: Option<PathBuf>,
+
     /// The command to run.
     #[command(subcommand)]
     pub command: Command,
@@ -124,6 +137,15 @@ fn a_store_directory(text: &str) -> Result<PathBuf, String> {
 /// here: the project is not known until a command knows it, and it is
 /// [`sure_core::paths::Paths::ensure_settings_outside`]'s, called where it is.
 fn a_settings_file(text: &str) -> Result<PathBuf, String> {
+    sure_core::paths::settings_file(Path::new(text)).map_err(|error| error.to_string())
+}
+
+/// A commands file as a caller names it: absolute, or refused here.
+///
+/// The same location rule as a settings file, and the same reason: SURE cannot
+/// decide whether a relative path is inside the project until it has the
+/// project, so it refuses the relative path at the grammar.
+fn a_commands_file(text: &str) -> Result<PathBuf, String> {
     sure_core::paths::settings_file(Path::new(text)).map_err(|error| error.to_string())
 }
 
@@ -167,6 +189,55 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
+    /// Record that you reviewed a finding and accept the risk it describes.
+    ///
+    /// Only a finding no check can settle may be accepted (ADR 0019): a
+    /// candidate a scanner inferred, or a model opinion. A failing test, a
+    /// checker error and a check that did not run are defects and gaps to fix,
+    /// and SURE refuses to record them as accepted risks.
+    ///
+    /// The decision is written to your own store outside the project, so the
+    /// project — which the agent under judgement can edit — cannot add, remove
+    /// or soften one. It names the finding's evidence: if that evidence changes,
+    /// the acceptance stops applying and the finding comes back for review.
+    #[command(group(
+        clap::ArgGroup::new("acknowledge-action")
+            .required(true)
+            .multiple(false)
+    ))]
+    Acknowledge {
+        /// The project the finding belongs to. Default: the current directory.
+        path: Option<PathBuf>,
+
+        /// The finding id to accept, as `sure check` printed it (`fnd_…`).
+        #[arg(long, value_name = "ID", group = "acknowledge-action")]
+        finding: Option<String>,
+
+        /// A report written by `sure check --format json`, where the finding id
+        /// was printed.
+        ///
+        /// A plain `sure check` records nothing, so its finding ids exist only
+        /// in the report it printed. Name the file the report was written to and
+        /// the id resolves against it; without this flag the id is looked up in
+        /// this project's recorded findings, which `sure repair` and `sure
+        /// recheck` write.
+        #[arg(long, value_name = "FILE", requires = "finding")]
+        from: Option<PathBuf>,
+
+        /// Why you accepted it. Required with --finding, and recorded with the
+        /// decision so a reader later knows what was reviewed.
+        #[arg(long, value_name = "TEXT", requires = "finding")]
+        reason: Option<String>,
+
+        /// List what this project has accepted, and why.
+        #[arg(long, group = "acknowledge-action")]
+        list: bool,
+
+        /// Remove one recorded acceptance by its record id.
+        #[arg(long, value_name = "RECORD", group = "acknowledge-action")]
+        undo: Option<i64>,
+    },
+
     /// Look at what SURE has recorded.
     History {
         /// What to do with the history. Default: `list`.
@@ -191,9 +262,10 @@ pub enum Command {
         action: HookAction,
     },
 
-    /// Explain one recorded result in plain language.
+    /// Explain one recorded finding or check result in plain language.
     Explain {
-        /// The result to explain.
+        /// The finding id, check-result id, or store row. Default: the most
+        /// recent recorded finding; if none, the most recent check result.
         id: Option<String>,
     },
 
@@ -282,18 +354,22 @@ pub enum HistoryAction {
         #[arg(long, value_name = "PROJECT_ROOT")]
         project: Option<String>,
     },
-    /// Write the history out as JSON.
+    /// Write the history out as JSON (not implemented in this build).
     Export,
 }
 
 /// What `sure config` can be asked to do.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Show where SURE keeps its files on this machine.
+    /// Show where SURE keeps its files on this machine (not implemented in this build).
     Paths,
     /// Show the settings in effect and which layer each came from.
-    Show,
-    /// Report problems in the configuration without checking the project.
+    Show {
+        /// The project whose `sure.yaml` is read. Default: the user's own
+        /// settings only; the project layer is not read.
+        path: Option<PathBuf>,
+    },
+    /// Report problems in the configuration without checking the project (not implemented in this build).
     Validate,
     /// Write one setting into your own settings file, outside every project.
     ///
@@ -359,6 +435,19 @@ pub enum HookAction {
 
         /// The kind of event, as named by the harness.
         event_kind: Option<String>,
+
+        /// Who owns the consent a held request needs: `sure` (the default) or
+        /// `harness`.
+        ///
+        /// A harness that asks its own user declares `harness`: the
+        /// execution-mode and consent outcomes stop blocking (the decision is a
+        /// warning carrying what the engine said), and the danger rules are the
+        /// only ones that still block — including for a request the execution
+        /// mode or the permissions deny, which no one-time allowance may
+        /// answer. A hook that cannot ask keeps the default, where those
+        /// outcomes block.
+        #[arg(long, value_name = "OWNER")]
+        consent_owner: Option<String>,
     },
     /// Record a one-time allowance for one request SURE would otherwise hold.
     ///
@@ -374,9 +463,11 @@ pub enum HookAction {
     /// agent's output can say records an allowance, because a hook cannot ask a
     /// user for consent and this is that answer, given by a user, on purpose.
     ///
-    /// Both integrations are capability tier 1 (Observed): SURE records what it
-    /// would do, and cannot confirm what a harness does with the answer. See
-    /// `docs/security/PROTECTION_MODE.md`.
+    /// Under `--consent-owner harness` the allowance is the person's answer to
+    /// the danger a hook reported, whichever refusal named it — including one
+    /// the execution mode denied, because the harness may run what SURE itself
+    /// would not (ADR 0020). The default, `sure`, keeps the older answer: the
+    /// acts reachable are the ones a request SURE holds can reach.
     #[command(group(
         clap::ArgGroup::new("subject")
             .required(true)
@@ -395,6 +486,17 @@ pub enum HookAction {
         /// The path, exactly as the harness would send it.
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
+
+        /// Who owns the consent this allowance answers: `sure` (the default) or
+        /// `harness`.
+        ///
+        /// A harness that asks its own user declares `harness`: the act the
+        /// allowance answers is the danger the hook named, whether the engine
+        /// held the request for consent or denied it. The default keeps the
+        /// older answer, where only a held request is within an allowance's
+        /// reach.
+        #[arg(long, value_name = "OWNER")]
+        consent_owner: Option<String>,
 
         /// The project the allowance is for. Default: the current directory.
         ///
@@ -428,6 +530,7 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Recheck { .. } => "recheck",
             Self::Repair { .. } => "repair",
+            Self::Acknowledge { .. } => "acknowledge",
             Self::History { .. } => "history",
             Self::Doctor => "doctor",
             Self::Config { .. } => "config",

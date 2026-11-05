@@ -45,13 +45,10 @@
 //! starts it since `P18-T010`**: `sure-cli/src/check.rs` binds a
 //! `browser_driver::Browser` to the runner that carries a browser check out, and
 //! that file is the composition root — the layer allowed to know which
-//! implementations exist. What keeps this from moving `support::CEILING` is now
-//! the paragraph beside the ceiling rather than an absent caller: the ceiling
-//! rests on which platforms SURE has been shown to run project code on, and a
-//! new caller inside the product is not evidence about macOS or Linux. The
-//! measurement that could move it belongs to `P18-T012`, and the census that
-//! made this a deliberate edit rather than a quiet one is
-//! `tests/browser_probe.rs`'s rule five.
+//! implementations exist. A new caller inside the product is not evidence about
+//! macOS or Linux; the ceiling moved on 2026-10-23 on the tracked CLI reading
+//! (ADR 0017), not on a browser caller. The census that made this a deliberate
+//! edit rather than a quiet one is `tests/browser_probe.rs`'s rule five.
 //!
 //! **The count is five since `P15-T020`, and the fifth is the one that is not a
 //! way for the product to run anything.** `sure-testkit/src/source_manifest.rs`
@@ -67,10 +64,9 @@
 //! `nothing_depends_on_the_testkit_in_production` keeps out of the product, so
 //! no ship path reaches this line, and every caller gives it
 //! `sure_testkit::repository_root()` — the checkout it was compiled in, never a
-//! directory SURE was pointed at. `support::CEILING` rests on what this build can
-//! run on every platform it ships on rather than on whether a project command can
-//! run at all — the paragraph on the runner below says why — and this entry runs
-//! `git` over SURE's own tree besides.
+//! directory SURE was pointed at. The ceiling is B since ADR 0017; this entry's
+//! evidence is a read-only `git` call over SURE's own tree, not a project
+//! command, and it runs over SURE's own checkout besides.
 //!
 //! **Two: nothing outside [`MAY_NAME_A_PROCESS_REQUEST`] mentions
 //! [`ProcessRequest`].** This is the tightest of the three, and until `P3-T009`
@@ -119,24 +115,18 @@
 //! is here so that a reader can see it weakened rather than find a paragraph that
 //! still reads like the old one.
 //!
-//! **The ceiling did not move with it, and the reason is not "no product path
-//! reaches the runner" any more.** It is the measured platform asymmetry ADR 0014
-//! said `P18-T012` would settle, and that task has now measured it: a Node check
-//! whose only program on this machine is `npm.cmd` comes back
-//! `InterpreterRequired` from `planned_work.rs`'s `classify` rather than a
-//! command, a Rust project's runner *is* reached under a user's own grant while no
-//! test runs a project's check to completion on any platform, and the macOS and
-//! Linux legs — **which have run, and are green**; this paragraph said the
-//! opposite, which is one of the sentences `P18-T012` corrected — are green over
-//! tests that likewise run no project's check.
-//! Level B is one sentence and those three do not agree, so `support::CEILING`
-//! stays at `InspectOnly` with the reading beside it
-//! (`docs/adr/0015-support-ceiling-evidence.md` is the record), and
-//! `planned_check_runner.rs` still not being in [`THE_SPAWN_SITES`] is the one
-//! entry decision `P18-T007` did not change: it builds no `Command`, and the
-//! runner it names is `process::run`, which `request.rs` above already accounts
-//! for. The day a measurement shows a project's own check running to completion
-//! and passing, the reason beside the ceiling is what has to be replaced.
+//! **The ceiling is B since 2026-10-23, and the reason is the tracked reading
+//! rather than a product path alone (ADR 0017).** `finished_declared_check.rs`
+//! runs a real Rust project's declared `cargo test` through the CLI under
+//! `host_confirmed`, asserts `pass`, and runs on all three CI legs. The platform
+//! fact this paragraph used to weigh — a bare `npm` on Windows resolving to a
+//! `npm.cmd` batch file — still holds at the resolver, and the product runner
+//! answers it by starting the manager's own JavaScript entry
+//! (`crate::package_launcher`). `planned_check_runner.rs` still not being in
+//! [`THE_SPAWN_SITES`] is the one entry decision `P18-T007` did not change: it
+//! builds no `Command`, and the runner it names is `process::run`, which
+//! `request.rs` above already accounts for. The census is about which files may
+//! *name* a request, not about the ceiling.
 //!
 //! **Three: nothing outside [`MAY_NAME_A_SUPERVISOR`] mentions `Supervisor`.**
 //! This is the rule that carries the claim the second one used to carry. The
@@ -178,10 +168,9 @@
 //! **Predicted**: the day anything wires a `StartSmoke` up to `sure check`, this
 //! fails, and it should. **Two things have to move together at that moment**: a
 //! product path exists, so this list and the paragraphs above it are wrong; and
-//! `sure_core::support`'s ceiling of level C is a claim about what SURE can run,
-//! so `CEILING` and
-//! `the_ceiling_todays_build_claims_is_never_above_inspect_only` are in question
-//! in the same commit.
+//! `sure_core::support`'s ceiling is a claim about what SURE can run, so the
+//! constant and `the_ceiling_todays_build_claims_is_generic` are the other half
+//! of such a change.
 //!
 //! **The first failure, in `P18-T007`, was not this test.** The pipeline began
 //! handing admitted commands to the runner — the first product path to reach it —
@@ -201,11 +190,9 @@
 //! did not, and that is a decision rather than an omission: `support::CEILING`'s
 //! reason was rewritten in `P18-T007` to the platform argument rather than the
 //! absence of a caller, so *a caller exists now* is not evidence against it.
-//! **`P18-T012` took those measurements and the ceiling still did not move** —
-//! `docs/adr/0015-support-ceiling-evidence.md` is the record, and one sentence
-//! `P18-T007` wrote into the reason turned out to be false and was corrected
-//! there: the macOS and Linux legs have run, and are green. A reader who thinks a
-//! product path alone should move the ceiling should read the paragraph beside
+//! The ceiling moved to B on 2026-10-23 when the tracked three-platform CLI
+//! reading existed (ADR 0017), not because a caller appeared; a reader who thinks
+//! a product path alone should move the ceiling should read the paragraph beside
 //! the ceiling before changing it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -264,8 +251,8 @@ const THE_RUNNER: &str = "sure-core/src/process/";
 /// command the user configured for analysis; the planned-check runner can run
 /// only what `Enforcement::admitted` produced. The provider is still not reached
 /// from a product path in this release; **the planned-check runner is, since
-/// `P18-T007`**, and neither changes `support::CEILING` — the reason stands where
-/// the ceiling is rather than here, and it is no longer an absent caller.
+/// `P18-T007`**, and neither changes `support::CEILING` — the ceiling is B since
+/// ADR 0017 on the tracked three-platform reading, not on a caller.
 const MAY_NAME_A_PROCESS_REQUEST: &[&str] = &[
     THE_RUNNER,
     THE_SUPERVISOR,
@@ -306,12 +293,10 @@ const MAY_NAME_A_SUPERVISOR: &[&str] = &[THE_SUPERVISOR, THE_START_SMOKE];
 /// route was convenient.
 ///
 /// **What this entry does not do is move `support::CEILING`**, and a reader
-/// arriving from the failure message needs that sentence: the ceiling's reason is
-/// the measured platform asymmetry written beside it, `P18-T012` has now taken
-/// those measurements and the ceiling did not move, and
-/// `docs/adr/0015-support-ceiling-evidence.md` is the record. That a caller exists
-/// now is not evidence against a claim about where SURE has been shown to run a
-/// project's own check.
+/// arriving from the failure message needs that sentence: the ceiling moved to B
+/// on 2026-10-23 on the tracked CLI reading (ADR 0017), not because a caller
+/// exists. That a caller exists now is not evidence about where SURE has been
+/// shown to run a project's own check.
 ///
 /// Split from [`MAY_NAME_A_SUPERVISOR`] even though the first entry is the same
 /// file, because they are two rules that today share an entry and the failure

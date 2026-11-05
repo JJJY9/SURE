@@ -13,7 +13,7 @@
     },
     "claim": {
       "id": "claim-stale-test-evidence",
-      "claim_text": "I ran the full suite after the change and it passed.",
+      "claim_text": "I ran the full pytest suite after the change and it passed.",
       "claim_type": "test_ran",
       "timestamp": "2026-09-14T10:31:12.000Z"
     },
@@ -23,7 +23,7 @@
         "event_type": "test.finished",
         "timestamp": "2026-09-14T10:22:41.000Z",
         "payload": {
-          "target": "unit tests",
+          "target": "pytest unit tests",
           "success": true,
           "counts": {
             "passed": 12,
@@ -69,7 +69,7 @@
           "event_type": "test.finished",
           "timestamp": "2026-09-14T10:22:41.000Z",
           "payload": {
-            "target": "unit tests",
+            "target": "pytest unit tests",
             "success": true,
             "counts": {
               "passed": 12,

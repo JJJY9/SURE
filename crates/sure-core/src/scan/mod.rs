@@ -47,6 +47,14 @@
 //! ignore is not made uninteresting by being tracked. Reading those rules is a
 //! decision for a task that needs it, with its own evidence.
 //!
+//! **A nested checkout is not this project's content.** A directory carrying a
+//! `.git` entry is a repository or linked worktree of its own: a submodule, a
+//! nested clone, or an agent's `.claude/worktrees/<name>`. The walk records it
+//! as a [`SkipReason::VersionControl`] scope skip instead of scanning a second
+//! copy of the same source under a second path, which is how a real project's
+//! findings appeared twice on 2026-10-23. The root is never asked — the caller
+//! named it, and its own `.git` is the repository the scan is of.
+//!
 //! **It does not decide what anything is.** Finding `package.json` here does
 //! not mean the project is a Node project; that is P2-T004 onwards.
 //!
@@ -79,11 +87,12 @@ use sure_domain::variants::variants;
 
 use crate::paths::CaseSensitivity;
 
-/// How hard a scan is allowed to try.
+/// How a scan is bounded, and what it was told to leave out.
 ///
-/// Every field is a limit on work, and every limit that is reached is recorded
-/// as a [`Skipped`] rather than applied quietly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The limits are on work, and every limit that is reached is recorded as a
+/// [`Skipped`] rather than applied quietly. [`ScanOptions::exclude`] is not a
+/// limit but a person's decision, and it is recorded the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     /// How many levels below the root SURE will list.
     ///
@@ -107,6 +116,16 @@ pub struct ScanOptions {
     /// rules can be tested on one machine, exactly as
     /// [`crate::paths::is_within_case`] does for locations.
     pub case: CaseSensitivity,
+    /// Project-relative paths the person asked SURE not to read.
+    ///
+    /// **Only the user's own SURE settings produce these** (`scan.exclude` in the
+    /// user's configuration file, keyed by project root); a project file that
+    /// names the setting is refused when the configuration is loaded, because a
+    /// project that could exclude paths would be a project that can hide
+    /// evidence (ADR 0011). An excluded directory leaves out everything below
+    /// it, and the walk records each exclusion as [`SkipReason::UserExcluded`]
+    /// rather than dropping it silently.
+    pub exclude: Vec<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -117,6 +136,7 @@ impl Default for ScanOptions {
             max_depth: 32,
             max_entries: 200_000,
             case: CaseSensitivity::platform(),
+            exclude: Vec::new(),
         }
     }
 }
@@ -140,6 +160,13 @@ impl ScanOptions {
     #[must_use]
     pub const fn with_case(mut self, case: CaseSensitivity) -> Self {
         self.case = case;
+        self
+    }
+
+    /// The same options with paths the person asked not to read.
+    #[must_use]
+    pub fn with_exclude(mut self, exclude: Vec<PathBuf>) -> Self {
+        self.exclude = exclude;
         self
     }
 }
@@ -380,6 +407,26 @@ fn open_root(root: &Path) -> Result<PathBuf, ScanError> {
     }
 }
 
+/// Whether `dir` is a repository or linked worktree of its own.
+///
+/// A directory that carries a `.git` entry is a checkout, not content of the
+/// project above it: a nested clone, a submodule, or an agent's linked
+/// worktree (`.claude/worktrees/<name>` is the one that produced duplicate
+/// findings in a real project on 2026-10-23). Walking into it would scan a
+/// second copy of the same source as if it belonged here, and every finding
+/// would appear twice under two paths.
+///
+/// The root itself is never asked: the caller named it, and its own `.git` is
+/// the repository the scan is of.
+fn nested_checkout(dir: &Path) -> Option<String> {
+    match fs::symlink_metadata(dir.join(".git")) {
+        Ok(_) => {
+            Some("a nested repository or linked worktree is not this project's content".to_owned())
+        }
+        Err(_) => None,
+    }
+}
+
 /// The walk's own state. Separate from [`Scan`] so that the result type has no
 /// field a caller could reach mid-scan.
 struct Walk {
@@ -408,6 +455,28 @@ impl Walk {
         self.skipped.push(Skipped {
             path,
             reason: rule.reason,
+            detail: None,
+        });
+        true
+    }
+
+    /// Record a path the person's settings asked the scan to leave out.
+    ///
+    /// Answered before the ignore tables and before the link check: the decision
+    /// is the person's, and the report should say so rather than describing the
+    /// entry as vendored, a cache or a link.
+    fn excluded(&mut self, path: &Path) -> bool {
+        if !self
+            .options
+            .exclude
+            .iter()
+            .any(|exclude| path_is_within(path, exclude, self.options.case))
+        {
+            return false;
+        }
+        self.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: SkipReason::UserExcluded,
             detail: None,
         });
         true
@@ -481,6 +550,10 @@ impl Walk {
 
             let child_relative = relative.join(&name);
 
+            if self.excluded(&child_relative) {
+                continue;
+            }
+
             match kind {
                 None => self.skipped.push(Skipped {
                     path: child_relative,
@@ -500,6 +573,15 @@ impl Walk {
                     if self.ignored_by_name(&name, child_relative.clone(), EntryKind::Directory) {
                         continue;
                     }
+                    let child = dir.join(&name);
+                    if let Some(detail) = nested_checkout(&child) {
+                        self.skipped.push(Skipped {
+                            path: child_relative,
+                            reason: SkipReason::VersionControl,
+                            detail: Some(detail),
+                        });
+                        continue;
+                    }
                     self.entries.push(Entry {
                         path: child_relative.clone(),
                         kind: EntryKind::Directory,
@@ -511,7 +593,6 @@ impl Walk {
                             detail: None,
                         });
                     } else {
-                        let child = dir.join(&name);
                         self.visit(&child, &child_relative, depth + 1);
                     }
                 }
@@ -532,6 +613,20 @@ impl Walk {
             }
         }
     }
+}
+
+/// Whether `path` is `prefix` or inside it, under `case`.
+///
+/// Component-wise, so `out` excludes `out/` and `out/a.js` but never `output/`;
+/// and under the platform's case rule, so a Windows checkout matches whatever
+/// case its directories were given.
+fn path_is_within(path: &Path, prefix: &Path, case: CaseSensitivity) -> bool {
+    let prefix_len = prefix.components().count();
+    if prefix_len == 0 || path.components().count() < prefix_len {
+        return false;
+    }
+    let head: PathBuf = path.components().take(prefix_len).collect();
+    crate::paths::compare::same_path_case(&head, prefix, case)
 }
 
 #[cfg(test)]
@@ -652,5 +747,130 @@ mod tests {
                 entry.path.display()
             );
         }
+    }
+
+    #[test]
+    fn a_nested_checkout_is_skipped_as_version_control_and_not_scanned() {
+        let root = sure_testkit::scratch::directory("scan nested checkout", "nested worktree");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/main.rs"), b"").expect("main");
+        // A linked worktree: `.git` is a file pointing at the real repository.
+        fs::create_dir_all(root.join(".claude/worktrees/wt/src")).expect("worktree src");
+        fs::write(
+            root.join(".claude/worktrees/wt/.git"),
+            b"gitdir: ../../.git/worktrees/wt",
+        )
+        .expect("worktree .git");
+        fs::write(root.join(".claude/worktrees/wt/src/dup.rs"), b"").expect("dup");
+        // A nested clone: `.git` is a directory.
+        fs::create_dir_all(root.join("nested/.git")).expect("nested .git");
+        fs::write(root.join("nested/file.rs"), b"").expect("nested file");
+
+        let scan = scan(&root, ScanOptions::default()).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/main.rs"), "{paths:?}");
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(".claude/worktrees/wt")),
+            "the linked worktree was scanned: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("nested")),
+            "the nested clone was scanned: {paths:?}"
+        );
+
+        for path in [".claude/worktrees/wt", "nested"] {
+            let skip = scan
+                .skipped()
+                .iter()
+                .find(|skip| skip.path == Path::new(path))
+                .unwrap_or_else(|| panic!("{path} was not recorded: {:?}", scan.skipped()));
+            assert_eq!(skip.reason, SkipReason::VersionControl, "{path}");
+            assert!(skip.detail.is_some(), "{path}");
+        }
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
+    }
+
+    #[test]
+    fn a_path_the_person_excluded_is_recorded_as_a_scope_skip_and_not_scanned() {
+        // `scan.exclude` in the user's own settings: the decision is theirs, and
+        // the scan records it rather than dropping the path silently. A
+        // near-miss name (`output/`) stays in the scan — the exclusion is a
+        // path, not a pattern.
+        let root = sure_testkit::scratch::directory("scan user exclude", "excluded output");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/app.js"), b"const x = 1;\n").expect("src app");
+        fs::create_dir_all(root.join("out/assets")).expect("out");
+        fs::write(root.join("out/assets/bundle.js"), b"const y = 2;\n").expect("bundle");
+        fs::create_dir_all(root.join("output")).expect("output");
+        fs::write(root.join("output/own.js"), b"").expect("own");
+
+        let options = ScanOptions::default().with_exclude(vec![PathBuf::from("out")]);
+        let scan = scan(&root, options).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/app.js"), "{paths:?}");
+        assert!(
+            paths.iter().any(|path| path == "output/own.js"),
+            "a near-miss name stays in the scan: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("out/")),
+            "{paths:?}"
+        );
+        let skip = scan
+            .skipped()
+            .iter()
+            .find(|skip| skip.path == Path::new("out"))
+            .unwrap_or_else(|| panic!("the exclusion was not recorded: {:?}", scan.skipped()));
+        assert_eq!(skip.reason, SkipReason::UserExcluded);
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
+    }
+
+    #[test]
+    fn a_tools_run_output_directory_is_skipped_as_build_output_and_not_scanned() {
+        // Measured on Dream-RSI/open-dream-rsi (2026-11-03): the generated run
+        // tree under `.runtime/runs/<id>/` was read as project source and
+        // produced most of that report's findings. `.runtime` is BuildOutput; a
+        // plain `runtime/` directory a project wrote itself stays in the scan.
+        let root = sure_testkit::scratch::directory("scan runtime output", "run output");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(root.join("src/app.js"), b"export const x = 1;\n").expect("src app");
+        fs::create_dir_all(root.join(".runtime/runs/run-1")).expect(".runtime runs");
+        fs::write(
+            root.join(".runtime/runs/run-1/page.js"),
+            b"const status = 200;\n",
+        )
+        .expect("generated page");
+        fs::create_dir_all(root.join("runtime")).expect("runtime");
+        fs::write(root.join("runtime/engine.rs"), b"").expect("runtime engine");
+
+        let scan = scan(&root, ScanOptions::default()).expect("scan the fixture");
+        let paths: Vec<String> = scan.entries().iter().map(Entry::display_path).collect();
+        assert!(paths.iter().any(|path| path == "src/app.js"), "{paths:?}");
+        assert!(
+            paths.iter().any(|path| path == "runtime/engine.rs"),
+            "a project's own runtime/ stays in the scan: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with(".runtime")),
+            "the tool's run output was scanned: {paths:?}"
+        );
+        let skip = scan
+            .skipped()
+            .iter()
+            .find(|skip| skip.path == Path::new(".runtime"))
+            .unwrap_or_else(|| panic!(".runtime was not recorded: {:?}", scan.skipped()));
+        assert_eq!(skip.reason, SkipReason::BuildOutput);
+        assert!(
+            scan.is_complete(),
+            "a declared scope skip is not a loss of coverage"
+        );
     }
 }

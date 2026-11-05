@@ -519,6 +519,13 @@ pub enum Report {
     /// the person reading them has to be able to tell which one happened: a
     /// write, a no-op, and a refusal are not "worked" and "did not work".
     Settings(Box<SettingsChange>),
+    /// `sure acknowledge`, carrying the acceptance it recorded, the records it
+    /// listed or the one it removed (ADR 0019).
+    Acknowledge(Box<crate::acknowledge::AcknowledgeReport>),
+    /// `sure config show`, carrying the settings in effect and their layers.
+    ConfigShow(Box<crate::config_show::ConfigShowReport>),
+    /// `sure explain`, carrying one recorded finding or check result.
+    Explain(Box<crate::explain::ExplainReport>),
     /// A command whose work lands in a later phase.
     Unavailable(NotYet),
     /// A command that tried and did not finish.
@@ -526,7 +533,10 @@ pub enum Report {
     /// `sure hook ingest`, carrying a protection decision for a pre-action hook.
     ///
     /// The machine form is the decision JSON that the harness reads from stdout.
-    HookDecision(sure_core::hook_protection::ProtectionDecision),
+    HookDecision {
+        decision: sure_core::hook_protection::ProtectionDecision,
+        allowance_reachable: bool,
+    },
     /// `sure hook allow-once`, carrying the one-time allowance it recorded.
     ///
     /// Not a decision and not a setting: a grant the user made, on the command
@@ -615,6 +625,12 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => "ok",
                 SettingsOutcome::Refused { .. } => "failed",
             },
+            // A recorded, listed or removed acceptance is an answer about this
+            // machine's own store, like a history report and unlike a check: it
+            // says nothing about a project's problems. A refusal or a store that
+            // could not be written is a [`Self::Failed`], below.
+            Self::Acknowledge(_) => "ok",
+            Self::ConfigShow(_) | Self::Explain(_) => "ok",
             Self::Unavailable(_) => "unavailable",
             // A command that did not finish has not answered, and saying
             // `not_green` would read as "the project has problems" — which is a
@@ -622,7 +638,7 @@ impl Report {
             Self::Failed(_) => "failed",
             // A hook decision is an answer: the command ran and produced a result.
             // `not_green` for block because the answer is "do not proceed".
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow
                 | sure_core::hook_protection::ProtectionDecisionKind::Warn => "ok",
                 sure_core::hook_protection::ProtectionDecisionKind::Block => "not_green",
@@ -724,11 +740,17 @@ impl Report {
                 SettingsOutcome::Written | SettingsOutcome::AlreadySaid => exit::OK,
                 SettingsOutcome::Refused { .. } => exit::FAILED,
             },
+            // 0 for the three endings, including an `--undo` whose id named
+            // nothing of this kind: the question asked was *is that record
+            // gone*, and it is. A write or read that did not happen is a
+            // [`Self::Failed`] above, which is the ending that must never be 0.
+            Self::Acknowledge(_) => exit::OK,
+            Self::ConfigShow(_) | Self::Explain(_) => exit::OK,
             Self::Unavailable(_) => exit::UNAVAILABLE,
             Self::Failed(_) => exit::FAILED,
             // 0 for allow/warn so the launcher does not block the operation.
             // 1 for block so the launcher can relay the refusal.
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow
                 | sure_core::hook_protection::ProtectionDecisionKind::Warn => exit::OK,
                 sure_core::hook_protection::ProtectionDecisionKind::Block => exit::NOT_GREEN,
@@ -797,9 +819,14 @@ impl Report {
             // follows: there is nothing to file, and a person who piped the
             // output meant to read why.
             Self::Settings(change) => !matches!(change.outcome, SettingsOutcome::Refused { .. }),
+            // The same rule as a history report's: `sure acknowledge --list >
+            // accepted.txt` has to put the list in the file, and the sentence a
+            // write answers with is the whole of what the command was asked for.
+            Self::Acknowledge(_) => true,
+            Self::ConfigShow(_) | Self::Explain(_) => true,
             Self::Unavailable(_) | Self::Failed(_) => false,
             // A hook decision is an answer: the command ran and produced a result.
-            Self::HookDecision(_) => true,
+            Self::HookDecision { .. } => true,
             // The same, for the user's own command: `sure hook allow-once >
             // allowance.txt` has to put the sentence in the file, because the
             // sentence is the whole of what the command was asked for.
@@ -862,6 +889,12 @@ impl Report {
             // code that decided which of the three things happened rather than
             // in a renderer that has to reconstruct it.
             Self::Settings(change) => crate::settings::human(change, out),
+            // The command's own module renders it, for `settings`'s reason: the
+            // sentence that says what was recorded, listed or removed is the
+            // answer itself, and it belongs beside the code that decided which.
+            Self::Acknowledge(report) => crate::acknowledge::human(report, out),
+            Self::ConfigShow(report) => report.human(out),
+            Self::Explain(report) => report.human(out),
             Self::Failed(failure) => {
                 writeln!(
                     out,
@@ -899,7 +932,7 @@ impl Report {
                     exit::OK
                 )
             }
-            Self::HookDecision(decision) => match decision.decision {
+            Self::HookDecision { decision, .. } => match decision.decision {
                 sure_core::hook_protection::ProtectionDecisionKind::Allow => {
                     // An allow the rule reached carries the sentence it reached
                     // it with, and a user who reads the reason can tell a
@@ -1133,6 +1166,9 @@ impl Report {
             // command's own module so that the shape a script reads is decided
             // beside the prose a person reads.
             Self::Settings(change) => frame["details"] = crate::settings::machine(change),
+            Self::Acknowledge(report) => frame["details"] = crate::acknowledge::machine(report),
+            Self::ConfigShow(report) => frame["details"] = report.machine(),
+            Self::Explain(report) => frame["details"] = report.machine(),
             // The failure's own words. `what` is a sentence SURE wrote about
             // itself and `detail` is whatever went wrong, kept apart here for
             // the same reason they are apart in the struct: a reader deciding
@@ -1149,11 +1185,20 @@ impl Report {
             // nothing: an envelope built for a message and then thrown away
             // would be work whose only purpose was to be discarded.
             Self::Mcp(_) => {}
-            Self::HookDecision(decision) => {
+            Self::HookDecision {
+                decision,
+                allowance_reachable,
+            } => {
                 frame["decision"] = json!(decision.decision.as_str());
                 if let Some(ref reason) = decision.reason {
                     frame["reason"] = json!(reason);
                 }
+                // Whether the person's one-time allowance can answer this
+                // block: true exactly where a danger was named, so a harness
+                // that offers an "allow once" control offers it only where
+                // `sure hook allow-once` could record a grant this request
+                // would spend.
+                frame["allowance_reachable"] = json!(allowance_reachable);
             }
             // The grant the user just recorded, built from the same values the
             // human form renders. `grant` is the store row, so a script can find
@@ -1228,9 +1273,12 @@ impl Report {
             // frame that said `config` for a write would name a surface that
             // does not exist.
             Self::Settings(change) => change.command,
+            Self::Acknowledge(_) => "acknowledge",
+            Self::ConfigShow(_) => "config show",
+            Self::Explain(_) => "explain",
             Self::Unavailable(not_yet) => not_yet.command,
             Self::Failed(failure) => failure.command,
-            Self::HookDecision(_) => "hook",
+            Self::HookDecision { .. } => "hook",
             // The same command name for the other half of `sure hook`: this is a
             // subcommand of the entry point a harness calls, and the frame names
             // the command the user typed, which is `hook` either way.
@@ -1668,13 +1716,22 @@ mod tests {
             a_check_that_did_not_finish(),
             a_failure(),
             Report::Unavailable(a_refusal()),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::allow()),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::warn(
-                "This action needs explicit approval before it can run.",
-            )),
-            Report::HookDecision(sure_core::hook_protection::ProtectionDecision::block(
-                "The current execution mode does not permit this action.",
-            )),
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::allow(),
+                allowance_reachable: false,
+            },
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::warn(
+                    "This action needs explicit approval before it can run.",
+                ),
+                allowance_reachable: false,
+            },
+            Report::HookDecision {
+                decision: sure_core::hook_protection::ProtectionDecision::block(
+                    "The current execution mode does not permit this action.",
+                ),
+                allowance_reachable: true,
+            },
             a_recorded_allowance(),
             a_protocol_error(),
             a_tool_result(false),

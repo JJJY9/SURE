@@ -33,7 +33,7 @@
         "This project is not ready to hand off.",
         "I can check whether the current project runs and whether anything obviously looks incomplete. I cannot confirm that it matches your original request because that request was not provided to SURE.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "No open findings."
+        "No unresolved findings."
       ]
     },
     "control": {
@@ -64,7 +64,7 @@
           "Not enough could be checked to say whether this is ready.",
           "This project is not ready to hand off.",
           "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-          "No open findings."
+          "No unresolved findings."
         ]
       }
     }
@@ -89,7 +89,7 @@
         "This project is not ready to hand off.",
         "I can check whether the current project runs and whether anything obviously looks incomplete. I cannot confirm that it matches your original request because that request was not provided to SURE.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "No open findings."
+        "No unresolved findings."
       ],
       "why": "The gate is `may_claim_full_fulfilment`, and the claim this outcome records is that it is false for **every** number of requirements with fresh evidence, not just for zero. `ProjectIntent::empty()` has no user requirement, so `has_user_requirement()` is false and the count never matters: the sweep runs from 0 to `usize::MAX` and the answer is `false` at every point. The sentence a reader is shown is compared whole — the five lines of `render_summary`, not a substring of them — and the frozen caveat is one of the five. That is what makes `I cannot confirm that it matches your original request` a graded fact rather than a phrase someone hoped was still there. The manifest asks for `note` on this case and this fixture produces no finding at all, which is the stronger answer: the absence of a request is not a defect in the project."
     },
@@ -136,7 +136,7 @@
         "Not enough could be checked to say whether this is ready.",
         "This project is not ready to hand off.",
         "SURE can look at the project as it is now. It cannot see what the AI did while it worked. (capability tier 0, snapshot)",
-        "No open findings."
+        "No unresolved findings."
       ],
       "why": "The entire fixture rests on this half. A reporter that answered `I cannot confirm that it matches your original request` to every project would satisfy every positive assertion above and would measure nothing; with a goal supplied, the answer must flip — `Comparable`, no caveat, one requirement checked and matched against the fixture's own `/bookings` route, and the rendered summary losing exactly the caveat line and gaining nothing. The project is not rebuilt for the control: it is the fixture's own directory, and the test asserts the two `Discovery` values are equal, so the intent is the only thing that moved."
     }
@@ -148,7 +148,7 @@
     },
     {
       "kind": "false_green",
-      "description": "The summary is rendered without the sentence `I cannot confirm that it matches your original request because that request was not provided to SURE.`, so `No open findings.` is left standing on its own and a reader takes it as the project being verified against what they asked for. The absence of findings in a project nothing was asked of is silence, not a passing result."
+      "description": "The summary is rendered without the sentence `I cannot confirm that it matches your original request because that request was not provided to SURE.`, so `No unresolved findings.` is left standing on its own and a reader takes it as the project being verified against what they asked for. The absence of findings in a project nothing was asked of is silence, not a passing result."
     },
     {
       "kind": "silent",

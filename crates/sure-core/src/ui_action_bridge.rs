@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use sha2::{Digest as _, Sha256};
 use sure_domain::evidence::EvidenceClass;
 use sure_domain::execution::ActionKind;
 use sure_domain::ids::FingerprintId;
@@ -99,8 +100,8 @@ pub struct UiActionBridge {
 impl UiActionBridge {
     /// What SURE would check about UI-action completeness.
     ///
-    /// One proposal per frontend UI action binding found in source. A project
-    /// with no detectable action bindings produces nothing.
+    /// One proposal per (file, kind) group of frontend UI action bindings. A
+    /// project with no detectable action bindings produces nothing.
     #[must_use]
     pub fn of(discovery: &Discovery) -> Self {
         let mut actions = Vec::new();
@@ -114,8 +115,9 @@ impl UiActionBridge {
     /// Incorporate runtime browser evidence.
     ///
     /// After calling this, [`Self::proposals`] will use
-    /// [`EvidenceClass::ObservedFact`] for declared actions that have a
-    /// matching observed element.
+    /// [`EvidenceClass::ObservedFact`] for a group only when **every**
+    /// declaration in it has a matching observed element; one unmatched
+    /// declaration keeps the group an inference.
     #[must_use]
     pub fn with_evidence(mut self, evidence: UiRuntimeEvidence) -> Self {
         self.evidence = evidence;
@@ -123,33 +125,59 @@ impl UiActionBridge {
     }
 
     /// The checks SURE would run, in no particular order.
+    ///
+    /// **One proposal per (file, kind), not per declaration.** A single-page
+    /// app binds dozens of click handlers in one component file; one proposal
+    /// per binding turned one question into hundreds of rows and hundreds of
+    /// separate acceptances, which is a list nobody can answer. The group keeps
+    /// every declaration's context in the reason and the set's digest in the
+    /// anchor, so the claim is still about exactly the declarations that were
+    /// read — see [`CheckReason::UiActionsFound`](crate::schedule::CheckReason).
     #[must_use]
     pub fn proposals(&self) -> Vec<CheckProposal> {
-        let mut proposals = Vec::new();
+        // Deduplicate before grouping: the same binding can be matched twice on
+        // one line. The key is the one the single-proposal version used.
         let mut seen: HashSet<String> = HashSet::new();
-
+        let mut bindings: Vec<(&UiAction, bool)> = Vec::new();
         for action in &self.actions {
             let key = format!("{}:{}:{}", action.file, action.line, action.context);
-            if seen.contains(&key) {
+            if !seen.insert(key) {
                 continue;
             }
-            seen.insert(key.clone());
-
-            let has_runtime_evidence = self
+            let observed = self
                 .evidence
                 .elements
                 .iter()
-                .any(|observed| matches_action(action, observed));
+                .any(|candidate| matches_action(action, candidate));
+            bindings.push((action, observed));
+        }
+        // Deterministic order: group by (file, kind), then by declaration.
+        bindings.sort_by(|a, b| {
+            a.0.file
+                .cmp(&b.0.file)
+                .then_with(|| a.0.kind.as_str().cmp(b.0.kind.as_str()))
+                .then_with(|| a.0.line.cmp(&b.0.line))
+                .then_with(|| a.0.context.cmp(&b.0.context))
+        });
 
-            let title = format!(
-                "UI action: {} handler on {} in `{}`",
-                action.kind.as_str(),
-                escape_control_characters(&action.element),
-                escape_control_characters(&action.file)
-            );
-
-            let (evidence_class, actions): (EvidenceClass, &[ActionKind]) = if has_runtime_evidence
+        let mut proposals = Vec::new();
+        let mut start = 0;
+        while start < bindings.len() {
+            let file = bindings[start].0.file.clone();
+            let kind = bindings[start].0.kind;
+            let mut end = start + 1;
+            while end < bindings.len()
+                && bindings[end].0.file == file
+                && bindings[end].0.kind == kind
             {
+                end += 1;
+            }
+            let group = &bindings[start..end];
+            start = end;
+
+            let first = group[0].0;
+            let all_observed = group.iter().all(|(_, observed)| *observed);
+            let (evidence_class, actions): (EvidenceClass, &[ActionKind]) = if all_observed {
                 (
                     EvidenceClass::ObservedFact,
                     &[ActionKind::BrowserObservation],
@@ -158,10 +186,29 @@ impl UiActionBridge {
                 (EvidenceClass::Inference, &[ActionKind::ReadFile])
             };
 
-            let reason = CheckReason::CandidateFound {
-                path: action.file.clone(),
-                line: action.line,
-                context: action.context.clone(),
+            let title = if group.len() == 1 {
+                format!(
+                    "UI action: {} handler on {} in `{}`",
+                    kind.as_str(),
+                    escape_control_characters(&first.element),
+                    escape_control_characters(&file)
+                )
+            } else {
+                format!(
+                    "UI action: {} {} handlers in `{}` that SURE has not watched",
+                    group.len(),
+                    kind.as_str(),
+                    escape_control_characters(&file)
+                )
+            };
+
+            let reason = CheckReason::UiActionsFound {
+                path: file.clone(),
+                kind: kind.as_str().to_owned(),
+                count: group.len(),
+                first_line: first.line,
+                first_context: first.context.clone(),
+                set_digest: set_digest(group),
             };
             // **A declared UI action SURE has no evidence about is rated
             // `must_fix`, and that is the corpus's decision rather than a
@@ -179,20 +226,22 @@ impl UiActionBridge {
             // evidence class: the class stays `Inference` unless the browser
             // observed the element, exactly as `P6-T006`'s acceptance requires.
             //
-            // The cost is stated rather than hidden: this fires on every declared
-            // `onClick`/`onSubmit` in a frontend source file, so a healthy
-            // single-page app now yields `must_fix` candidates. It does not move
-            // the verdict — `critical` stays false, so `CheckResult::blocks_green`
-            // is untouched — and it is the price of not letting an unchecked
-            // primary action disappear into a bucket named style noise.
+            // **The warning does move the verdict, and the corpus's own rule is
+            // why.** `status::aggregate` keeps a run out of green while any
+            // warning is unaccepted, whatever `critical` says, so a healthy
+            // single-page app stays `needs_attention` until a person answers the
+            // question. Grouping is what makes that answer survivable: one file's
+            // bindings are one decision, not hundreds. The severity is the group's
+            // strongest declaration, so a primary action in the file keeps the
+            // whole group `must_fix` and cannot disappear into style noise.
             // `classify_path` reads the path itself and ignores both the root and
             // the component graph, so the empty root here is the honest argument
             // rather than a placeholder that changes the answer.
-            let reach = Reach::from(classify_path(Path::new(&action.file), Path::new(""), None));
+            let reach = Reach::from(classify_path(Path::new(&file), Path::new(""), None));
             let gravity = gravity_of(&reason, evidence_class, reach, GapKind::SubstitutedAction);
 
             proposals.push(CheckProposal::new(
-                check_id(&action.file, &format!("ui_action_{}", action.line)),
+                check_id(&file, &format!("ui_actions_{}", kind.as_str())),
                 title,
                 gravity.severity(),
                 false,
@@ -284,6 +333,38 @@ fn observation_of(proposal: &CheckProposal) -> CheckOperation {
     )))
 }
 
+/// A digest of one group's declarations, line numbers excluded.
+///
+/// The group's anchor names this digest, and the anchor is the acceptance
+/// identity (ADR 0019): adding, removing or replacing a declaration changes the
+/// digest and brings the question back, while moving the same declarations
+/// around the file does not. Sorted so the order the scan met the lines in
+/// cannot change the digest.
+fn set_digest(group: &[(&UiAction, bool)]) -> String {
+    let mut lines: Vec<String> = group
+        .iter()
+        .map(|(action, _)| {
+            format!(
+                "{}\t{}\t{}",
+                action.kind.as_str(),
+                action.element,
+                action.context
+            )
+        })
+        .collect();
+    lines.sort_unstable();
+    let mut hasher = Sha256::new();
+    for line in &lines {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Whether an observed element matches a declared UI action.
 fn matches_action(action: &UiAction, observed: &ObservedElement) -> bool {
     let kind_matches = matches!(
@@ -342,9 +423,14 @@ fn scan_frontend_files(discovery: &Discovery, actions: &mut Vec<UiAction>) {
         bytes_read = bytes_read.saturating_add(metadata.len());
 
         let file = display_path(path);
+        let open_tags = open_tag_by_line(&text);
         for (index, line) in text.lines().enumerate() {
             let line_number = index + 1;
+            let open_tag = open_tags.get(index).and_then(|tag| tag.clone());
             for (kind, element) in actions_on_line(line) {
+                let element = element
+                    .or_else(|| open_tag.clone())
+                    .unwrap_or_else(|| default_element(kind).to_owned());
                 let context = escape_control_characters(line.trim());
                 actions.push(UiAction {
                     kind,
@@ -368,7 +454,7 @@ fn is_frontend_source(path: &Path) -> bool {
 }
 
 /// Every UI action binding on one line.
-fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
+fn actions_on_line(line: &str) -> Vec<(UiActionKind, Option<String>)> {
     let mut found = Vec::new();
 
     // onClick= or onClick: (React/JSX/Vue bindings)
@@ -376,7 +462,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = tag_name_before(before).unwrap_or_else(|| "element".to_owned());
+            let element = tag_name_before(before);
             found.push((UiActionKind::Click, element));
             search_from += start + pattern.len();
         }
@@ -389,7 +475,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
             let next = line[end..].chars().next();
             if next == Some('=') || next == Some('.') || next == Some(' ') || next == Some('\t') {
                 let before = &line[..search_from + start];
-                let element = tag_name_before(before).unwrap_or_else(|| "element".to_owned());
+                let element = tag_name_before(before);
                 found.push((UiActionKind::Click, element));
             }
             search_from = end + 1;
@@ -401,7 +487,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = tag_name_before(before).unwrap_or_else(|| "form".to_owned());
+            let element = tag_name_before(before);
             found.push((UiActionKind::Submit, element));
             search_from += start + pattern.len();
         }
@@ -414,7 +500,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
             let next = line[end..].chars().next();
             if next == Some('=') || next == Some('.') || next == Some(' ') || next == Some('\t') {
                 let before = &line[..search_from + start];
-                let element = tag_name_before(before).unwrap_or_else(|| "form".to_owned());
+                let element = tag_name_before(before);
                 found.push((UiActionKind::Submit, element));
             }
             search_from = end + 1;
@@ -426,7 +512,7 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = receiver_before(before).unwrap_or_else(|| "element".to_owned());
+            let element = receiver_before(before);
             found.push((UiActionKind::Click, element));
             search_from += start + pattern.len();
         }
@@ -437,13 +523,94 @@ fn actions_on_line(line: &str) -> Vec<(UiActionKind, String)> {
         let mut search_from = 0;
         while let Some(start) = line[search_from..].find(pattern) {
             let before = &line[..search_from + start];
-            let element = receiver_before(before).unwrap_or_else(|| "form".to_owned());
+            let element = receiver_before(before);
             found.push((UiActionKind::Submit, element));
             search_from += start + pattern.len();
         }
     }
 
     found
+}
+
+/// The name a binding falls back to when nothing in the source names one.
+fn default_element(kind: UiActionKind) -> &'static str {
+    match kind {
+        UiActionKind::Click => "element",
+        UiActionKind::Submit => "form",
+    }
+}
+
+/// The tag open at the start of each line, when it opened on an earlier line.
+///
+/// JSX and Vue templates routinely put one attribute per line, so a binding
+/// (`onClick={reset}`) sits on a line whose `<button` is above it. This walks
+/// the file once, carrying the most recently opened tag across lines until its
+/// closing `>`, and reports it per line. A tag that opened on the binding's own
+/// line is found by [`tag_name_before`] instead, which wins because it is the
+/// closer reading.
+///
+/// The walk is a heuristic, not a parser, and it is written to fail towards "no
+/// tag" rather than towards a guess: quotes are skipped, `{}` raises a depth
+/// that ignores `>` (so an arrow function's `=>` cannot close a tag), and a `<`
+/// that is not followed by a letter is not a tag at all. A tag name is
+/// lowercased, like [`tag_name_before`] does.
+fn open_tag_by_line(text: &str) -> Vec<Option<String>> {
+    let mut per_line = Vec::new();
+    let mut open: Option<String> = None;
+    let mut depth = 0_usize;
+    let mut quote: Option<char> = None;
+    for line in text.lines() {
+        // What was open when this line began is what a binding on it belongs to.
+        per_line.push(open.clone());
+        let chars: Vec<char> = line.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            let current = chars[index];
+            if let Some(opened) = quote {
+                if current == opened {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if open.is_some() {
+                match current {
+                    '"' | '\'' | '`' => quote = Some(current),
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    '>' if depth == 0 => open = None,
+                    _ => {}
+                }
+                index += 1;
+                continue;
+            }
+            if current == '<' {
+                let mut end = index + 1;
+                while end < chars.len()
+                    && (chars[end].is_ascii_alphanumeric()
+                        || chars[end] == '_'
+                        || chars[end] == '-'
+                        || chars[end] == '.'
+                        || chars[end] == ':')
+                {
+                    end += 1;
+                }
+                if end > index + 1 && chars[index + 1].is_ascii_alphabetic() {
+                    open = Some(
+                        chars[index + 1..end]
+                            .iter()
+                            .collect::<String>()
+                            .to_lowercase(),
+                    );
+                    depth = 0;
+                    index = end;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+    }
+    per_line
 }
 
 /// The tag name immediately before an attribute, if we're inside a tag.
@@ -832,5 +999,243 @@ mod tests {
         let proposals = bridge.proposals();
         assert_eq!(proposals.len(), 1);
         assert!(proposals[0].title().contains("click"));
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let temp = std::env::temp_dir().join(format!(
+            "sure-ui-group-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        temp
+    }
+
+    fn proposals_for(root: &std::path::Path) -> Vec<crate::schedule::CheckProposal> {
+        let discovery =
+            crate::discover::discover(root, &crate::discover::DiscoverOptions::default()).unwrap();
+        UiActionBridge::of(&discovery).proposals()
+    }
+
+    #[test]
+    fn two_click_handlers_in_one_file_are_one_proposal_with_the_count() {
+        let temp = scratch("two-clicks");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button onClick={save}>Save</button>\n<button onClick={cancel}>Cancel</button>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 1, "one file, one kind, one question");
+        let title = proposals[0].title();
+        assert!(title.contains("2 click handlers"), "{title}");
+        assert!(title.contains("App.tsx"), "{title}");
+        assert_eq!(proposals[0].severity(), Severity::MustFix);
+        assert!(!proposals[0].critical());
+        assert_eq!(proposals[0].evidence_class(), EvidenceClass::Inference);
+        let anchor = proposals[0]
+            .reason()
+            .anchor()
+            .expect("a group has an anchor");
+        assert_eq!(anchor.location, "App.tsx");
+        assert!(
+            anchor.locator.contains("the 2 click handlers"),
+            "{}",
+            anchor.locator
+        );
+        assert!(anchor.locator.contains("set "), "{}", anchor.locator);
+    }
+
+    #[test]
+    fn a_click_and_a_submit_in_one_file_are_two_groups() {
+        let temp = scratch("click-submit");
+        std::fs::write(
+            temp.join("Form.tsx"),
+            "<button onClick={save}>Save</button>\n<form onSubmit={submit}></form>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 2);
+        let titles: Vec<&str> = proposals.iter().map(|proposal| proposal.title()).collect();
+        assert!(
+            titles.iter().any(|title| title.contains("click")),
+            "{titles:?}"
+        );
+        assert!(
+            titles.iter().any(|title| title.contains("submit")),
+            "{titles:?}"
+        );
+    }
+
+    #[test]
+    fn the_group_digest_ignores_line_moves_and_changes_with_the_set() {
+        let binding =
+            "<button onClick={save}>Save</button>\n<button onClick={cancel}>Cancel</button>\n";
+        let a = scratch("digest-a");
+        std::fs::write(a.join("App.tsx"), binding).unwrap();
+        let b = scratch("digest-b");
+        // Same declarations, shifted down by a comment line: line numbers move,
+        // the set does not.
+        std::fs::write(b.join("App.tsx"), format!("// header\n{binding}")).unwrap();
+        let c = scratch("digest-c");
+        // One declaration replaced: same count, different set.
+        std::fs::write(
+            c.join("App.tsx"),
+            "<button onClick={save}>Save</button>\n<button onClick={remove}>Remove</button>\n",
+        )
+        .unwrap();
+        let locator = |root: &std::path::Path| {
+            proposals_for(root)[0]
+                .reason()
+                .anchor()
+                .expect("a group has an anchor")
+                .locator
+        };
+        assert_eq!(
+            locator(&a),
+            locator(&b),
+            "moving declarations is not a new set"
+        );
+        assert_ne!(
+            locator(&a),
+            locator(&c),
+            "replacing a declaration is a new set"
+        );
+    }
+
+    #[test]
+    fn a_binding_on_its_own_line_belongs_to_the_tag_that_opened_above_it() {
+        let temp = scratch("multiline-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button\n  className=\"save\"\n  onClick={reset}\n>\n  Save\n</button>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 1);
+        assert!(
+            proposals[0].title().contains("on button"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn an_arrow_function_in_the_open_tag_does_not_close_it() {
+        // `=>` inside an earlier attribute's braces must not end the tag, or the
+        // binding on the next line would lose the element it belongs to.
+        let temp = scratch("arrow-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<div\n  onMouseDown={() => set(true)}\n  onClick={reset}\n>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert!(
+            proposals[0].title().contains("on div"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn nested_tags_across_lines_name_the_innermost_open_tag() {
+        let temp = scratch("nested-tags");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<div className=\"row\">\n  <button\n    onClick={save}\n  >\n    Save\n  \
+             </button>\n</div>\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert!(
+            proposals[0].title().contains("on button"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn a_binding_outside_any_tag_stays_unnamed() {
+        let temp = scratch("props-object");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "const props = {\n  onClick: handleSave,\n};\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 1);
+        assert!(
+            proposals[0].title().contains("on element"),
+            "{}",
+            proposals[0].title()
+        );
+    }
+
+    #[test]
+    fn a_tag_closed_before_the_binding_line_does_not_name_it() {
+        // The submit binding below the closed button is not inside any tag; if
+        // the walk leaked the button across the close, the title would say
+        // "on button" for it too.
+        let temp = scratch("closed-tag");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button onClick={a}>Go</button>\nconst props = {\n  onSubmit: b,\n};\n",
+        )
+        .unwrap();
+        let proposals = proposals_for(&temp);
+        assert_eq!(proposals.len(), 2);
+        let titles: Vec<&str> = proposals.iter().map(|proposal| proposal.title()).collect();
+        assert!(
+            titles.iter().any(|title| title.contains("on button")),
+            "{titles:?}"
+        );
+        assert!(
+            titles.iter().any(|title| title.contains("on form")),
+            "the submit outside any tag keeps the honest default: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_is_observed_fact_only_when_every_declaration_was_observed() {
+        let temp = scratch("observed-group");
+        std::fs::write(
+            temp.join("App.tsx"),
+            "<button onClick={save}>Save</button>\n<button onClick={cancel}>Cancel</button>\n",
+        )
+        .unwrap();
+        let discovery =
+            crate::discover::discover(&temp, &crate::discover::DiscoverOptions::default()).unwrap();
+        let partial = UiActionBridge::of(&discovery).with_evidence(UiRuntimeEvidence {
+            elements: vec![ObservedElement {
+                kind: ObservedElementKind::Button,
+                label: "Save".to_owned(),
+            }],
+        });
+        assert_eq!(
+            partial.proposals()[0].evidence_class(),
+            EvidenceClass::Inference,
+            "one unobserved declaration keeps the group an inference"
+        );
+        let full = UiActionBridge::of(&discovery).with_evidence(UiRuntimeEvidence {
+            elements: vec![
+                ObservedElement {
+                    kind: ObservedElementKind::Button,
+                    label: "Save".to_owned(),
+                },
+                ObservedElement {
+                    kind: ObservedElementKind::Button,
+                    label: "Cancel".to_owned(),
+                },
+            ],
+        });
+        assert_eq!(
+            full.proposals()[0].evidence_class(),
+            EvidenceClass::ObservedFact
+        );
     }
 }

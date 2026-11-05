@@ -104,23 +104,32 @@
 //! against would be a command changing the thing it is describing. `sure doctor`
 //! states the same rule for the same reason.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use sure_domain::evidence::{ClaimAssessment, EvidenceClass, StalenessReason};
+use sure_domain::evidence::{
+    ClaimAssessment, Evidence, EvidenceAnchor, EvidenceClass, StalenessReason,
+};
 use sure_domain::execution::{ExecutionMode, ExecutionPermissions};
+use sure_domain::finding::{
+    AssessmentSource, Finding, FindingBuilder, FindingStatus, SeverityRationale,
+};
 use sure_domain::ids::{CheckId, ClaimId, FingerprintId};
 use sure_domain::intent::{IntentSource, ProjectIntent};
 use sure_domain::severity::Severity;
-use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason};
+use sure_domain::status::{CheckResult, CheckStatus, NotCheckedReason, aggregate_with_accepted};
 use sure_domain::vocabulary::{Claim, ProjectFingerprint, ProjectSupport, ProjectVerdict};
 
+use crate::acknowledgement::AcknowledgementIndex;
 use crate::aggregation::{RunReport, aggregate_run};
 use crate::analysis_provider;
 use crate::candidate_scanner::CandidateScanner;
 use crate::capability_report;
-use crate::checks::{self, check_id};
+use crate::checks::{self, MissingCommand, MissingKind, check_id};
 use crate::claim_checker::{self, CheckedClaim};
 use crate::components::ComponentGraph;
+use crate::config::AnalysisConfig;
 use crate::config::AnalysisProvider;
 use crate::config::Config;
 use crate::config::ExecutionSettings;
@@ -129,21 +138,26 @@ use crate::coverage_summary::{CoverageNotCheckedSummary, summarize};
 use crate::demo_data_heuristics::DemoDataHeuristics;
 use crate::discover::{self, DiscoverOptions, Discovery, Ecosystem, Findings};
 use crate::enforce::Enforcement;
+use crate::external_commands::{ExternalCommand, ExternalRole};
 use crate::false_completion_aggregator;
-use crate::findings_from_checks::findings_from_checks;
+use crate::findings_from_checks::findings_with_checks;
 use crate::fingerprint::{self, project_fingerprint};
 use crate::intent_implementation::compare_intent_to_project;
 use crate::intent_model;
 use crate::noop_heuristics::NoOpHeuristics;
 use crate::planned_check_runner::{CheckRunner, run_scheduled_checks};
-use crate::planned_work::{CheckOperation, PlannedWork, PrecomputedEvidence};
+use crate::planned_work::{CheckOperation, CommandSpec, PlannedWork, PrecomputedEvidence};
+use crate::process::{Environment, Limits};
 use crate::project_intent;
 use crate::project_verdict::build_verdict;
 use crate::recheck_lifecycle::{self, LifecycleInputs, LifecycleUpdate};
 use crate::repair_impact::{seed_rechecks, select_impacted_checks};
 use crate::route_consistency::RouteConsistency;
 use crate::runtime_probes::{PlanRefused, ProbePlan};
-use crate::schedule::{CheckProposal, CheckSchedule, PlanBuilder, ProposalRefused, ScheduledCheck};
+use crate::scan::ScanOptions;
+use crate::schedule::{
+    CheckProposal, CheckReason, CheckSchedule, PlanBuilder, ProposalRefused, ScheduledCheck,
+};
 use crate::service_plan::ServicePlan;
 use crate::store::Store;
 use crate::support;
@@ -622,6 +636,17 @@ pub struct Pipeline<'a> {
     /// machine whose user never allowed any of it — the defect P13-T009 exists
     /// to close, in the one place `check` can observe it.
     pub execution: ExecutionSettings,
+    /// Paths the person's settings asked the scan to leave out of this project.
+    ///
+    /// Resolved from the user's own configuration by the authority layer
+    /// (`Authority::scan_excludes`), and never from the project's file: an
+    /// exclusion narrows the evidence a finding could come from, and the project
+    /// may be controlled by the agent under evaluation (ADR 0011). The scan
+    /// records each one as [`SkipReason::UserExcluded`], so a report says what
+    /// was not read instead of leaving a reader to assume it was empty.
+    ///
+    /// [`SkipReason::UserExcluded`]: crate::scan::SkipReason::UserExcluded
+    pub scan_excludes: &'a [PathBuf],
     /// The history to compare against, when there is one.
     ///
     /// Never opened here: see the module comment.
@@ -656,6 +681,21 @@ pub struct Pipeline<'a> {
     /// nothing else — values only an [`Enforcement`] can produce — so this field
     /// cannot be used to start something the mode did not admit.
     pub runner: &'a dyn CheckRunner,
+    /// The analysis settings in force, **already arbitrated between the two
+    /// files**.
+    ///
+    /// Not read from [`Self::config`] here, for the same reason
+    /// [`Self::execution`] is not: the project's own file holds a *request*,
+    /// and a stage that read it directly would consult a provider the
+    /// arbitration had not put in force. When the project names no provider,
+    /// the user's own file decides (`Authority::analysis`).
+    pub analysis: AnalysisConfig,
+    /// User-declared commands for a project with no stack SURE can discover.
+    ///
+    /// Empty is the ordinary case. Non-empty means the user named a commands
+    /// file on the command line, and those commands replace the native plan
+    /// rather than being added beside it.
+    pub external_commands: &'a [ExternalCommand],
 }
 
 /// A stage that stopped the run.
@@ -739,7 +779,11 @@ impl Pipeline<'_> {
         let mut stages = Stages::new();
 
         // ---- 1. Discover -----------------------------------------------------
-        let discovery = match discover::discover(self.project, &DiscoverOptions::default()) {
+        let scan_options = ScanOptions::default().with_exclude(self.scan_excludes.to_vec());
+        let discovery = match discover::discover(
+            self.project,
+            &DiscoverOptions::default().with_scan(scan_options),
+        ) {
             Ok(discovery) => discovery,
             Err(error) => {
                 return self.stopped_at(
@@ -751,7 +795,10 @@ impl Pipeline<'_> {
                 );
             }
         };
-        let support = support::classify(&discovery);
+        let support = support::classify_with_external_commands(
+            &discovery,
+            !self.external_commands.is_empty(),
+        );
         stages.push(
             Stage::Discover,
             StageOutcome::Ran {
@@ -800,6 +847,7 @@ impl Pipeline<'_> {
             &graph,
             &intent,
             &self.config.checks,
+            self.external_commands,
             &mut builder,
         );
         let refused: Vec<ProposalRefused> = builder.refused().to_vec();
@@ -860,7 +908,15 @@ impl Pipeline<'_> {
                 CheckOperation::Precomputed(_) => None,
             };
             if let Some(spec) = command {
-                permission_plan.add(check.clone(), spec.program(), spec.arguments().to_vec());
+                if spec.is_user_declared() {
+                    permission_plan.add_declared(
+                        check.clone(),
+                        spec.program(),
+                        spec.arguments().to_vec(),
+                    );
+                } else {
+                    permission_plan.add(check.clone(), spec.program(), spec.arguments().to_vec());
+                }
             }
         }
         // The plan a report is built from, named the way a person reads it: the
@@ -965,7 +1021,15 @@ impl Pipeline<'_> {
         );
 
         // ---- 8. Grounded model assessment ------------------------------------
-        let (model_outcome, model_results) = self.model_assessment(&fingerprint);
+        // The candidates this run already turned into check results are named
+        // here: the model's verdict on one of them annotates that finding instead
+        // of becoming a second one (see `assess_candidates`).
+        let existing_check_ids: BTreeSet<String> = results
+            .iter()
+            .map(|result| result.id.as_str().to_owned())
+            .collect();
+        let (model_outcome, model_results, model_findings, model_annotations) =
+            self.model_assessment(&fingerprint, &candidates, &existing_check_ids);
         results.extend(model_results);
         stages.push(Stage::ModelAssessment, model_outcome);
 
@@ -1057,10 +1121,28 @@ impl Pipeline<'_> {
         // Read from `report.results()` and not from `not_checked` below, although
         // the two overlap: `not_checked` is the subset with no result, and a check
         // that ran and failed is a finding with no entry in it.
-        let findings = findings_from_checks(report.results(), &schedule);
+        //
+        // **The person's recorded acceptances are applied here, before the
+        // verdict exists** (ADR 0019): a finding they reviewed and accepted
+        // changes status to `AcceptedRisk`, and the check results those findings
+        // cover are the exact set the aggregate discounts. Applying them after
+        // `build_verdict` would leave the headline and the finding statuses
+        // answering the same question two ways.
+        let (findings, accepted_checks, acknowledgement_note) = self.apply_acknowledgements(
+            discovery.root.as_path(),
+            report.results(),
+            &schedule,
+            model_findings,
+            &model_annotations,
+        );
+        let aggregate = if accepted_checks.is_empty() {
+            report.aggregate().clone()
+        } else {
+            aggregate_with_accepted(report.results(), &accepted_checks)
+        };
         let verdict = build_verdict(
             fingerprint,
-            report.aggregate().clone(),
+            aggregate,
             intent.clone(),
             capability,
             findings,
@@ -1122,10 +1204,11 @@ impl Pipeline<'_> {
             Stage::Aggregate,
             StageOutcome::Ran {
                 detail: format!(
-                    "{} {} check(s) produced a result, {} did not run.{stale_clause}{capability_failure}",
+                    "{} {} check(s) produced a result, {} did not run.{stale_clause}{capability_failure}{}",
                     verdict.aggregate.headline,
                     coverage.checked_count,
                     coverage.not_checked.len(),
+                    acknowledgement_note.unwrap_or_default(),
                 ),
             },
         );
@@ -1237,6 +1320,63 @@ impl Pipeline<'_> {
         ProjectIntent::from_requirements(requirements)
     }
 
+    /// Apply the acceptances recorded for this project (ADR 0019).
+    ///
+    /// **A person's recorded decision, applied before the verdict exists.** Each
+    /// matching finding changes status to `AcceptedRisk` — its evidence, severity
+    /// and place in the report are untouched — and the check ids those findings
+    /// cover are returned so the aggregate can discount exactly those warnings
+    /// and nothing else.
+    ///
+    /// Matching is `crate::acknowledgement`'s: the re-check's own cross-run key,
+    /// so an acceptance stops applying the moment the evidence it was made about
+    /// changes. A finding the evidence settled (`can_be_acknowledged` false) is
+    /// never accepted, even if a row somehow matches it.
+    ///
+    /// A store read that failed is returned as a sentence for the aggregate
+    /// stage, not as a silent empty set: the user's acceptances not being
+    /// applied would otherwise look exactly like never having made any.
+    fn apply_acknowledgements(
+        &self,
+        root: &Path,
+        results: &[CheckResult],
+        schedule: &CheckSchedule,
+        model_findings: Vec<Finding>,
+        model_annotations: &[ModelVerdict],
+    ) -> (Vec<Finding>, BTreeSet<CheckId>, Option<String>) {
+        let mut pairs = findings_with_checks(results, schedule);
+        let mut accepted = BTreeSet::new();
+        let mut note = None;
+        if let Some(store) = self.store {
+            let project_root = root.to_string_lossy();
+            let case = recheck_lifecycle::case_rule_for(&project_root);
+            match AcknowledgementIndex::load(store, &project_root) {
+                Ok(index) => {
+                    for (finding, check_id) in &mut pairs {
+                        let Some(record) = index.for_finding(finding, case) else {
+                            continue;
+                        };
+                        if !finding.can_be_acknowledged() {
+                            continue;
+                        }
+                        accept_finding(finding, record);
+                        accepted.insert(check_id.clone());
+                    }
+                }
+                Err(error) => {
+                    note = Some(format!(
+                        " SURE could not read the acceptances its store holds, so none were \
+                         applied this run: {error}"
+                    ));
+                }
+            }
+        }
+        annotate_candidate_findings(&mut pairs, model_annotations);
+        let mut findings: Vec<Finding> = pairs.into_iter().map(|(finding, _)| finding).collect();
+        findings.extend(model_findings);
+        (findings, accepted, note)
+    }
+
     /// Stage 8: the grounded model assessment, or the state a run is in without
     /// one.
     ///
@@ -1246,8 +1386,18 @@ impl Pipeline<'_> {
     /// own word for it, and [`crate::project_verdict`] already has a sentence for
     /// what that costs. The run is then `needs_attention` rather than green, and it
     /// is never reported as having passed something it did not do.
-    fn model_assessment(&self, fingerprint: &FingerprintId) -> (StageOutcome, Vec<CheckResult>) {
-        let analysis = &self.config.analysis;
+    fn model_assessment(
+        &self,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+        existing_check_ids: &BTreeSet<String>,
+    ) -> (
+        StageOutcome,
+        Vec<CheckResult>,
+        Vec<Finding>,
+        Vec<ModelVerdict>,
+    ) {
+        let analysis = &self.analysis;
         let not_checked = |reason: NotCheckedReason, detail: &str| {
             CheckResult::not_run(
                 Stage::ModelAssessment.id(),
@@ -1273,22 +1423,21 @@ impl Pipeline<'_> {
                     NotCheckedReason::AnalysisProviderDisabled,
                     detail,
                 )],
+                Vec::new(),
+                Vec::new(),
             );
         }
 
         match analysis_provider::build(analysis, self.project) {
-            // A provider is configured. No check in this build asks for
-            // model-backed analysis, so the stage has nothing to do — a different
-            // statement from "it could not run", and recorded as one.
-            Ok(_analyzer) => (
-                StageOutcome::NotPartOfWork {
-                    detail: format!(
-                        "the {} provider is configured, and no planned check asks for \
-                         model-backed analysis in this build.",
-                        analysis.provider.as_str()
-                    ),
-                },
-                Vec::new(),
+            // 模型评估接入(最小版):把阶段 7 找到的候选(material)交给配置好
+            // 的分析器做 grounded 评估——每条候选要么被确认(成为一条
+            // model_assessment 证据类的 finding),要么被判为噪音(不加 finding,
+            // 但原样保留在阶段明细里)。没有候选时如实记录"没有可评估的东西"。
+            Ok(analyzer) => self.assess_candidates(
+                analyzer.as_ref(),
+                fingerprint,
+                candidates,
+                existing_check_ids,
             ),
             // The project asked for a provider SURE cannot build — a local-command
             // provider with no command, say. That is a configuration fault rather
@@ -1304,9 +1453,147 @@ impl Pipeline<'_> {
                         NotCheckedReason::AnalysisProviderDisabled,
                         &detail,
                     )],
+                    Vec::new(),
+                    Vec::new(),
                 )
             }
         }
+    }
+
+    /// 阶段 8 的接入面(最小版):把阶段 7 的候选交给分析器逐条评估。
+    ///
+    /// 每条被确认的候选产出一 LinkFinding:证据类如实标
+    /// [`EvidenceClass::ModelAssessment`],锚为 `model_only`(模型意见没有
+    /// 具体项目位置可指,不可核——`is_model_only` 判据据此命中),严重度按
+    /// `docs/adr/0005-evidence-hierarchy.md` 以 ShouldFixFirst 为上限
+    /// (模型独证不能支撑 must_fix),rationale 与之自动配对(builder 校验)。
+    ///
+    /// **已经被本次运行变成检查结果的候选不再产出第二条发现。** 它们本来
+    /// 就以候选发现的形式出现在报告里(阶段 7 把同一批提案排进了计划);再为
+    /// 它们造一条 `Model assessment:` 发现,等于把同一件事说两遍(2026-11-03
+    /// 实测:60 个 UI 组对上 59 条重复)。这些候选的模型判定以
+    /// [`ModelVerdict`] 返回,由 [`annotate_candidate_findings`] 写进原发现
+    /// 的说明里;状态与严重度不变——模型证据不能升级它们(ADR 0005)。
+    fn assess_candidates(
+        &self,
+        analyzer: &dyn analysis_provider::Analyzer,
+        fingerprint: &FingerprintId,
+        candidates: &Candidates,
+        existing_check_ids: &BTreeSet<String>,
+    ) -> (
+        StageOutcome,
+        Vec<CheckResult>,
+        Vec<Finding>,
+        Vec<ModelVerdict>,
+    ) {
+        if candidates.material.is_empty() {
+            return (
+                StageOutcome::NotPartOfWork {
+                    detail: "the analysis provider is configured, and the completeness \
+                             analysis found no candidate for a model to assess."
+                        .to_owned(),
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        let prompt = assessment_prompt(self.project, candidates);
+        let response = match analyzer
+            .analyze(analysis_provider::AnalysisRequest { prompt: &prompt })
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let detail =
+                    format!("the configured model provider could not assess the project: {error}");
+                return (
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::AnalysisProviderDisabled),
+                        detail: detail.clone(),
+                    },
+                    vec![
+                        CheckResult::not_run(
+                            Stage::ModelAssessment.id(),
+                            Stage::ModelAssessment.title(),
+                            Severity::Note,
+                            false,
+                            NotCheckedReason::AnalysisProviderDisabled,
+                            fingerprint.clone(),
+                        )
+                        .with_reason(detail),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
+        };
+        let verdicts = parse_assessment(&response.text, candidates);
+        let flagged = verdicts.iter().filter(|verdict| verdict.is_problem).count();
+        let mut findings = Vec::new();
+        let mut annotations = Vec::new();
+        for verdict in verdicts.iter().filter(|verdict| verdict.is_problem) {
+            let Some(candidate) = candidates
+                .material
+                .iter()
+                .find(|candidate| candidate.id == verdict.candidate_id)
+            else {
+                continue;
+            };
+            // A candidate this run already turned into a check result is already
+            // a finding; the verdict annotates it instead of doubling it.
+            if existing_check_ids.contains(&verdict.candidate_id) {
+                annotations.push(ModelVerdict {
+                    candidate_id: verdict.candidate_id.clone(),
+                    is_problem: true,
+                    reason: verdict.reason.clone(),
+                });
+                continue;
+            }
+            // 第一版直接以 Finding 进入报告(见函数 doc 的迁移说明)。
+            let severity = model_supported_severity(candidate.severity);
+            if let Ok(finding) = FindingBuilder::new(
+                AssessmentSource::ModelAssessment,
+                SeverityRationale::for_severity(severity)
+                    .unwrap_or(SeverityRationale::Informational),
+            )
+            .title(format!("Model assessment: {}", candidate.title))
+            .severity(severity)
+            .status(FindingStatus::Open)
+            .explanation(verdict.reason.clone())
+            .user_impact(
+                "A model's assessment of what SURE observed. Model opinion is evidence and \
+                 not proof: it may be wrong, and what to do about it stays your call."
+                    .to_owned(),
+            )
+            .next_step("Review the flagged candidate, decide what to do, and re-check.".to_owned())
+            .evidence([Evidence::new(
+                EvidenceClass::ModelAssessment,
+                candidate.because.clone(),
+                EvidenceAnchor::model_only(format!("{} ({})", candidate.title, candidate.id)),
+                Some(fingerprint.clone()),
+                severity,
+            )])
+            .fingerprint(fingerprint.clone())
+            .build()
+            {
+                findings.push(finding);
+            }
+        }
+        (
+            StageOutcome::Ran {
+                detail: format!(
+                    "the configured model provider assessed {} completeness candidate(s): \
+                     {flagged} flagged as problems ({} already carried by their candidate \
+                     findings), {} judged style noise.",
+                    candidates.material.len(),
+                    annotations.len(),
+                    verdicts.len() - flagged,
+                ),
+            },
+            Vec::new(),
+            findings,
+            annotations,
+        )
     }
 
     /// Stage 9: what the project's agent claimed, against what was recorded.
@@ -1348,7 +1635,10 @@ impl Pipeline<'_> {
             );
         };
 
-        match claim_checker::check_claims_in_store(store, fingerprint) {
+        // 2026-10-20: claims are matched to the project by root, not by this
+        // run's minted fingerprint id — see the function's own doc comment.
+        let project_root = self.project.to_string_lossy();
+        match claim_checker::check_claims_in_store(store, &project_root, fingerprint) {
             Ok(checked) => {
                 let detail = if checked.is_empty() {
                     "the history holds no claims about this project.".to_owned()
@@ -1414,31 +1704,39 @@ impl Pipeline<'_> {
         // carried open beside this run's copy of it.
         let case = recheck_lifecycle::case_rule_for(&run.project_root);
 
-        let previous =
-            match recheck_lifecycle::previous_open_findings(store, &run.project_root, case) {
-                Ok(previous) => previous,
-                // **A scan that stopped at its bound arrives here, on purpose.**
-                // `previous_open_findings` refuses rather than answering with a
-                // list that stopped early — the direction `Store::spend_allowance`
-                // fails in — and this arm is the plain-language path that refusal
-                // was written for: the stage did not run, the detail says so in the
-                // error's own words, and no comparison is built from a list that
-                // was cut short. The alternative, reading what there was and
-                // warning about it, would put a number in front of a reader that
-                // says "this many findings are still open" when the truth is that
-                // SURE did not read far enough to know.
-                Err(error) => {
-                    return (
-                        None,
-                        StageOutcome::NotRun {
-                            reason: Some(NotCheckedReason::UnknownReason),
-                            detail: format!(
-                                "SURE could not read what an earlier run left open: {error}"
-                            ),
-                        },
-                    );
-                }
-            };
+        let previous_dated = match recheck_lifecycle::previous_open_findings_with_times(
+            store,
+            &run.project_root,
+            case,
+        ) {
+            Ok(previous) => previous,
+            // **A scan that stopped at its bound arrives here, on purpose.**
+            // `previous_open_findings_with_times` refuses rather than
+            // answering with a list that stopped early — the direction
+            // `Store::spend_allowance` fails in — and this arm is the
+            // plain-language path that refusal was written for: the stage
+            // did not run, the detail says so in the error's own words, and
+            // no comparison is built from a list that was cut short. The
+            // alternative, reading what there was and warning about it,
+            // would put a number in front of a reader that says "this many
+            // findings are still open" when the truth is that SURE did not
+            // read far enough to know.
+            Err(error) => {
+                return (
+                    None,
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::UnknownReason),
+                        detail: format!(
+                            "SURE could not read what an earlier run left open: {error}"
+                        ),
+                    },
+                );
+            }
+        };
+        let previous: Vec<sure_domain::finding::Finding> = previous_dated
+            .iter()
+            .map(|(finding, _)| finding.clone())
+            .collect();
 
         // **Nothing to compare is not a comparison, and it is answered as such.**
         // `reconcile` walks `previous_open`, and every entry it walks lands in
@@ -1468,16 +1766,61 @@ impl Pipeline<'_> {
             );
         }
 
+        // What SURE recorded as written since each earlier finding was stored.
+        // This is the evidence behind the contract's "changing only the test is
+        // not a repair" clause: a check-passing finding whose only recorded
+        // changes are tests stays open below. A read failure stops the stage
+        // rather than letting it close findings on evidence it could not look
+        // at — the same direction the previous-findings read fails in.
+        let writes = match recheck_lifecycle::repair_writes_since(
+            store,
+            &run.project_root,
+            case,
+            &previous_dated,
+        ) {
+            Ok(writes) => writes,
+            Err(error) => {
+                return (
+                    None,
+                    StageOutcome::NotRun {
+                        reason: Some(NotCheckedReason::UnknownReason),
+                        detail: format!(
+                            "SURE could not read which files were written since the earlier run: \
+                             {error}"
+                        ),
+                    },
+                );
+            }
+        };
+
         // Which checks have to pass before an earlier finding may close. The list
-        // is `repair_impact::select_impacted_checks`'s answer, asked of each
-        // contract stage 11 wrote — the module that owns the rule, not a second
-        // rule written here. It is asked rather than stored because a copy of it
-        // on the run would be a second list that could disagree with the contract
-        // it was copied from, and the function is pure.
+        // is `repair_impact::select_impacted_checks`'s answer — the module that
+        // owns the rule, not a second rule written here — asked of the contract
+        // that governs each finding. It is asked rather than stored because a
+        // copy of it on the run would be a second list that could disagree with
+        // the contract it was copied from, and the function is pure.
         //
-        // A finding with no entry here is one `recheck_lifecycle` keeps open, and
-        // that is the right reading for a run that produced no contract for it.
-        let rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
+        // **Two sources of contracts, and the second is what makes closing
+        // reachable at all.** A finding the current run still produces has the
+        // contract stage 11 just wrote for it. A finding the current run no
+        // longer produces — the fix removed what it was about, the very case
+        // this stage exists to resolve — has no contract here, and its contract
+        // is the earlier repair run's; that one is reconstructed the way the
+        // repository answers every *which checks can observe a fix* question:
+        // from the finding itself ([`repair_impact::named_checks`]), through the
+        // same `RepairContract::from_finding` + `select_impacted_checks` pair the
+        // writing path uses, widened against this run's plan. Without the
+        // reconstruction, stage 12 could not tell "the marker the candidate
+        // check was built from is gone" — the one absence `recheck_lifecycle`
+        // resolves — from "nothing observed the fix", which stays open; a fix
+        // that worked would carry its finding open forever (measured 2026-10-14,
+        // the MiQi full-repair E2E: subagent fixed the TODO, re-check reported
+        // both findings still open).
+        //
+        // A finding with no contract from either source — one whose anchors name
+        // no check, so nothing could ever observe a fix — gets no entry, and
+        // `recheck_lifecycle` keeps it open. That is the right reading.
+        let mut rechecks: Vec<(sure_domain::ids::FindingId, Vec<CheckId>)> = run
             .repairs
             .iter()
             .map(|contract| {
@@ -1487,22 +1830,56 @@ impl Pipeline<'_> {
                 )
             })
             .collect();
+        for earlier in &previous {
+            let named = crate::repair_impact::named_checks(earlier);
+            let Ok(reconstructed) =
+                sure_domain::vocabulary::RepairContract::from_finding(earlier, named)
+            else {
+                continue;
+            };
+            rechecks.push((
+                earlier.id.clone(),
+                select_impacted_checks(&reconstructed, &run.schedule),
+            ));
+        }
+        // Which checks this run planned, whatever their results — the
+        // comparison needs the distinction between "planned and unobserved"
+        // and "a candidate check the scanner no longer proposes" (its subject
+        // is gone), which is the one absence that resolves a finding.
+        let planned: Vec<CheckId> = run
+            .schedule
+            .checks()
+            .iter()
+            .map(|scheduled| scheduled.proposal().id().clone())
+            .collect();
         let update = recheck_lifecycle::reconcile(
             LifecycleInputs {
                 previous_open: &previous,
                 current_findings: &run.verdict.findings,
                 check_results: run.report.results(),
                 rechecks: &rechecks,
+                planned: &planned,
                 case,
             },
             run.project_state.id.clone(),
         );
-        let detail = format!(
-            "{} earlier finding(s) stayed open, {} resolved. A finding closes only when every \
-             check its repair contract named has passed in this run.",
+        let (update, kept_for_test_only) =
+            recheck_lifecycle::keep_test_only_fixes_open(update, &writes, case);
+        let mut detail = format!(
+            "{} earlier finding(s) stayed open, {} resolved. A finding closes when every check \
+             its repair contract named has passed in this run — or, for a candidate-driven check, \
+             when this run no longer plans it because the marker it was built from is gone.",
             update.kept_open.len(),
             update.resolved.len(),
         );
+        if !kept_for_test_only.is_empty() {
+            detail.push_str(&format!(
+                " {} of them had passed their checks and stayed open because every file SURE saw \
+                 written since the earlier run is a test file: a failed check is not repaired by \
+                 changing its own test.",
+                kept_for_test_only.len()
+            ));
+        }
         (Some(update), StageOutcome::Ran { detail })
     }
 }
@@ -1533,6 +1910,12 @@ impl Pipeline<'_> {
 ///
 /// # When it cannot write one
 ///
+/// A finding whose evidence cannot carry its severity — a `must_fix` candidate
+/// the scanner inferred from source text, or a model-only finding — gets no
+/// contract: there is no check that can settle it, and asking an agent to
+/// "fix" evidence SURE never established is the false task this rule exists to
+/// prevent. It stays in the report as `cannot_confirm` with a manual next step.
+///
 /// A finding whose evidence names no check this run planned gets an empty seed,
 /// and `from_finding` refuses it — correctly, because a contract naming a check
 /// nobody can run is worse than no contract. The refusal is not swallowed: the
@@ -1542,41 +1925,90 @@ impl Pipeline<'_> {
 ///
 /// [`RepairContract::from_finding`]: sure_domain::vocabulary::RepairContract::from_finding
 /// [`seed_rechecks`]: crate::repair_impact::seed_rechecks
-fn repair_contracts(
-    run: &RunOutcome,
-) -> (Vec<sure_domain::vocabulary::RepairContract>, StageOutcome) {
-    if run.verdict.findings.is_empty() {
-        return (
-            Vec::new(),
-            StageOutcome::Ran {
-                detail: "no check produced a finding, so there is nothing to write instructions \
-                         for."
-                    .to_owned(),
-            },
-        );
-    }
-
+/// The contracts the findings justify, and the ones they do not.
+///
+/// Split out from [`repair_contracts`] so the rule can be tested without a whole
+/// run: a finding whose evidence cannot carry its severity is a candidate (or a
+/// model opinion), not a settled defect, and no check can settle it. It stays in
+/// the report with a manual next step; it does not become a repair task.
+fn contracts_for(
+    findings: &[sure_domain::finding::Finding],
+    schedule: &crate::schedule::CheckSchedule,
+) -> (Vec<sure_domain::vocabulary::RepairContract>, Vec<String>) {
     let mut contracts = Vec::new();
     let mut refused: Vec<String> = Vec::new();
-    for finding in &run.verdict.findings {
+    for finding in findings {
+        // A contract is an instruction to change the project and a check that
+        // can observe the change. A finding whose own evidence cannot carry its
+        // severity — a `must_fix` candidate the scanner inferred from source
+        // text, or a model-only finding — has no such check: the candidate
+        // scanner's question is not settled by a command, and writing a repair
+        // contract for it asks an agent to "fix" evidence SURE never
+        // established. The finding stays in the report as `cannot_confirm` with
+        // a manual next step (see `findings_from_checks`); it does not become a
+        // repair task.
+        if !finding.is_grounded() {
+            refused.push(format!(
+                "{} (candidate evidence: no check can settle it)",
+                finding.title
+            ));
+            continue;
+        }
         // The seed comes from the finding and is filtered to checks this run
         // planned, so it can never name a check nobody can re-run.
-        let seed = seed_rechecks(finding, &run.schedule);
+        let seed = seed_rechecks(finding, schedule);
         match sure_domain::vocabulary::RepairContract::from_finding(finding, seed) {
             Ok(contract) => contracts.push(contract),
             Err(error) => refused.push(format!("{} ({error})", finding.title)),
         }
     }
+    (contracts, refused)
+}
 
-    let findings = run.verdict.findings.len();
+fn repair_contracts(
+    run: &RunOutcome,
+) -> (Vec<sure_domain::vocabulary::RepairContract>, StageOutcome) {
+    // **Only a finding that still needs attention needs instructions.** A
+    // resolved finding was closed by evidence and an accepted one (ADR 0019) was
+    // closed by the person; writing a repair contract for either would ask an
+    // agent to change a project about a question somebody already answered. The
+    // stage keeps its shape for the ordinary case because every open finding is
+    // in this list.
+    let needing: Vec<Finding> = run
+        .verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.status.needs_attention())
+        .cloned()
+        .collect();
+    if needing.is_empty() {
+        return (
+            Vec::new(),
+            StageOutcome::Ran {
+                detail: if run.verdict.findings.is_empty() {
+                    "no check produced a finding, so there is nothing to write instructions for."
+                        .to_owned()
+                } else {
+                    "every finding this run produced is resolved or accepted, so there is \
+                     nothing to write instructions for."
+                        .to_owned()
+                },
+            },
+        );
+    }
+
+    let (contracts, refused) = contracts_for(&needing, &run.schedule);
+
+    let findings = needing.len();
     if contracts.is_empty() {
         return (
             Vec::new(),
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{findings} finding(s) need instructions and none of them names a check this \
-                     run planned, so SURE has no acceptance test it is willing to write: {}",
+                    "{findings} finding(s) need instructions and none of them is grounded in \
+                     evidence a check can settle, so SURE has no acceptance test it is willing to \
+                     write: {}",
                     refused.join("; ")
                 ),
             },
@@ -1589,8 +2021,9 @@ fn repair_contracts(
             StageOutcome::NotRun {
                 reason: None,
                 detail: format!(
-                    "{written} of {findings} finding(s) have instructions; the rest name no check \
-                     this run planned and SURE will not invent an acceptance test for them: {}",
+                    "{written} of {findings} finding(s) have instructions; the rest are not \
+                     grounded in evidence a check can settle, and SURE will not invent an \
+                     acceptance test for them: {}",
                     refused.join("; ")
                 ),
             },
@@ -1613,35 +2046,56 @@ fn propose_everything(
     graph: &ComponentGraph,
     intent: &ProjectIntent,
     preferences: &crate::config::ChecksConfig,
+    external_commands: &[ExternalCommand],
     builder: &mut PlanBuilder,
 ) -> Planned {
     let mut planned = Planned::default();
 
-    if let Some(node) = node_of(discovery) {
-        let checks = checks::node::NodeChecks::of(&node, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
+    if external_commands.is_empty() {
+        if let Some(node) = node_of(discovery) {
+            let checks = checks::node::NodeChecks::of(&node, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
 
-        // The runtime probes need the Node project, because a probe is a command
-        // the manifest declares. A project that is not Node-shaped plans none,
-        // which is a statement about the project rather than a failure.
-        match ProbePlan::of(graph, &node, preferences) {
-            Ok(probes) => {
-                planned.not_planned = probes.not_planned().len();
-                probes.add_to(builder);
+            // The runtime probes need the Node project, because a probe is a
+            // command the manifest declares. A project that is not Node-shaped
+            // plans none, which is a statement about the project rather than a
+            // failure.
+            match ProbePlan::of(graph, &node, preferences) {
+                Ok(probes) => {
+                    planned.not_planned = probes.not_planned().len();
+                    probes.add_to(builder);
+                }
+                Err(refusal) => planned.probe_refusal = Some(refusal),
             }
-            Err(refusal) => planned.probe_refusal = Some(refusal),
         }
-    }
-    if let Some(python) = python_of(discovery) {
-        let checks = checks::python::PythonChecks::of(&python, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
-    }
-    if let Some(rust) = rust_of(discovery) {
-        let checks = checks::rust::RustChecks::of(&rust, &discovery.root);
-        planned.missing.extend(checks.missing().iter().cloned());
-        checks.add_to(builder);
+        if let Some(python) = python_of(discovery) {
+            let checks = checks::python::PythonChecks::of(&python, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
+        }
+        if let Some(rust) = rust_of(discovery) {
+            let checks = checks::rust::RustChecks::of(&rust, &discovery.root);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(builder);
+        }
+        if let Some(go) = go_of(discovery) {
+            let checks = checks::go::GoChecks::of(&go);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&go, &discovery.root, builder);
+        }
+        if let Some(dotnet) = dotnet_of(discovery) {
+            let checks = checks::dotnet::DotnetChecks::of(&dotnet);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&dotnet, &discovery.root, builder);
+        }
+        if let Some(java) = java_of(discovery) {
+            let checks = checks::java::JavaChecks::of(&java);
+            planned.missing.extend(checks.missing().iter().cloned());
+            checks.add_to(&java, &discovery.root, builder);
+        }
+    } else {
+        plan_external_commands(external_commands, &discovery.root, builder, &mut planned);
     }
 
     // The project's own declared services, planned **outside** the three blocks
@@ -1682,6 +2136,69 @@ fn propose_everything(
     planned
 }
 
+/// Plan the user's commands for a project SURE cannot discover.
+///
+/// **The commands replace the native plan rather than joining it.** A user who
+/// wrote a commands file has said how this project is checked; running a second
+/// set of discovered commands beside it would make the report about a plan the
+/// user did not write. Roles the file does not name are recorded as
+/// `NotDeclared` — the project-level scope limit that keeps a test-only override
+/// from turning into a green verdict by omission.
+fn plan_external_commands(
+    commands: &[ExternalCommand],
+    root: &Path,
+    builder: &mut PlanBuilder,
+    planned: &mut Planned,
+) {
+    let supplied: Vec<ExternalRole> = commands.iter().map(|command| command.role).collect();
+    for role in ExternalRole::ALL {
+        if supplied.contains(role) {
+            continue;
+        }
+        planned.missing.push(MissingCommand::new(
+            check_id(
+                "your SURE commands file",
+                &format!("external{}", role.as_str()),
+            ),
+            role.title(),
+            "your SURE commands file",
+            role.severity(),
+            role.critical(),
+            MissingKind::NotDeclared,
+        ));
+    }
+    for command in commands {
+        let Some((program, arguments)) = command.argv.split_first() else {
+            continue;
+        };
+        let reason = CheckReason::DeclaredCommand {
+            declared_in: "your SURE commands file".to_owned(),
+            command: command.command_line(),
+        };
+        let proposal = CheckProposal::new(
+            check_id(
+                "your SURE commands file",
+                &format!("external{}", command.role.as_str()),
+            ),
+            command.role.title(),
+            command.role.severity(),
+            command.role.critical(),
+            EvidenceClass::DeterministicCheck,
+            reason,
+            &[command.role.action()],
+        );
+        let spec = CommandSpec::new(
+            program.clone(),
+            root,
+            Environment::inherited(),
+            Limits::new(Duration::from_secs(600), 64 * 1024, 64 * 1024),
+        )
+        .with_arguments(arguments.iter().cloned())
+        .with_user_declared(true);
+        drop(builder.propose(PlannedWork::new(proposal, CheckOperation::Command(spec))));
+    }
+}
+
 /// The work beside one stage-7 candidate: the reading that produced it.
 ///
 /// The sentence is [`CheckReason::plain_description`] — the same rendering the
@@ -1700,6 +2217,151 @@ fn reading_observation(proposal: &CheckProposal) -> CheckOperation {
 }
 
 /// Stage 7: the completeness scanners, and the aggregator that orders them.
+/// 阶段 8 发给模型的评估请求(纯函数,可测)。
+///
+/// grounded:只给阶段 7 已经观察到的候选(各自的 id、标题、严重度与判据理由),
+/// 要求模型逐条回答"problem/noise + 一句理由",并明确禁止发明候选之外的
+/// 内容。行格式供 [`parse_assessment`] 解析;无法解析的整段文本不进 finding。
+fn assessment_prompt(project: &Path, candidates: &Candidates) -> String {
+    let mut prompt =
+        String::from("You are assessing completeness candidates SURE observed in the project at ");
+    prompt.push_str(&project.display().to_string());
+    prompt.push_str(
+        ".\nFor EACH candidate below answer with exactly one line:\n\
+         <candidate id>: problem — <one short sentence: why the evidence supports this is a \
+         real problem for hand-off>\n\
+         or\n\
+         <candidate id>: noise — <one short sentence: why this is style noise>\n\
+         Assess only the candidates listed. Do not invent candidates.\n\nCandidates:\n",
+    );
+    for candidate in &candidates.material {
+        prompt.push_str(&format!(
+            "- {}: {} (severity: {}; because: {})\n",
+            candidate.id,
+            candidate.title,
+            candidate.severity.as_str(),
+            candidate.because
+        ));
+    }
+    prompt
+}
+
+/// 一条候选的模型判定。
+#[derive(Debug)]
+struct ModelVerdict {
+    candidate_id: String,
+    is_problem: bool,
+    reason: String,
+}
+
+/// 解析模型回复里的 `id: problem|noise — reason` 行(纯函数,可测)。
+///
+/// 宽容但绝不猜测:大小写不敏感;只认 [`Candidates::material`] 里出现过的
+/// id;分隔符接受 em dash 或 " - ";无法识别的行一律忽略——finding 只从
+/// 被理解的行里来。
+fn parse_assessment(text: &str, candidates: &Candidates) -> Vec<ModelVerdict> {
+    let mut verdicts: Vec<ModelVerdict> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*']).trim_start();
+        let Some((id_part, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let id = id_part.trim();
+        if !candidates
+            .material
+            .iter()
+            .any(|candidate| candidate.id == id)
+        {
+            continue;
+        }
+        let rest = rest.trim();
+        let (word, reason) = rest
+            .split_once('—')
+            .or_else(|| rest.split_once(" - "))
+            .unwrap_or((rest, ""));
+        let word = word.trim().to_ascii_lowercase();
+        if word != "problem" && word != "noise" {
+            continue;
+        }
+        if verdicts.iter().any(|verdict| verdict.candidate_id == id) {
+            continue; // 同一候选出现多行:只认第一行,后面的不覆盖也不叠加
+        }
+        verdicts.push(ModelVerdict {
+            candidate_id: id.to_owned(),
+            is_problem: word == "problem",
+            reason: reason.trim().to_owned(),
+        });
+    }
+    verdicts
+}
+
+/// ADR 0005 的执行点:模型评估证据不能单独支撑 must_fix,确认项的严重度
+/// 因此以 ShouldFixFirst 为上限,其余原样(只执行既有规则,不发明新档)。
+fn model_supported_severity(severity: Severity) -> Severity {
+    match severity {
+        Severity::MustFix => Severity::ShouldFixFirst,
+        other => other,
+    }
+}
+
+/// Record on the finding itself that a person reviewed and accepted it.
+///
+/// The evidence, severity and explanation stay exactly as the check produced
+/// them; what changes is the status and the two sentences a reader acts on. The
+/// reason and date live in the store row (`sure acknowledge --list`), and this
+/// function names the row rather than restating the reason into text the checked
+/// project could influence.
+fn accept_finding(
+    finding: &mut Finding,
+    recorded: &crate::acknowledgement::RecordedAcknowledgement,
+) {
+    finding.status = FindingStatus::AcceptedRisk;
+    finding.accepted_record = Some(recorded.row);
+    finding.accepted_reason = Some(crate::redact::escape_control_characters(
+        &recorded.acknowledgement.reason,
+    ));
+    finding.accepted_at_ms = Some(recorded.acknowledgement.recorded_at_ms);
+    finding.user_impact = "You reviewed this and accepted the risk. SURE still cannot settle \
+        it, and your decision is recorded outside the project."
+        .to_owned();
+    finding.next_step = format!(
+        "No action is needed. You reviewed this and accepted the risk (record {}); if the \
+         evidence at this location changes, the finding comes back as unresolved and you can \
+         review it again.",
+        recorded.row
+    );
+}
+
+/// Attach the model's assessment to the candidate finding it was about.
+///
+/// The candidate is already a finding from its own check; a second
+/// `Model assessment:` finding would say the same thing twice (measured
+/// 2026-11-03: 59 duplicate findings against 60 UI-action groups). The verdict
+/// becomes a sentence in the finding's explanation instead — the model's opinion
+/// stays visible, and the status stays the candidate's, because model evidence
+/// cannot upgrade it (ADR 0005).
+fn annotate_candidate_findings(pairs: &mut [(Finding, CheckId)], annotations: &[ModelVerdict]) {
+    for (finding, check_id) in pairs.iter_mut() {
+        let Some(verdict) = annotations
+            .iter()
+            .find(|verdict| verdict.candidate_id == check_id.as_str())
+        else {
+            continue;
+        };
+        let reason = verdict.reason.trim();
+        let sentence = if reason.is_empty() {
+            "A model assessed this candidate as a problem worth fixing first.".to_owned()
+        } else {
+            format!("A model assessed this candidate as a problem worth fixing first: {reason}")
+        };
+        finding.explanation = if finding.explanation.trim().is_empty() {
+            sentence
+        } else {
+            format!("{} {sentence}", finding.explanation.trim_end())
+        };
+    }
+}
+
 fn completeness(discovery: &Discovery, intent: &ProjectIntent) -> Candidates {
     let aggregated =
         false_completion_aggregator::aggregate(completeness_proposals(discovery, intent));
@@ -1774,6 +2436,27 @@ fn rust_of(discovery: &Discovery) -> Option<crate::discover::RustProject> {
     }
 }
 
+fn go_of(discovery: &Discovery) -> Option<crate::discover::GoProject> {
+    match &discovery.report(Ecosystem::Go)?.findings {
+        Findings::Go(go) => Some((**go).clone()),
+        _ => None,
+    }
+}
+
+fn dotnet_of(discovery: &Discovery) -> Option<crate::discover::DotnetProject> {
+    match &discovery.report(Ecosystem::Dotnet)?.findings {
+        Findings::Dotnet(project) => Some((**project).clone()),
+        _ => None,
+    }
+}
+
+fn java_of(discovery: &Discovery) -> Option<crate::discover::JavaProject> {
+    match &discovery.report(Ecosystem::Java)?.findings {
+        Findings::Java(project) => Some((**project).clone()),
+        _ => None,
+    }
+}
+
 /// A checked claim in the verdict's own type.
 ///
 /// [`crate::claim_checker`] reports what it established; [`ProjectVerdict`] holds
@@ -1811,13 +2494,28 @@ fn describe_discovery(discovery: &Discovery, support: &ProjectSupport) -> String
     } else {
         stacks.join(", ")
     };
-    let complete = if discovery.is_complete() {
-        "all of it was read"
+    // A path the person's settings excluded is not a loss, but it is also not
+    // "all of it was read": the sentence has to say whose decision left it out,
+    // or a reader cannot tell the exclusion from an empty directory.
+    let excluded = discovery
+        .scan
+        .skipped()
+        .iter()
+        .filter(|skip| skip.reason == crate::scan::SkipReason::UserExcluded)
+        .count();
+    let read = if discovery.is_complete() {
+        if excluded == 0 {
+            "all of it was read".to_owned()
+        } else {
+            format!("all of it was read except {excluded} path(s) your settings exclude")
+        }
+    } else if excluded == 0 {
+        "part of it was not read".to_owned()
     } else {
-        "part of it was not read"
+        format!("part of it was not read, and {excluded} path(s) your settings exclude")
     };
     format!(
-        "{named}; {complete}. Support reaches level {}.",
+        "{named}; {read}. Support reaches level {}.",
         support.level.letter()
     )
 }
@@ -1850,6 +2548,13 @@ fn describe_plan(
         schedule.may_run().count(),
         schedule.blocked().count(),
     )];
+    if !planned.missing.is_empty() {
+        parts.push(format!(
+            "{} declared check(s) have no command because the project does not declare one; \
+             they are listed as not checked below.",
+            planned.missing.len()
+        ));
+    }
     if !refused.is_empty() {
         parts.push(format!(
             "{} candidate(s) could not become a check: {}.",
@@ -1942,23 +2647,25 @@ fn describe_dynamic(
                 scheduled.proposal().requirements().runs_project_code()
             })
     };
-    let stopped: Vec<&str> = dynamic_checks()
-        .filter(|scheduled| {
+    let stopped: Vec<(&str, Option<NotCheckedReason>)> = dynamic_checks()
+        .filter_map(|scheduled| {
             enforcement
                 .stopped()
                 .iter()
-                .any(|result| &result.id == scheduled.proposal().id())
+                .find(|result| &result.id == scheduled.proposal().id())
+                .map(|result| (scheduled.proposal().title(), result.not_checked_reason))
         })
-        .map(|scheduled| scheduled.proposal().title())
         .collect();
+    let stopped_titles: Vec<&str> = stopped.iter().map(|(title, _)| *title).collect();
+    let reason = common_not_checked_reason(stopped.iter().map(|(_, reason)| *reason));
+    let why = stopped_reason_phrase(reason);
     if stopped.len() == dynamic {
         return StageOutcome::NotRun {
-            reason: Some(NotCheckedReason::ExecutionNotAuthorized),
+            reason,
             detail: format!(
-                "{dynamic} check(s) would run your project's code and the execution mode stopped \
-                 every one of them, so none was carried out and each is recorded as not checked \
-                 rather than passed: {}.",
-                stopped.join(", ")
+                "{dynamic} check(s) would run your project's code, but {why}, so none was \
+                 carried out and each is recorded as not checked rather than passed: {}.",
+                stopped_titles.join(", ")
             ),
         };
     }
@@ -1972,14 +2679,44 @@ fn describe_dynamic(
         };
     }
     StageOutcome::NotRun {
-        reason: Some(NotCheckedReason::ExecutionNotAuthorized),
+        reason,
         detail: format!(
-            "{dynamic} check(s) would run your project's code. The execution mode stopped {} of \
-             them and those are recorded as not checked: {}. The rest were carried out and each \
+            "{dynamic} check(s) would run your project's code. {} of them did not run because \
+             {why}, and those are recorded as not checked: {}. The rest were carried out and each \
              has a result.",
             stopped.len(),
-            stopped.join(", ")
+            stopped_titles.join(", ")
         ),
+    }
+}
+
+/// The reason every stopped check shares, if they share one.
+///
+/// A mixed set answers `None` rather than picking one check's reason and
+/// speaking for the others: [`StageOutcome::NotRun`] allows that, and a stage
+/// sentence that named one permission while another stopped a check would be
+/// the same misattribution this helper exists to stop.
+fn common_not_checked_reason(
+    mut reasons: impl Iterator<Item = Option<NotCheckedReason>>,
+) -> Option<NotCheckedReason> {
+    let first = reasons.next()??;
+    reasons.all(|reason| reason == Some(first)).then_some(first)
+}
+
+/// Why stopped checks did not run, in the terms of the permission that stopped
+/// them rather than the execution mode alone.
+fn stopped_reason_phrase(reason: Option<NotCheckedReason>) -> &'static str {
+    match reason {
+        Some(NotCheckedReason::DependencyInstallNotPermitted) => {
+            "installing their dependencies is not allowed"
+        }
+        Some(NotCheckedReason::NetworkNotPermitted) => "network access is not allowed",
+        Some(NotCheckedReason::ExecutionNotAuthorized) => "the execution mode stopped them",
+        Some(NotCheckedReason::UserDeclined) => "you declined them",
+        Some(NotCheckedReason::ContainerExecutionUnavailable) => {
+            "this build cannot run checks in a container"
+        }
+        _ => "the run's permissions stopped them",
     }
 }
 
@@ -2308,8 +3045,11 @@ mod tests {
                 purpose: Purpose::Recheck,
                 config: &config,
                 execution: ExecutionSettings::inspect_only(),
+                scan_excludes: &[],
                 store: Some(store),
                 goal: None,
+                analysis: Default::default(),
+                external_commands: &[],
                 runner: &runner,
             }
             .run()
@@ -2436,6 +3176,176 @@ mod tests {
         );
     }
 
+    // --- the repair loop's closing half ----------------------------------
+
+    /// A stored finding whose anchor names the check that produced it.
+    ///
+    /// The shape the store really holds for a finding a check produced, measured
+    /// off the TODO candidate's stored row: `subject_id` is the check id
+    /// (`chk_candidatetodo<…>`), which is what a re-check reads to answer *which
+    /// checks can observe a fix for this finding*. [`a_stored_finding`] anchors at
+    /// a file and names no check — right for a test about the history read and
+    /// nothing for a test about closing.
+    fn a_stored_finding_about_a_check(
+        title: &str,
+        location: &str,
+        check: &str,
+    ) -> sure_domain::finding::Finding {
+        use sure_domain::evidence::{AnchorSubject, Evidence, EvidenceAnchor, EvidenceClass};
+        use sure_domain::finding::{
+            AssessmentSource, FindingBuilder, FindingStatus, SeverityRationale,
+        };
+        use sure_domain::ids::{CheckId, FindingId};
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let check = CheckId::parse(check).expect("a fixture check id");
+        FindingBuilder::new(
+            AssessmentSource::DeterministicCheck,
+            SeverityRationale::BlocksHandOff,
+        )
+        .id(FindingId::generate())
+        .title(title)
+        .severity(Severity::MustFix)
+        .status(FindingStatus::Open)
+        .explanation("the marker the check was built from")
+        .user_impact("the work is unfinished")
+        .next_step("remove the marker")
+        .fingerprint(fingerprint.clone())
+        .evidence(vec![Evidence::new(
+            EvidenceClass::DeterministicCheck,
+            "the check did not pass",
+            EvidenceAnchor::new(
+                AnchorSubject::LineRange,
+                location,
+                "the candidate on line 1",
+            )
+            .with_subject_id(check),
+            Some(fingerprint),
+            Severity::MustFix,
+        )])
+        .build()
+        .expect("the fixture finding is valid")
+    }
+
+    /// A fix that removed its marker closes the stored finding on the next
+    /// re-check — while a check the run never observed keeps its finding open.
+    ///
+    /// **This is the wiring the full-repair loop needed, observed through the
+    /// stage rather than through `recheck_lifecycle`.** `c4fd952` taught
+    /// `recheck_passed` that *a candidate check this run did not plan* is the
+    /// scanner saying the marker it was built from is gone — a resolution — but
+    /// stage 12 only ever handed it the contracts of the *current* run's findings,
+    /// and a fix that worked leaves the current run with no finding to write one
+    /// from. An earlier finding's contract is answered here the way
+    /// `repair_impact`'s own doctrine answers it: **asked**, of the finding (the
+    /// checks its anchors name, [`crate::repair_impact::named_checks`]), widened
+    /// against this run's plan — never stored a second time, so the store stays
+    /// the only copy and this stage stays a reading rather than a cache.
+    ///
+    /// The control is the second stored finding, anchored at a check that is also
+    /// not planned and is *not* candidate-driven: its absence is an absence of
+    /// observation and it must stay open. Without it, a stage that closed every
+    /// earlier finding would satisfy the first assertion.
+    #[test]
+    fn a_recheck_closes_a_stored_finding_whose_candidate_check_is_no_longer_planned() {
+        let root = crate::store::scratch_root().join(format!(
+            "pipeline-recheck-candidate-gone-{}",
+            std::process::id()
+        ));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot clear {}: {error}", root.display()),
+        }
+        let project = root.join("project");
+        let store_dir = root.join("store");
+        std::fs::create_dir_all(&project).expect("a scratch project");
+        std::fs::create_dir_all(&store_dir).expect("a scratch store directory");
+        std::fs::write(
+            project.join("README.md"),
+            "# A project SURE was pointed at\n\nThe marker the stored finding was about is \
+             gone, and this run's own plan is where that shows.\n",
+        )
+        .expect("a project file");
+
+        let store = Store::open_at(&store_dir.join("sure.db")).expect("the store opens");
+        let config = Config::default();
+        let runner = nothing_starts();
+        let run_recheck = |store: &Store| {
+            Pipeline {
+                project: &project,
+                purpose: Purpose::Recheck,
+                config: &config,
+                execution: ExecutionSettings::inspect_only(),
+                scan_excludes: &[],
+                store: Some(store),
+                goal: None,
+                analysis: Default::default(),
+                external_commands: &[],
+                runner: &runner,
+            }
+            .run()
+        };
+
+        // The first run answers what text the pipeline uses as this project's
+        // root; the stored rows must carry exactly it to be read back.
+        let first = run_recheck(&store);
+        let first_run = first
+            .run
+            .as_ref()
+            .expect("a run over a readable scratch project reaches its verdict");
+        let project_root = first_run.project_root.clone();
+
+        let removed_marker = a_stored_finding_about_a_check(
+            "project contains TODO or FIXME comments in production code",
+            "pay.py",
+            "chk_candidatetodo9a707a1f764658ab",
+        );
+        let never_observed = a_stored_finding_about_a_check(
+            "a declared command did not run",
+            "package.json",
+            "chk_nodetest",
+        );
+        crate::recheck_lifecycle::store_run(
+            &store,
+            &project_root,
+            &first_run.project_state.id,
+            &[removed_marker.clone(), never_observed.clone()],
+            &[],
+        )
+        .expect("the earlier run's findings are stored");
+
+        let second = run_recheck(&store);
+        let run = second.run.as_ref().expect("the run finishes");
+        let lifecycle = run
+            .lifecycle
+            .as_ref()
+            .expect("a readable history is compared against");
+        assert_eq!(
+            lifecycle.resolved.len(),
+            1,
+            "the finding whose marker the fix removed did not close; kept open: {:?}",
+            lifecycle
+                .kept_open
+                .iter()
+                .map(|finding| finding.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(lifecycle.resolved[0].title, removed_marker.title);
+        assert_eq!(
+            lifecycle.resolved[0].status,
+            sure_domain::finding::FindingStatus::Resolved
+        );
+        assert_eq!(
+            lifecycle.kept_open.len(),
+            1,
+            "a check the run did not plan and never observed lost its finding, or the fixed \
+             finding was not the only one that closed"
+        );
+        assert_eq!(lifecycle.kept_open[0].title, never_observed.title);
+    }
+
     // --- what a run may start, read rather than argued --------------------
 
     /// A runner that starts nothing, because a stop has already been asked for.
@@ -2449,6 +3359,217 @@ mod tests {
     /// agree with this one on everything except the thing being measured.
     ///
     /// [`Termination::CancelledBeforeStart`]: crate::process::Termination::CancelledBeforeStart
+    /// 阶段 8 接入(最小版)的测试用分析器:回放一段固定文本。
+    struct ScriptedAnalyzer(String);
+
+    impl crate::analysis_provider::Analyzer for ScriptedAnalyzer {
+        fn analyze(
+            &self,
+            _request: crate::analysis_provider::AnalysisRequest<'_>,
+        ) -> Result<
+            crate::analysis_provider::AnalysisResponse,
+            crate::analysis_provider::AnalysisError,
+        > {
+            Ok(crate::analysis_provider::AnalysisResponse::new(
+                self.0.clone(),
+            ))
+        }
+    }
+
+    fn one_candidate() -> Candidates {
+        Candidates {
+            material: vec![CandidateSummary {
+                id: "cand_todo".to_owned(),
+                title: "TODO comment in production code".to_owned(),
+                severity: Severity::MustFix,
+                critical: true,
+                because: "a TODO comment was found in a source file".to_owned(),
+            }],
+            style_noise: Vec::new(),
+            duplicates_dropped: 0,
+        }
+    }
+
+    fn assessment_probe<'a>(
+        project: &'a Path,
+        config: &'a Config,
+        runner: &'a dyn CheckRunner,
+    ) -> Pipeline<'a> {
+        Pipeline {
+            project,
+            purpose: Purpose::Recheck,
+            config,
+            execution: ExecutionSettings::inspect_only(),
+            scan_excludes: &[],
+            store: None,
+            goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
+            runner,
+        }
+    }
+
+    #[test]
+    fn a_model_flagged_candidate_becomes_a_model_only_result() {
+        // 接线:模型确认的候选成为一条 fail 结果,证据类 ModelAssessment,
+        // 且按 ADR 0005 钳制严重度与 critical——模型独证不判"不可交付"。
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
+
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &BTreeSet::new());
+        assert!(results.is_empty(), "{results:?}");
+        assert!(annotations.is_empty(), "{annotations:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].status, FindingStatus::Open);
+        assert_eq!(
+            findings[0].assessment_source,
+            AssessmentSource::ModelAssessment
+        );
+        assert_eq!(findings[0].severity, Severity::ShouldFixFirst);
+        assert!(findings[0].explanation.contains("unfinished work"));
+        assert!(findings[0].title.starts_with("Model assessment:"));
+        assert_eq!(findings[0].evidence.len(), 1);
+        assert_eq!(
+            findings[0].evidence[0].class,
+            EvidenceClass::ModelAssessment
+        );
+        assert_eq!(
+            findings[0].evidence[0].anchor.subject,
+            sure_domain::evidence::AnchorSubject::Model
+        );
+    }
+
+    #[test]
+    fn a_candidate_already_reported_gets_an_annotation_instead_of_a_second_finding() {
+        // Measured on MiQi Desktop (2026-11-03): 60 UI-action groups produced 59
+        // `Model assessment:` duplicates. A candidate this run already turned
+        // into a check result is already a finding; the verdict annotates it.
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: problem — unfinished work\n".to_owned());
+        let mut existing = BTreeSet::new();
+        existing.insert("cand_todo".to_owned());
+
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &existing);
+        assert!(results.is_empty(), "{results:?}");
+        assert!(
+            findings.is_empty(),
+            "the candidate is already a finding: {findings:?}"
+        );
+        assert_eq!(annotations.len(), 1, "{annotations:?}");
+        assert_eq!(annotations[0].candidate_id, "cand_todo");
+        assert_eq!(annotations[0].reason, "unfinished work");
+        let StageOutcome::Ran { detail } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(detail.contains("already carried"), "{detail}");
+    }
+
+    #[test]
+    fn the_model_annotation_is_written_into_the_candidate_finding() {
+        let finding = a_stored_finding("TODO comment in production code", "src/main.rs");
+        let check = check_id("src/main.rs", "candidate_todo");
+        let mut pairs = vec![(finding, check.clone())];
+        annotate_candidate_findings(
+            &mut pairs,
+            &[ModelVerdict {
+                candidate_id: check.as_str().to_owned(),
+                is_problem: true,
+                reason: "unfinished work".to_owned(),
+            }],
+        );
+        let explanation = &pairs[0].0.explanation;
+        assert!(
+            explanation.contains("the send path returns before the provider is called"),
+            "the finding's own words stay: {explanation}"
+        );
+        assert!(
+            explanation.contains("A model assessed this candidate"),
+            "{explanation}"
+        );
+        assert!(explanation.contains("unfinished work"), "{explanation}");
+    }
+
+    #[test]
+    fn a_noise_verdict_produces_no_result() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer("cand_todo: noise — style only\n".to_owned());
+
+        let (outcome, results, findings, annotations) =
+            pipeline.assess_candidates(&analyzer, &fingerprint, &one_candidate(), &BTreeSet::new());
+        assert!(results.is_empty(), "{results:?}");
+        assert!(annotations.is_empty(), "{annotations:?}");
+
+        assert!(matches!(outcome, StageOutcome::Ran { .. }), "{outcome:?}");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn no_candidates_keeps_stage_8_out_of_the_work() {
+        let directory = std::env::temp_dir();
+        let config = Config::default();
+        let runner = nothing_starts();
+        let pipeline = assessment_probe(&directory, &config, &runner);
+        let fingerprint = FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("fixture");
+        let analyzer = ScriptedAnalyzer(String::new());
+
+        let (outcome, results, findings, annotations) = pipeline.assess_candidates(
+            &analyzer,
+            &fingerprint,
+            &Candidates::default(),
+            &BTreeSet::new(),
+        );
+
+        assert!(
+            matches!(outcome, StageOutcome::NotPartOfWork { .. }),
+            "{outcome:?}"
+        );
+        assert!(results.is_empty());
+        assert!(findings.is_empty());
+        assert!(annotations.is_empty());
+    }
+
+    #[test]
+    fn the_assessment_prompt_lists_candidates_and_the_line_format() {
+        let prompt = assessment_prompt(Path::new("/tmp/project"), &one_candidate());
+        assert!(prompt.contains("cand_todo"), "{prompt}");
+        assert!(prompt.contains("problem — "), "{prompt}");
+        assert!(prompt.contains("Do not invent candidates."), "{prompt}");
+    }
+
+    #[test]
+    fn parse_assessment_reads_verdict_lines_and_ignores_the_rest() {
+        let candidates = one_candidate();
+        let verdicts = parse_assessment(
+            "Sure!\ncand_todo: PROBLEM — real issue\ncand_unknown: problem — not listed\n\
+             cand_todo: noise — duplicate line\nunparseable line\n",
+            &candidates,
+        );
+        assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+        assert!(verdicts[0].is_problem);
+        assert_eq!(verdicts[0].reason, "real issue");
+        // " - " 分隔也认;noise 判定如实
+        let alt = parse_assessment("cand_todo: noise - just style\n", &candidates);
+        assert_eq!(alt.len(), 1);
+        assert!(!alt[0].is_problem);
+        assert_eq!(alt[0].reason, "just style");
+    }
+
     fn nothing_starts() -> ProcessRunner {
         let stop = Cancellation::new();
         stop.cancel();
@@ -2632,8 +3753,11 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: ExecutionSettings::inspect_only(),
+            scan_excludes: &[],
             store: None,
             goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -2689,8 +3813,11 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -2763,8 +3890,11 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -3111,8 +4241,11 @@ mod tests {
                 purpose: Purpose::Check,
                 config: &config,
                 execution: authority.execution(),
+                scan_excludes: &[],
                 store: None,
                 goal: None,
+                analysis: Default::default(),
+                external_commands: &[],
                 runner: &runner,
             }
             .run();
@@ -3366,8 +4499,11 @@ mod tests {
             purpose: Purpose::Check,
             config: &config,
             execution: authority.execution(),
+            scan_excludes: &[],
             store: None,
             goal: None,
+            analysis: Default::default(),
+            external_commands: &[],
             runner: &runner,
         }
         .run();
@@ -3426,6 +4562,107 @@ mod tests {
             line.contains(&now.digest),
             "the line does not name the state the project is actually in, so a reader cannot tell \
              what this run's results are stale against: {line}"
+        );
+    }
+
+    #[test]
+    fn a_candidate_must_fix_is_not_offered_as_a_repair_contract() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::finding::FindingStatus;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "UI action: click handler on element",
+            Severity::MustFix,
+            true,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        assert_eq!(findings[0].status, FindingStatus::CannotConfirm);
+        let (contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            contracts.is_empty(),
+            "a candidate was offered as a repair contract: {contracts:?}"
+        );
+        assert!(
+            refused
+                .iter()
+                .any(|reason| reason.contains("candidate evidence")),
+            "the refusal does not say the finding is candidate evidence: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_stage_sentence_only_names_a_reason_every_stopped_check_shares() {
+        let install = Some(NotCheckedReason::DependencyInstallNotPermitted);
+        let network = Some(NotCheckedReason::NetworkNotPermitted);
+
+        assert_eq!(
+            common_not_checked_reason([install, install].into_iter()),
+            install
+        );
+        assert_eq!(
+            common_not_checked_reason([install, network].into_iter()),
+            None,
+            "a mixed set named one check's permission for the others"
+        );
+        assert_eq!(
+            common_not_checked_reason([install, None].into_iter()),
+            None,
+            "a check with no recorded reason was folded into a permission it never named"
+        );
+        assert_eq!(
+            stopped_reason_phrase(install),
+            "installing their dependencies is not allowed"
+        );
+        assert_eq!(
+            stopped_reason_phrase(Some(NotCheckedReason::ExecutionNotAuthorized)),
+            "the execution mode stopped them"
+        );
+    }
+
+    #[test]
+    fn a_todo_candidate_is_not_excluded_by_the_candidate_rule() {
+        use sure_domain::evidence::EvidenceClass;
+        use sure_domain::ids::{CheckId, FingerprintId};
+        use sure_domain::severity::Severity;
+        use sure_domain::status::CheckResult;
+
+        let fingerprint =
+            FingerprintId::parse("fp_01j2m8q5aaaabbbbccccddddee").expect("a fixture id");
+        let result = CheckResult::warning(
+            CheckId::generate(),
+            "project contains TODO comments",
+            Severity::CanFixLater,
+            false,
+            EvidenceClass::Inference,
+            fingerprint,
+        );
+        let schedule = crate::schedule::PlanBuilder::new(
+            ExecutionMode::InspectOnly,
+            ExecutionPermissions::inspect_only(),
+        )
+        .build();
+        let findings = crate::findings_from_checks::findings_from_checks(&[result], &schedule);
+
+        let (_contracts, refused) = contracts_for(&findings, &schedule);
+        assert!(
+            refused
+                .iter()
+                .all(|reason| !reason.contains("candidate evidence")),
+            "a non-blocking TODO candidate was excluded by the candidate rule: {refused:?}"
         );
     }
 }

@@ -320,6 +320,12 @@ pub struct OpenAiCompatibleAnalyzer {
     api_key: Option<String>,
     #[cfg(test)]
     transport: Option<Box<TransportFn>>,
+    /// Whether the environment is consulted for a key. A test that is about the
+    /// missing-key path must not depend on whether the machine running it has
+    /// `SURE_OPENAI_API_KEY` set: `std::env::remove_var` is `unsafe` in edition
+    /// 2024, so the fallback is turned off for one value instead.
+    #[cfg(test)]
+    read_environment_key: bool,
 }
 
 #[cfg(test)]
@@ -348,6 +354,8 @@ impl OpenAiCompatibleAnalyzer {
             api_key: None,
             #[cfg(test)]
             transport: None,
+            #[cfg(test)]
+            read_environment_key: true,
         }
     }
 
@@ -367,7 +375,30 @@ impl OpenAiCompatibleAnalyzer {
             model,
             api_key: Some(api_key),
             transport: Some(Box::new(transport)),
+            read_environment_key: true,
         }
+    }
+
+    /// Build a provider for the missing-key test, with no way to fall back to
+    /// the machine's environment.
+    #[cfg(test)]
+    fn without_an_environment_key(endpoint: String, model: Option<String>) -> Self {
+        Self {
+            endpoint,
+            model,
+            api_key: None,
+            transport: None,
+            read_environment_key: false,
+        }
+    }
+
+    /// The key the environment supplies, when this value reads one.
+    fn environment_key(&self) -> Option<String> {
+        #[cfg(test)]
+        if !self.read_environment_key {
+            return None;
+        }
+        std::env::var(OPENAI_API_KEY_VAR).ok()
     }
 
     fn send_request(
@@ -387,16 +418,25 @@ impl OpenAiCompatibleAnalyzer {
 impl Analyzer for OpenAiCompatibleAnalyzer {
     fn analyze(&self, request: AnalysisRequest<'_>) -> Result<AnalysisResponse, AnalysisError> {
         if self.endpoint.is_empty() {
-            return Err(openai_failed("endpoint is not configured"));
+            return Err(openai_failed(
+                "endpoint is not configured; set `analysis.endpoint` in your SURE settings file",
+            ));
         }
         let Some(model) = self.model.as_ref() else {
-            return Err(openai_failed("model is not configured"));
+            return Err(openai_failed(
+                "model is not configured; set `analysis.model` in your SURE settings file",
+            ));
         };
         let api_key = self
             .api_key
             .clone()
-            .or_else(|| std::env::var(OPENAI_API_KEY_VAR).ok())
-            .ok_or_else(|| openai_failed("API key is not configured"))?;
+            .or_else(|| self.environment_key())
+            .ok_or_else(|| {
+                openai_failed(
+                    "API key is not configured; set SURE_OPENAI_API_KEY in the environment that \
+                     starts SURE",
+                )
+            })?;
         let prompt = prepare_prompt(request.prompt);
 
         let (status, body) = self
@@ -453,9 +493,23 @@ fn send_openai_request(
         }
         Err(ureq::Error::Status(code, _)) => Ok((code, String::new())),
         Err(ureq::Error::Transport(error)) => {
-            Err(openai_failed(format!("request failed: {error}")))
+            // `Transport`'s Display writes the URL first, and the underlying
+            // message can name the host; either may carry a token or an internal
+            // name from the user's settings. The kind is enough to act on and
+            // never repeats any part of the endpoint.
+            let detail = transport_failure_detail(endpoint, &error.kind().to_string());
+            Err(openai_failed(format!("request failed: {detail}")))
         }
     }
+}
+
+/// What to say about a transport failure without repeating the endpoint.
+///
+/// The endpoint is a value from the user's settings file. Its path can carry a
+/// token and its host can name an internal service; neither belongs in a report
+/// that may be pasted into an issue. The kind is the actionable part.
+fn transport_failure_detail(_endpoint: &str, kind: &str) -> String {
+    kind.to_owned()
 }
 
 /// Read up to [`OPENAI_RESPONSE_BYTES`] from `response`.
@@ -917,7 +971,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_analyzer_reports_missing_api_key() {
-        let analyzer = OpenAiCompatibleAnalyzer::new(
+        let analyzer = OpenAiCompatibleAnalyzer::without_an_environment_key(
             "https://models.example.com/v1".to_owned(),
             Some("test-model".to_owned()),
         );
@@ -1014,5 +1068,15 @@ mod tests {
             result.blocks_green(),
             "a critical model-backed check that could not run must block green"
         );
+    }
+    #[test]
+    fn a_transport_failure_never_repeats_the_endpoint() {
+        let endpoint = "https://example.invalid/secret-token";
+        for kind in ["Dns Failed", "Connection Failed"] {
+            let detail = transport_failure_detail(endpoint, kind);
+            assert_eq!(detail, kind);
+            assert!(!detail.contains("example.invalid"));
+            assert!(!detail.contains("secret-token"));
+        }
     }
 }

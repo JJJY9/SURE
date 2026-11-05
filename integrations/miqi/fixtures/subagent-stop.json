@@ -1,0 +1,10 @@
+{
+  "event": "SubagentStop",
+  "harness_session_id": "c:s1",
+  "project_root": "D:\\work\\演示 项目",
+  "timestamp_utc": "2026-10-27T02:03:00Z",
+  "source": "miqi",
+  "agent_type": "code-agent",
+  "job_id": "job-1",
+  "success": true
+}

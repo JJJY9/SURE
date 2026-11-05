@@ -25,7 +25,7 @@ use std::path::Path;
 
 use sure_domain::evidence::EvidenceClass;
 use sure_domain::execution::ActionKind;
-use sure_domain::ids::FingerprintId;
+use sure_domain::ids::{CheckId, FingerprintId};
 use sure_domain::status::{CheckResult, NotCheckedReason};
 
 use crate::candidate_context::{CandidateContext, classify_path};
@@ -185,6 +185,22 @@ struct Detection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateScanner {
     proposals: Vec<CheckProposal>,
+}
+
+/// Whether a check id was built from this scanner's proposals.
+///
+/// Candidate checks are the only ids minted as `chk_candidate<tag><hex>` (see
+/// [`check_id`] and the `CATEGORIES` table), and the re-check comparison uses
+/// this to tell apart the two ways a contract-named check can be missing from
+/// a run: a candidate check the run did not plan is the scanner no longer
+/// finding the marker the check was built from — the finding's subject has
+/// disappeared — where any other missing check is an absence of observation.
+#[must_use]
+pub fn is_candidate_check(id: &CheckId) -> bool {
+    let raw = id.as_str();
+    CATEGORIES
+        .iter()
+        .any(|(category, _)| raw.starts_with(&format!("chk_candidate{}", category.tag())))
 }
 
 impl CandidateScanner {

@@ -484,20 +484,33 @@ struct Route {
     answers_on_stdout: bool,
 }
 
+/// The project both the tools and the command line are pointed at.
+///
+/// The `packages/checkout` member of `fixtures/adversarial/repair-regression`
+/// declares a test script whose result is wrong; checking the package alone
+/// gives the three check-shaped routes a real finding to compare: SURE cannot
+/// tell which package manager runs that script, so the test is reported as not
+/// checked rather than passed. The package has no start script and no TODO,
+/// mock, stub, placeholder or no-op pattern in its sources, so the completeness
+/// analysis never asks a model to assess it: a developer's own settings may
+/// name an analysis provider, and this project keeps that provider out of the
+/// comparison instead of asking the test to out-run it.
+const COMPARISON_PROJECT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/adversarial/repair-regression/packages/checkout"
+);
+
 /// The four tools whose command is a fixed function of their arguments.
 ///
 /// `sure_status` is checked on its own, because the two sides run `sure doctor`
 /// at different moments and a doctor report contains the state of this machine.
 ///
-/// The project is **this crate**, named absolutely, and that is the point: the
-/// three check commands now run, so a test that pointed them at a path that does
-/// not exist would compare three failures and prove nothing about what a tool
-/// answers when its command has something to say. An absolute path is also what
-/// SURE requires — a relative root is refused rather than resolved against
+/// The project is [`COMPARISON_PROJECT`], named absolutely. An absolute path is
+/// what SURE requires — a relative root is refused rather than resolved against
 /// wherever the process happens to be — and every argument here is a string a
 /// harness could really send.
 fn routes() -> [Route; 4] {
-    const PROJECT: &str = env!("CARGO_MANIFEST_DIR");
+    const PROJECT: &str = COMPARISON_PROJECT;
     [
         Route {
             tool: "sure_check",
@@ -687,7 +700,7 @@ fn every_tool_answers_what_the_command_line_behind_it_answers() {
     // line's the second, and their frames would differ for a reason that has
     // nothing to do with the two paths. It is also the state a user meets —
     // `sure recheck` after `sure repair` — rather than an artefact of the test.
-    let project = env!("CARGO_MANIFEST_DIR");
+    let project = COMPARISON_PROJECT;
     let seeded = run_in(&store, &["repair", project]);
     assert_eq!(
         seeded.status, 1,
@@ -701,6 +714,23 @@ fn every_tool_answers_what_the_command_line_behind_it_answers() {
     for (index, route) in routes().iter().enumerate() {
         let answer = session.ask(call(10 + index as u32, route.tool, route.arguments.clone()));
         let result = result_of(&answer).clone();
+        if route.tool == "sure_check" {
+            // The comparison is only meaningful while the project asks no
+            // model. A developer's settings may name an analysis provider; if
+            // this project ever grows a candidate the provider would be
+            // consulted, and two model answers are not a comparison.
+            let model_state = result["structuredContent"]["sure"]["details"]["model_use"]["state"]
+                .as_str()
+                .unwrap_or("missing");
+            assert!(
+                matches!(
+                    model_state,
+                    "no_provider" | "nothing_asked" | "provider_unusable"
+                ),
+                "the comparison project must not consult a model, or two runs cannot be \
+                 compared: model_use.state is {model_state}"
+            );
+        }
         let expected = frame_of_in(&store, route.command);
         let (answered, answered_ids) =
             frame_without_the_per_run_ids(&result["structuredContent"]["sure"]);
@@ -754,11 +784,10 @@ fn every_tool_answers_what_the_command_line_behind_it_answers() {
     }
     // The count is the guard against a comparison that holds nothing: with no
     // finding, no contract and no life-cycle row in the frames, the frames agree
-    // and the loop above has measured nothing. Measured today, the three
-    // check-shaped routes carry findings, because `crates/sure-cli`'s own
-    // sources contain the placeholder and stub patterns `candidate_scanner.rs`
-    // and `noop_heuristics.rs` look for — which is also why this repository's
-    // `sure check` is not green.
+    // and the loop above has measured nothing. Measured today, the
+    // check-shaped routes carry a finding because the fixture package declares
+    // a test that SURE cannot run while it cannot tell which package manager
+    // owns it — and a finding id is minted for the run that produced it.
     assert!(
         replaced_ids > 0,
         "not one per-run identifier was replaced across {} routes, so the frames agreed without \

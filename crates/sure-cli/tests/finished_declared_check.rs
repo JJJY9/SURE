@@ -50,6 +50,18 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
 }
 
 fn check(project: &Path, store: &Path, settings: &Path, format: &str) -> Output {
+    // The project path carries a space and non-ASCII characters, which is the
+    // Windows discipline this fixture exercises. The build directory cannot:
+    // the GNU linker this fork is built with on Windows cannot open the objects
+    // rustc writes under a non-ASCII path (measured — the same project builds
+    // with an ASCII `CARGO_TARGET_DIR` and fails with a Chinese one). SURE still
+    // runs the command in the Unicode project; only the compiler's scratch
+    // output is elsewhere.
+    let cargo_target = sure_testkit::repository_root()
+        .join("target")
+        .join("tmp")
+        .join(format!("declared-check-target-{}", std::process::id()));
+    std::fs::create_dir_all(&cargo_target).expect("an ASCII build directory");
     Command::new(SURE)
         .arg("--store-dir")
         .arg(store)
@@ -58,7 +70,7 @@ fn check(project: &Path, store: &Path, settings: &Path, format: &str) -> Output 
         .args(["--format", format, "check"])
         .arg(project)
         .env("CARGO_NET_OFFLINE", "true")
-        .env_remove("CARGO_TARGET_DIR")
+        .env("CARGO_TARGET_DIR", &cargo_target)
         .stdin(Stdio::null())
         .output()
         .expect("the CLI starts")

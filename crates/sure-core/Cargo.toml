@@ -14,6 +14,7 @@ serde_yaml_ng = { workspace = true }
 # `pyproject.toml` and, from `P2-T006`, `Cargo.toml`. See the workspace manifest
 # for why this is not deserialized directly into `serde_json::Value`.
 toml = { workspace = true }
+roxmltree = { workspace = true }
 sha2 = { workspace = true }
 dirs = { workspace = true }
 rusqlite = { workspace = true }

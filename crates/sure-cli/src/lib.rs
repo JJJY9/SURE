@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod acknowledge;
 pub mod check;
 pub mod cli;
 pub mod commands;
+pub mod config_show;
 pub mod doctor;
+pub mod explain;
 pub mod grants;
 pub mod history;
 pub mod hook;

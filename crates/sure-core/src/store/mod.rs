@@ -93,7 +93,8 @@ mod record;
 
 pub use error::StoreError;
 pub use migrations::{LATEST as LATEST_SCHEMA_VERSION, Migration, MigrationError};
-pub use record::{ALLOWANCE, APPROVAL, RECORDING, RecordKind, StoredRecord};
+pub use record::{ACKNOWLEDGEMENT, ALLOWANCE, APPROVAL, RECORDING, RecordKind, StoredRecord};
+pub use sure_protocol::documents::DocumentKind;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -629,13 +630,62 @@ impl Store {
         filter: &HistoryFilter<'_>,
         limit: usize,
     ) -> Result<Vec<StoredRecord>, StoreError> {
+        self.history_with_floor(filter, None, limit)
+    }
+
+    /// Read records written at or after `since_ms`, newest first.
+    ///
+    /// The same query as [`Store::history`] with one more condition, so that a
+    /// reader that only cares about what happened after a known moment does not
+    /// spend its `limit` on older rows. A reader that called [`Store::history`]
+    /// and filtered the result in Rust would be spending the bound on rows it
+    /// was about to discard — and, because the query is newest-first, would get
+    /// a *truncated* answer that looks exactly like a complete one (see
+    /// `recheck_lifecycle::HISTORY_SCAN_LIMIT` for why that direction matters).
+    ///
+    /// `since_ms` is inclusive: a record written at the same millisecond as the
+    /// moment asked about counts as "at or after" it. Nothing in this store
+    /// orders two writes within one millisecond; the inclusive end is the one
+    /// that cannot drop a write made in the same millisecond as the row it is
+    /// compared against.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::history`].
+    pub(crate) fn history_since(
+        &self,
+        filter: &HistoryFilter<'_>,
+        since_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredRecord>, StoreError> {
+        self.history_with_floor(filter, Some(since_ms), limit)
+    }
+
+    fn history_with_floor(
+        &self,
+        filter: &HistoryFilter<'_>,
+        since_ms: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<StoredRecord>, StoreError> {
         let (where_clause, parameters) = filter.sql();
+        let (where_clause, mut values) = match since_ms {
+            None => (where_clause, parameters),
+            Some(since_ms) => {
+                let mut values = parameters;
+                values.push(SqlValue::Integer(since_ms));
+                let clause = if where_clause.is_empty() {
+                    String::from(" WHERE written_at_ms >= ?")
+                } else {
+                    format!("{where_clause} AND written_at_ms >= ?")
+                };
+                (clause, values)
+            }
+        };
         let sql = format!(
             "SELECT id, kind, document_version, written_at_ms, project_root, \
              project_fingerprint, document FROM records{where_clause} \
              ORDER BY written_at_ms DESC, id DESC LIMIT ?"
         );
-        let mut values = parameters;
         values.push(SqlValue::Integer(limit as i64));
 
         let mut statement = self
@@ -803,6 +853,32 @@ impl Store {
     /// As [`Store::delete`].
     pub fn delete_recordings(&self) -> Result<u64, StoreError> {
         self.delete(&HistoryFilter::recordings())
+    }
+
+    /// Delete one record by row id, but only if it is the kind the caller
+    /// expects.
+    ///
+    /// A targeted delete rather than a [`Store::delete`] filter because the one
+    /// caller — `sure acknowledge --undo` — has a row id and nothing else it
+    /// means: a filter would have to restate what identifies the row, and a
+    /// filter that names the wrong thing deletes more than the user asked for.
+    /// The kind is part of the statement so that an id from one table of the
+    /// user's history can never remove a row of another.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Busy`] if another process held the write lock for longer
+    /// than [`StoreOptions::busy_timeout`]. Nothing is deleted in that case.
+    pub fn delete_record_of_kind(&self, id: i64, kind: RecordKind) -> Result<bool, StoreError> {
+        self.transaction(|connection| {
+            let affected = connection
+                .execute(
+                    "DELETE FROM records WHERE id = ?1 AND kind = ?2",
+                    rusqlite::params![id, kind.as_str()],
+                )
+                .map_err(|error| self.open_error(error))?;
+            Ok(affected > 0)
+        })
     }
 
     /// Run SQLite's own consistency check.

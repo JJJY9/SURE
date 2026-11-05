@@ -77,13 +77,13 @@ If one of these turns out to be necessary, it stops here and becomes its own rec
 
 **Let the runner accept a `PlannedCommand` instead of an `AdmittedCommand`.** One less lifetime to thread. Rejected because it deletes the property `enforce.rs` was built to have — that the first check to run project code cannot start something the enforcement did not admit.
 
-**Run `.cmd` names on Windows by wrapping them in `cmd.exe /c`.** This is what the operating system does anyway, so it looks like explicitness rather than a widening. Rejected because `safety::classify` answers `UnreadText` for a batch-file name on purpose (`safety.rs:78`), and building the wrapper would be SURE constructing the interpreter it just said it could not read — the "no raw shell execution" invariant with a loop in it. The consequence is accepted and visible rather than worked around: on Windows a package-manager script is a batch file, so those checks are stopped with a reason, and the product does not pretend otherwise.
+**Run `.cmd` names on Windows by wrapping them in `cmd.exe /c`.** This is what the operating system does anyway, so it looks like explicitness rather than a widening. Rejected because `safety::classify` answers `UnreadText` for a batch-file name on purpose (`safety.rs:78`), and building the wrapper would be SURE constructing the interpreter it just said it could not read — the "no raw shell execution" invariant with a loop in it. The consequence is accepted and visible rather than worked around: on Windows a package-manager script is a batch file, so those checks are stopped with a reason, and the product does not pretend otherwise. **This consequence was superseded for command checks on 2026-10-22 by a route that does not construct an interpreter — see the amendment at the end of this record. The `cmd.exe /c` rejection itself stands.**
 
 ## Consequences
 
 - `PlanBuilder::propose` and the ecosystem builders change shape, so the diff reaches every module that proposes a check. The completeness scanners — which are all precomputed evidence — move to the same door rather than keeping a second one.
 - `CheckSchedule` carries work that is not report metadata. It stays core-internal; `sure-cli` reads `proposal()` and never the operation.
-- On Windows, Node checks whose only runner is `npm.cmd`, `yarn.cmd`, `pnpm.cmd` or `bun.cmd` are stopped by the classifier rather than run. This is a real loss of coverage on the primary development platform and it is the honest reading of "a name is not evidence of behaviour". A project that declares a `node.exe`-based runner is unaffected.
+- On Windows, Node checks whose only runner is `npm.cmd`, `yarn.cmd`, `pnpm.cmd` or `bun.cmd` are stopped by the classifier rather than run. This is a real loss of coverage on the primary development platform and it is the honest reading of "a name is not evidence of behaviour". A project that declares a `node.exe`-based runner is unaffected. **Superseded for command checks on 2026-10-22 — see the amendment at the end of this record.**
 - The support ceiling in `support::CEILING` moves only if the measurements in `P18-T012` earn it. The default outcome of this ADR is that it does not move: level B says SURE can run approved generic checks, and a build that runs them on one platform and not on another has not earned a single sentence for both.
 - `tests/spawn_sites.rs` was written to fail the day the first check reaches the runner. **It did not fail, and the reason is worth keeping**: `P18-T007`'s wiring named no type that census is about (`pipeline.rs` names `CommandRunner`, not `ProcessRequest`), so what went false was a paragraph rather than a rule. The paragraph, the entry for `process/request.rs` and the ceiling's own reason were rewritten in that task; the constant did not move, for the reason two bullets above.
 
@@ -94,3 +94,31 @@ The execution vocabulary — `ExecutionMode`, `ExecutionDecision`, `ActionKind`,
 ## Revisit when
 
 A second runner exists — a container executor, or a service topology SURE did not start. Both would need an admission decision of their own, and this contract's claim is about the work SURE launches, not about every process that ends up running.
+
+## Amendment — 2026-10-22: a known package-manager shim may be started through its own JavaScript entry
+
+The consequence above — *"On Windows, Node checks whose only runner is `npm.cmd`,
+`yarn.cmd`, `pnpm.cmd` or `bun.cmd` are stopped by the classifier rather than run"* — was
+true when this record was accepted and is no longer true of the product path.
+`crates/sure-core/src/package_launcher.rs`, bound at the composition root
+(`sure-cli/src/check.rs`) the same way the browser driver is, resolves a **bare**
+`npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` whose `ProgramPath` answer is a `.cmd` or
+`.bat` shim, when `node` and the manager's own shipped JavaScript entry (or the corepack
+dispatcher) are present, into `node <entry> <the plan's arguments>`.
+
+This is not the alternative this record rejected. The launcher does not read the batch
+file, does not build a command line, and does not start a command interpreter; it starts
+`node`, a program the safety classifier already knows, with a file the installed manager
+ships. Every other shape — a `.ps1`, a name that resolves to nothing, a shim without its
+JavaScript side, any program that is not one of those names — keeps the honest
+`InterpreterRequired` / not-found result this record describes. **`bun.cmd` is one of
+those other shapes**: the launcher translates only the names above, and bun's shim is not
+one of them. The resolver's answer is unchanged: `ProgramPath` still says
+`InterpreterRequired` for `npm.cmd`, because that is still what naming the batch file would
+do.
+
+**Services are not on this path.** `StartSmoke` starts what a service declaration names
+and does not hold a `ProcessRunner`; the service declaration still accepts only
+`node_entry` on Windows, and ADR 0016's rejection of a package-manager service launcher
+stands.
+

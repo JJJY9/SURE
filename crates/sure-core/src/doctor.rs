@@ -20,10 +20,10 @@
 //! something is there. `docs/architecture/DIAGNOSTICS.md` requires that a secret
 //! never have to be handled in order to be reported, and the way to keep that
 //! true is for the diagnostic never to open the file that may hold one. Reading
-//! settings back is not implemented in this build — `sure config show` refuses,
-//! which is where that question belongs. There
-//! is a test in `tests/doctor.rs` that reads this file and fails if it grows a
-//! reference to the settings module.
+//! settings back belongs to `sure config show`, which reports the settings in
+//! effect and shows an analysis provider's endpoint, model and command only as
+//! set or not set. There is a test in `tests/doctor.rs` that reads this file and
+//! fails if it grows a reference to the settings module.
 //!
 //! **It does not create the store.** A store that does not exist is reported as
 //! nothing recorded yet. A diagnostic that changes what it is diagnosing is
@@ -204,6 +204,10 @@ const INTEGRATIONS: &[(&str, &str)] = &[
         "codex",
         "hooks, skills and SURE's tools, added to the harness's own config",
     ),
+    (
+        "miqi",
+        "hooks that record what an agent did, wired into the harness's own plugin layer",
+    ),
 ];
 
 /// The questions this report does not answer, and why not.
@@ -221,14 +225,16 @@ const NOT_CHECKED: &[(&str, &str)] = &[
     ),
     (
         "what is in your settings files",
-        "no command in this build reads them back — `sure config show` refuses — \
-         so that a diagnostic never has a secret to handle. This report says where \
-         the file is and nothing more; `sure config set` writes them.",
+        "this diagnostic does not read them back. `sure config show` reports the \
+         settings in effect and shows an analysis provider's endpoint, model and \
+         command only as set or not set, so a diagnostic never has a secret to \
+         handle. This report says where the file is and nothing more; \
+         `sure config set` writes them.",
     ),
     (
         "which analysis provider your settings choose",
-        "that is a value in the settings file, and the same rule keeps this report \
-         out of it. What this report does answer is which providers this build \
+        "this report does not read it; `sure config show` reports which provider \
+         is in force. What this report does answer is which providers this build \
          offers, and whether the program one of them would run is on PATH — never \
          an endpoint, never a key.",
     ),

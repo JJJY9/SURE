@@ -139,15 +139,18 @@ that a test asserting only "a row appeared" would miss.
 single `Requirement`, not the `ProjectIntent` container around it — the container
 has no source of its own, being the union of its requirements' sources. Storing
 an intent is therefore storing each of its requirements, and a reader that wants
-the container back reassembles it. The explicit goal is one requirement, so it is
-one row; a multi-source intent is written in part if the store refuses somewhere
-in the middle, and the task that first produces one owns that answer.
+the container back reassembles it. A one-line explicit goal is one requirement
+and one row; a goal written on several non-empty lines is one requirement per
+line, so a partially implemented goal cannot be matched as a whole. A
+multi-source intent is written in part if the store refuses somewhere in the
+middle, and the task that first produces one owns that answer.
 
-The requirement's identifier is the fixed string `goal` rather than a generated
-one. Within one project there is one goal the user stated, and a reader comparing
-today's goal with last week's has to be able to find both; a fresh identifier per
-invocation would make "did the user change what they asked for?" an
-identity-matching problem instead of a comparison of two strings.
+The first requirement's identifier is the fixed string `goal`; further lines of
+a multi-line goal are `goal-2`, `goal-3`, ... rather than generated identifiers.
+Within one project a reader comparing today's goal with last week's has to be
+able to find both; a fresh identifier per invocation would make "did the user
+change what they asked for?" an identity-matching problem instead of a
+comparison of two strings.
 
 ## What "explicit" does not claim
 

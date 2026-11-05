@@ -5,6 +5,7 @@
 //! terminal formatting are included.
 
 use serde::{Deserialize, Serialize};
+use sure_core::finding::{Finding, FindingStatus};
 use sure_core::plain_language_finding::render_finding;
 use sure_core::vocabulary::ProjectVerdict;
 
@@ -139,6 +140,28 @@ pub struct JsonFinding {
     pub next_action: String,
     /// Whether the finding rests only on model output, inference, or no source.
     pub is_model_only: bool,
+    /// Whether a person may accept this finding as a risk (ADR 0019).
+    ///
+    /// True only when no piece of the finding's evidence could alone carry a
+    /// `must_fix` — a candidate a scanner inferred. A failing check, a checker
+    /// error and a check that did not run are never acknowledgeable, and a
+    /// caller offering the choice is offering a decision SURE would refuse.
+    pub acknowledgeable: bool,
+    /// The store row of the person's acceptance (ADR 0019), present only when
+    /// the finding's status is `accepted_risk`.
+    ///
+    /// `sure acknowledge --undo` takes this row, so a panel can offer that
+    /// undo from a later run's report without having kept the answer to the
+    /// call that recorded the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_record: Option<i64>,
+    /// Why the person accepted the risk, in their own words, present only when
+    /// the finding's status is `accepted_risk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_reason: Option<String>,
+    /// When the decision was recorded, milliseconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at_ms: Option<i64>,
     /// Simplified list of checkable evidence anchors.
     pub evidence_anchors: Vec<JsonEvidenceAnchor>,
 }
@@ -234,7 +257,25 @@ pub fn render_json_report_pretty(verdict: &ProjectVerdict) -> String {
 pub fn build_json_report(verdict: &ProjectVerdict) -> JsonReport {
     let open = verdict.open_findings();
 
-    let findings: Vec<JsonFinding> = open
+    // The list carries what needs attention and what the person has already
+    // accepted (ADR 0019). An accepted finding is not unresolved — it is out of
+    // `open_findings()` and out of `totals.open_findings` — and it is not
+    // hidden either: a decision a reader cannot see is indistinguishable from a
+    // fix, and the whole point of recording it is that somebody may need to
+    // read it later.
+    let mut accepted: Vec<&Finding> = verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.status == FindingStatus::AcceptedRisk)
+        .collect();
+    accepted.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    let shown: Vec<&Finding> = open.iter().copied().chain(accepted).collect();
+
+    let findings: Vec<JsonFinding> = shown
         .iter()
         .map(|finding| {
             let plain = render_finding(finding);
@@ -247,6 +288,10 @@ pub fn build_json_report(verdict: &ProjectVerdict) -> JsonReport {
                 status: plain.status_label,
                 next_action: plain.next_action,
                 is_model_only: plain.is_model_only,
+                acknowledgeable: finding.can_be_acknowledged(),
+                accepted_record: finding.accepted_record,
+                accepted_reason: finding.accepted_reason.clone(),
+                accepted_at_ms: finding.accepted_at_ms,
                 evidence_anchors: plain
                     .evidence_anchors
                     .iter()

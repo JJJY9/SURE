@@ -187,6 +187,27 @@ impl Classification {
         }
     }
 
+    /// A command the user named in a `--commands-file`.
+    ///
+    /// The user wrote the program and its argv themselves, in a file SURE
+    /// refuses to read from inside the checked project. It is treated as one
+    /// category — [`CommandClass::DynamicHost`] — rather than through the
+    /// program table: the table exists to answer *what would this unknown text
+    /// do*, and the user has already answered it by naming the argv. The command
+    /// still needs `run_project_code`, so a run that has not been granted it does
+    /// not start anything, and SURE does not silently install or reach the
+    /// network on its behalf.
+    #[must_use]
+    pub fn declared_by_user() -> Self {
+        Self {
+            effects: CommandEffects::single(CommandClass::DynamicHost),
+            source: Source::Rule {
+                program: "a command you declared",
+                decided_by: None,
+            },
+        }
+    }
+
     fn unread(reason: &'static str) -> Self {
         Self::unknown(Source::UnreadText(reason))
     }
@@ -867,6 +888,59 @@ const GIT_VERBS: &[Verb] = &[
     ),
 ];
 
+/// Go's own commands.
+///
+/// `test`, `build` and `vet` run the project's code and are classified as
+/// `DynamicHost`; `go get` and `go mod download` change the module cache and are
+/// install/network. The distinction matters because SURE plans the first three
+/// under `host_confirmed` without demanding a network grant, the same way it
+/// plans a Python test runner.
+/// .NET's own commands.
+///
+/// `test`, `build`, `run`, `format` and the MSBuild entry points run the
+/// project's code; `restore`/`add`/`new`/`tool`/`workload` install or fetch;
+/// the version/info queries are static.
+const DOTNET_VERBS: &[Verb] = &[
+    verb(
+        &[
+            "test", "build", "run", "format", "publish", "pack", "msbuild", "vstest",
+        ],
+        RUNS_CODE,
+    ),
+    verb(
+        &["restore", "add", "new", "tool", "nuget", "workload"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(&["help"], STATIC_ONLY),
+];
+
+const GO_VERBS: &[Verb] = &[
+    verb(
+        &[
+            "test", "build", "vet", "run", "install", "generate", "fmt", "doc",
+        ],
+        RUNS_CODE,
+    ),
+    verb(&["get", "mod"], INSTALLS_AND_RUNS),
+    verb(&["env", "version", "list", "help"], STATIC_ONLY),
+];
+
+/// Maven's lifecycles.
+///
+/// `test`, `package`, `verify` and `compile` run the project's own build and
+/// tests — which may include plugins the project bound to those phases — and are
+/// classified as `DynamicHost` the way `go test` and `dotnet build` are.
+/// `install` and `deploy` copy or upload artifacts, and `dependency` resolves
+/// them, so those are install and network. `clean` deletes the build output
+/// directory; nothing SURE plans uses it, and naming it destructive is the
+/// direction this table fails in.
+const MAVEN_VERBS: &[Verb] = &[
+    verb(&["test", "package", "verify", "compile"], RUNS_CODE),
+    verb(&["install", "deploy", "dependency"], INSTALLS_AND_RUNS),
+    verb(&["clean"], DESTROYS),
+    verb(&["version", "help"], STATIC_ONLY),
+];
+
 const CARGO_VERBS: &[Verb] = &[
     verb(
         &[
@@ -916,6 +990,7 @@ const UV_VERBS: &[Verb] = &[
         }],
     ),
     verb(&["sync", "add", "remove"], INSTALLS_AND_RUNS),
+    verb(&["build"], RUNS_CODE),
     verb(&["lock"], REACHES_NETWORK),
     verb(&["version", "help"], STATIC_ONLY),
 ];
@@ -926,8 +1001,38 @@ const POETRY_VERBS: &[Verb] = &[
         &["install", "add", "update", "remove", "sync"],
         INSTALLS_AND_RUNS,
     ),
+    verb(&["build"], RUNS_CODE),
     verb(&["lock"], REACHES_NETWORK),
     verb(&["show", "check"], STATIC_ONLY),
+];
+
+/// PDM's verbs, read from its own command set.
+///
+/// `build` and `run` execute project code; the dependency verbs install and
+/// resolve. `config` and `venv` are absent on purpose: both can write, and a
+/// verb SURE has not classified is refused rather than guessed at.
+const PDM_VERBS: &[Verb] = &[
+    verb(&["run"], RUNS_CODE),
+    verb(&["build"], RUNS_CODE),
+    verb(
+        &["install", "add", "remove", "update", "sync", "lock"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(&["list", "show", "info"], STATIC_ONLY),
+];
+
+/// Pipenv's verbs. It has no `build` subcommand of its own, which is why the
+/// build plan for a Pipenv project is `python -m build` and not `pipenv build`.
+const PIPENV_VERBS: &[Verb] = &[
+    verb(&["run"], RUNS_CODE),
+    verb(
+        &["install", "uninstall", "sync", "lock", "update", "upgrade"],
+        INSTALLS_AND_RUNS,
+    ),
+    verb(
+        &["check", "graph", "requirements", "scripts", "where"],
+        STATIC_ONLY,
+    ),
 ];
 
 const PYTHON_MODULES: &[Module] = &[
@@ -941,6 +1046,27 @@ const PYTHON_MODULES: &[Module] = &[
     },
     Module {
         names: &["pytest", "unittest"],
+        classes: RUNS_CODE,
+    },
+    // A linter and a type checker import (and therefore run) the project's
+    // code: flake8/pylint load modules to inspect them, and mypy/pyright follow
+    // imports. SURE plans these as `python -m <tool> …` for pip projects, so
+    // the module name is what the classifier sees. Without these rows the plan
+    // is an unknown command: refused as not authorized even in host-confirmed
+    // mode, measured on a real project on 2026-10-29.
+    Module {
+        names: &[
+            "ruff",
+            "flake8",
+            "pylint",
+            "pyflakes",
+            "pycodestyle",
+            "pydocstyle",
+            "vulture",
+            "mypy",
+            "pyright",
+            "pytype",
+        ],
         classes: RUNS_CODE,
     },
 ];
@@ -984,6 +1110,62 @@ const ENTRY_TABLE: &[Entry] = &[
             "--color",
             "--jobs",
             "-j",
+        ],
+    },
+    Entry {
+        names: &["go"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: GO_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["-C", "-mod", "-tags", "-o", "-ldflags", "-gcflags"],
+    },
+    Entry {
+        names: &["dotnet"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: DOTNET_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &[
+            "--configuration",
+            "-c",
+            "--framework",
+            "-f",
+            "--output",
+            "-o",
+            "--runtime",
+            "-r",
+            "--verbosity",
+            "-v",
+        ],
+    },
+    Entry {
+        names: &["mvn"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: MAVEN_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &[
+            "-f",
+            "--file",
+            "-s",
+            "--settings",
+            "-P",
+            "--activate-profiles",
+            "-pl",
+            "--projects",
+            "-T",
+            "--threads",
+            "-l",
+            "--log-file",
+            "-gs",
+            "--global-settings",
         ],
     },
     Entry {
@@ -1038,6 +1220,26 @@ const ENTRY_TABLE: &[Entry] = &[
         module_flag: None,
         text_flags: &[],
         value_flags: &["-C", "--directory", "--project"],
+    },
+    Entry {
+        names: &["pdm"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: PDM_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["-p", "--project", "-d", "--directory", "--python"],
+    },
+    Entry {
+        names: &["pipenv"],
+        bare: Bare::Program(STATIC_ONLY),
+        positional: Bare::Program(STATIC_ONLY),
+        verbs: PIPENV_VERBS,
+        modules: &[],
+        module_flag: None,
+        text_flags: &[],
+        value_flags: &["--python", "--where", "--project"],
     },
     Entry {
         names: &["node"],

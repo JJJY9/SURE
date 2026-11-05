@@ -231,8 +231,11 @@ fn check(root: &Path) -> RunOutcome {
         purpose: Purpose::Check,
         config: &config,
         execution: ExecutionSettings::inspect_only(),
+        scan_excludes: &[],
         store: None,
         goal: None,
+        analysis: Default::default(),
+        external_commands: &[],
         runner: &runner,
     }
     .run()

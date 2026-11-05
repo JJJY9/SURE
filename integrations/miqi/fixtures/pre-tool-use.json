@@ -1,0 +1,8 @@
+{
+  "event": "PreToolUse",
+  "harness_session_id": "c:s1",
+  "project_root": "D:\\work\\演示 项目",
+  "tool": "exec",
+  "timestamp_utc": "2026-10-12T09:00:05Z",
+  "source": "miqi"
+}

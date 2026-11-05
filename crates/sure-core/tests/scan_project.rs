@@ -465,9 +465,12 @@ fn a_left_out_directory_is_left_out_at_any_depth() {
 }
 
 #[test]
-fn a_nested_version_control_directory_is_left_out_too() {
+fn a_nested_checkout_is_left_out_whole() {
     // The same rule for the one category the fixture above cannot reach: a
-    // checkout kept inside a directory that is itself read.
+    // checkout kept inside a directory that is itself read. A directory that
+    // carries a `.git` entry is a checkout of its own, not this project's
+    // content, so the walk does not enter it at all — the skip is the
+    // directory, and everything below it is absent rather than filtered later.
     let fixture = Scratch::new("nested-git");
     fixture.build(&[
         "tools/",
@@ -479,20 +482,31 @@ fn a_nested_version_control_directory_is_left_out_too() {
 
     let scan = fixture.scan();
 
+    assert_eq!(paths(&scan), ["tools", "tools/build.rs"]);
     assert_eq!(
-        paths(&scan),
-        [
-            "tools",
-            "tools/build.rs",
-            "tools/third_party",
-            "tools/third_party/lib.rs",
-        ]
-    );
-    assert_eq!(
-        reason_at(&scan, "tools/third_party/.git"),
+        reason_at(&scan, "tools/third_party"),
         Some(SkipReason::VersionControl),
         "{:?}",
         skips(&scan)
+    );
+    let skipped = scan
+        .skipped()
+        .iter()
+        .find(|skipped| skipped.path == std::path::Path::new("tools/third_party"))
+        .expect("the nested checkout is recorded as skipped");
+    assert!(
+        skipped
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("nested repository")),
+        "{skipped:?}"
+    );
+    assert!(
+        !scan
+            .entries()
+            .iter()
+            .any(|entry| entry.path.starts_with("tools/third_party")),
+        "nothing below a nested checkout is in the scan"
     );
 }
 
