@@ -67,6 +67,13 @@ pub fn human(report: &DoctorReport, out: &mut impl Write) -> io::Result<()> {
         "SURE {} (harness protocol {}), built for {} {}, C library {}",
         build.version, build.protocol_version, build.os, build.arch, build.target_env
     )?;
+    // Which source this binary was made from, on the line after the version it
+    // is stamped with. Only when the build knows it: "built from unknown" is
+    // not a fact a person can act on, and the frame carries the same answer as
+    // an explicit "unknown" for a script that asks.
+    if build.commit != "unknown" {
+        writeln!(out, "built from {}", build.commit)?;
+    }
     if let Some(from) = &build.running_from {
         writeln!(out, "running from {}", from.display())?;
     }
@@ -420,6 +427,12 @@ pub fn machine(report: &DoctorReport) -> Value {
     json!({
         "build": {
             "version": report.build.version,
+            // The source this binary was made from, stamped by the build
+            // script: a full lowercase SHA-1, or "unknown" for a build made
+            // without a checkout. Which source a binary came from is the first
+            // question about a bug report, and `sure_version` alone cannot
+            // answer it — two builds can share a number and differ in code.
+            "commit": report.build.commit,
             "protocol_version": report.build.protocol_version,
             "os": report.build.os,
             "arch": report.build.arch,
@@ -634,6 +647,7 @@ mod tests {
         DoctorReport {
             build: Build {
                 version: "0.0.0-test".to_owned(),
+                commit: "0123456789abcdef0123456789abcdef01234567",
                 protocol_version: 1,
                 os: "windows",
                 arch: "x86_64",
@@ -874,6 +888,35 @@ mod tests {
             "the human form does not say the location was the caller's:\n{text}"
         );
         assert_eq!(machine(&named)["places"]["store_location"], "caller");
+    }
+
+    #[test]
+    fn the_build_commit_is_in_both_forms_or_in_neither() {
+        // The commit answers which source the binary was made from, which the
+        // version number alone cannot: two builds can share a number and
+        // differ in code. The frame always carries the answer, "unknown"
+        // included, so a script reads one fixed shape; the human form prints
+        // it only when there is one, because "built from unknown" is not a
+        // fact a person can act on.
+        let stamped = a_healthy_report();
+        assert_eq!(
+            machine(&stamped)["build"]["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let text = rendered(&stamped);
+        assert!(
+            text.contains("built from 0123456789abcdef0123456789abcdef01234567"),
+            "the human form does not carry the commit the frame carries:\n{text}"
+        );
+
+        let mut unstamped = a_healthy_report();
+        unstamped.build.commit = "unknown";
+        assert_eq!(machine(&unstamped)["build"]["commit"], "unknown");
+        let text = rendered(&unstamped);
+        assert!(
+            !text.contains("built from"),
+            "a build that does not know its commit printed one anyway:\n{text}"
+        );
     }
 
     #[test]

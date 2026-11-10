@@ -30,8 +30,9 @@
 //! from `scripts/Build-Release.ps1`, which refuses to package without the release
 //! gate and takes minutes to run a release build, so those tests write the
 //! *documented layout* — one top-level directory named
-//! `sure-<version>-x86_64-pc-windows-msvc` holding `sure.exe`, `LICENSE` and
-//! `RELEASE.txt`, with a `sha256sum`-format `<archive>.sha256` beside it —
+//! `sure-<version>-x86_64-pc-windows-msvc` holding `sure.exe`, `LICENSE`,
+//! `RELEASE.txt` and `THIRD_PARTY_NOTICES.txt`, with a `sha256sum`-format
+//! `<archive>.sha256` beside it —
 //! around the binary cargo just built. That archive is a real ZIP with real
 //! bytes, but it is written by the same hand as the installer's expectations and
 //! therefore cannot disagree with them: a drift in what `Build-Release.ps1`
@@ -250,6 +251,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath $PayloadExe -Destination (Join-Path $stage 'sure.exe') -Force
 $license = "test fixture: the archive's LICENSE entry`n"
 [System.IO.File]::WriteAllText((Join-Path $stage 'LICENSE'), $license, [System.Text.ASCIIEncoding]::new())
+$notices = "SURE THIRD-PARTY NOTICES`ntest fixture: the archive's third-party notice entry`n"
+[System.IO.File]::WriteAllText((Join-Path $stage 'THIRD_PARTY_NOTICES.txt'), $notices, [System.Text.ASCIIEncoding]::new())
 $release = "SURE $Version - a test fixture in the documented archive layout`n"
 [System.IO.File]::WriteAllText((Join-Path $stage 'RELEASE.txt'), $release, [System.Text.ASCIIEncoding]::new())
 $archive = Join-Path $ScratchRoot "$name.zip"
@@ -742,9 +745,14 @@ fn the_installer_installs_the_archive_the_build_produced() {
          which is the directory the installer takes its payload from"
     );
     let payload_names = file_names(&payload);
-    let expected = ["LICENSE", "RELEASE.txt", "sure.exe"]
-        .map(str::to_owned)
-        .to_vec();
+    let expected = [
+        "LICENSE",
+        "RELEASE.txt",
+        "THIRD_PARTY_NOTICES.txt",
+        "sure.exe",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     assert_eq!(
         payload_names, expected,
         "the archive the build produced does not hold the payload the installer's documentation \

@@ -21,7 +21,7 @@
 #   artifact   sure-<version>-<target>.zip
 #   checksum   sure-<version>-<target>.zip.sha256, one sha256sum-format line
 #   layout     one top-level directory, sure-<version>-<target>/, holding
-#              sure.exe, LICENSE and RELEASE.txt
+#              sure.exe, LICENSE, RELEASE.txt and THIRD_PARTY_NOTICES.txt
 #   location   target/tmp/release/ by default
 #
 # `target/` is gitignored, so nothing binary is committed. That is the same
@@ -708,6 +708,45 @@ Re-run it:  cargo test -p sure-core --test acceptance_report_runner
         }
 
         # ---------------------------------------------------------------------
+        # 2b. The third-party license notices. `scripts/Generate-ThirdPartyNotices.mjs`
+        #     reads this checkout's Cargo.lock through `cargo metadata` and
+        #     exits 1 rather than omitting a crate whose license it cannot state,
+        #     so a run that gets past this step has a complete notice file about
+        #     these exact dependencies. It is generated before staging because the
+        #     archive's contents are a value this script states, not a directory
+        #     someone happened to leave on disk.
+        # ---------------------------------------------------------------------
+        Write-Step 'Third-party notices'
+        $node = Get-Command -Name 'node' -ErrorAction SilentlyContinue
+        if ($null -eq $node) {
+            Fail @"
+Node.js is not on PATH, so scripts/Generate-ThirdPartyNotices.mjs cannot run
+and this artifact cannot carry the third-party license notices it promises.
+Nothing was packaged. Install Node.js 24 or newer and run this again.
+"@
+        }
+        $noticesPath = Join-Path $LogDirectory 'THIRD_PARTY_NOTICES.txt'
+        $noticesOut = Join-Path $LogDirectory 'third-party-notices.txt'
+        $noticesErr = Join-Path $LogDirectory 'third-party-notices.err.txt'
+        $noticesCode = Invoke-Captured -Program $node.Source -Arguments @(
+            (Join-Path $Root 'scripts\Generate-ThirdPartyNotices.mjs'),
+            '--output', $noticesPath,
+            '--target', $Target
+        ) -OutPath $noticesOut -ErrPath $noticesErr
+        $noticesText = (Read-Captured -Path $noticesOut) + (Read-Captured -Path $noticesErr)
+        foreach ($line in ($noticesText -split "`r?`n")) {
+            if ($line.Trim() -ne '') { Write-Detail $line.Trim() }
+        }
+        if ($noticesCode -ne 0) {
+            Fail "scripts/Generate-ThirdPartyNotices.mjs exited $noticesCode; its stderr is $noticesErr. A release without a complete third-party notice file is not packaged."
+        }
+        if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
+            Fail "the notice generator exited 0 but $noticesPath is not there"
+        }
+        Write-Detail "notices     $noticesPath"
+        Write-Detail "size        $((Get-Item -LiteralPath $noticesPath).Length) bytes"
+
+        # ---------------------------------------------------------------------
         # 3. Stage. The staged tree is what the archive holds, assembled here
         #    rather than copied from somewhere, so the archive's contents are a
         #    value this script states rather than a consequence of a directory
@@ -723,6 +762,7 @@ Re-run it:  cargo test -p sure-core --test acceptance_report_runner
         $stagedExe = Join-Path $stageDir 'sure.exe'
         Copy-Item -LiteralPath $builtExe -Destination $stagedExe
         Copy-Item -LiteralPath (Join-Path $Root 'LICENSE') -Destination (Join-Path $stageDir 'LICENSE')
+        Copy-Item -LiteralPath $noticesPath -Destination (Join-Path $stageDir 'THIRD_PARTY_NOTICES.txt')
         $exeBytes = (Get-Item -LiteralPath $stagedExe).Length
         Write-Detail "sure.exe    $exeBytes bytes"
 
@@ -1046,6 +1086,24 @@ docs/development/RELEASE_PROCESS.md for how it is meant to be installed
     if (-not (Test-Path -LiteralPath $extractedExe)) {
         Fail "the archive extracted but $extractedExe is not in it"
     }
+    # The third-party license notices are part of the promised layout, and a
+    # listing that prints a `THIRD_PARTY_NOTICES.txt` entry this script never
+    # opens is a claim about a file rather than a reading of one. The header
+    # check holds the file to the generator's own first line, so an empty or
+    # unrelated file under that name reddens here.
+    $extractedNotices = Join-Path $extractDir 'THIRD_PARTY_NOTICES.txt'
+    if (-not (Test-Path -LiteralPath $extractedNotices -PathType Leaf)) {
+        Fail "the archive extracted but $extractedNotices is not in it: every release archive promises THIRD_PARTY_NOTICES.txt beside sure.exe, LICENSE and RELEASE.txt"
+    }
+    # `-Encoding UTF8` because the generator writes UTF-8 without a BOM and a
+    # canonical license text can carry characters such as `©`; the header this
+    # checks is ASCII, but reading the file as the encoding it was written in
+    # keeps a future non-ASCII check from depending on the machine's code page.
+    $extractedNoticesText = Get-Content -LiteralPath $extractedNotices -Raw -Encoding UTF8
+    if ($null -eq $extractedNoticesText -or -not $extractedNoticesText.StartsWith('SURE THIRD-PARTY NOTICES')) {
+        Fail "$extractedNotices does not begin with 'SURE THIRD-PARTY NOTICES', so it is not the file scripts/Generate-ThirdPartyNotices.mjs writes"
+    }
+    Write-Detail "notices     $extractedNotices ($((Get-Item -LiteralPath $extractedNotices).Length) bytes)"
     Write-Detail "package dir $extractDir"
 
     # The one Windows limit this script refuses to run into by accident.

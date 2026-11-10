@@ -18,12 +18,13 @@ afterwards.
 
 ```text
 %LOCALAPPDATA%\SURE\
-    bin\sure.exe            what the install writes
+    bin\sure.exe                  what the install writes
     bin\LICENSE
     bin\RELEASE.txt
-    install-manifest.json   what the install wrote, with each file's SHA-256
+    bin\THIRD_PARTY_NOTICES.txt
+    install-manifest.json         what the install wrote, with each file's SHA-256
 
-    sure.db                 the user's evidence, which the install never writes
+    sure.db                       the user's evidence, which the install never writes
 ```
 
 `%LOCALAPPDATA%\SURE\bin\sure.exe` is not a preference chosen here. Eight
@@ -74,8 +75,9 @@ directory": it is the user's data directory that happens to hold an install.
 
 `scripts/Build-Release.ps1` produces it and `docs/development/RELEASE_PROCESS.md`
 specifies it: `sure-<version>-x86_64-pc-windows-msvc.zip`, one top-level
-directory of the same name holding `sure.exe`, `LICENSE` and `RELEASE.txt`, with
-a `<archive>.sha256` beside it in `sha256sum` format.
+directory of the same name holding `sure.exe`, `LICENSE`, `RELEASE.txt` and
+`THIRD_PARTY_NOTICES.txt`, with a `<archive>.sha256` beside it in `sha256sum`
+format.
 
 The installer **requires** both files. It checks the checksum before it extracts
 anything, and there is no switch to skip that check — a check that can be turned

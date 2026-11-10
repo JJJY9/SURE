@@ -20,7 +20,7 @@ Decided by `P15-T002` and produced by `scripts/Build-Release.ps1`:
 | | |
 | --- | --- |
 | name | `sure-<version>-x86_64-pc-windows-msvc.zip`, where `<version>` is the version `sure` itself reports |
-| layout | one top-level directory of the same name, holding `sure.exe`, `LICENSE` and `RELEASE.txt` |
+| layout | one top-level directory of the same name, holding `sure.exe`, `LICENSE`, `RELEASE.txt` and `THIRD_PARTY_NOTICES.txt` |
 | checksum | `<archive>.sha256` beside it: one `sha256sum`-format line, `<64 lowercase hex><two spaces><file name>`, ASCII, no BOM |
 | where | `target/tmp/release/` by default. `target/` is gitignored, so no binary is committed |
 | signature | read rather than assumed, and recorded in the archive's own `RELEASE.txt` as a `signature` line: `not-signed`, `signed` (which fails the run) or `cannot-confirm`. See `## Signing` below |
@@ -29,6 +29,22 @@ Decided by `P15-T002` and produced by `scripts/Build-Release.ps1`:
 from, whether the worktree was clean at the time, the `rustc` that built it, the
 SHA-256 of `sure.exe`, the signature state read off that `sure.exe`, and the
 release gate's decision.
+
+`THIRD_PARTY_NOTICES.txt` travels beside it and is generated, not written by
+hand. `scripts/Generate-ThirdPartyNotices.mjs` reads this checkout's `Cargo.lock`
+through `cargo metadata --locked`, lists every third-party crate with its SPDX
+expression and source URL, and prints each distinct license text once, deduped
+by SHA-256. For an MPL-2.0 crate it also prints the source-code pointer the
+license asks for. The generator exits non-zero, and the packaging run with it,
+when a crate declares no license information at all or when a must-have license
+text (MPL-2.0, ISC, BSD-3-Clause, Zlib, Unicode-3.0, CDLA-Permissive-2.0, MIT,
+Apache-2.0) that is present in `Cargo.lock` cannot be produced; a canonical SPDX
+text embedded in the generator stands in when the crate sources carry none, and
+the file marks which texts came from there. `node
+scripts/Generate-ThirdPartyNotices.mjs --check <file>` exits 0 only when a file
+still carries every crate line and every distinct text, so an archive's copy can
+be held against the lockfile it was built from. Both `scripts/Build-Release.*`
+run the generator before staging and require the result in the archive's layout.
 
 The checksum is **over the artifact**. It is deliberately not an entry in
 `SHA256SUMS.txt`: that file is a curated manifest over a subset of the source
@@ -65,7 +81,7 @@ beside. `crates/sure-cli/tests/install_flow.rs`'s
 `sure-*-x86_64-pc-windows-msvc.zip` in `target/tmp/release/` (or the one
 `SURE_RELEASE_ARCHIVE` names) and holds the installer's records against this
 script's output: the `.sha256` line's format, the archive's single top-level
-directory, the three payload names, the `sure.exe SHA-256` line this script
+directory, the four payload names, the `sure.exe SHA-256` line this script
 writes into `RELEASE.txt`, the manifest's digests and byte counts, and the
 version and `running_from` the installed program reports. **It is `#[ignore]`d,
 and `release.yml`'s `package-windows` job is what runs it**, by name and with
@@ -121,7 +137,7 @@ set in the index deliberately.
 | | |
 | --- | --- |
 | name | `sure-<version>-aarch64-apple-darwin.tar.gz`, where `<version>` is the version `sure` itself reports |
-| layout | one top-level directory of the same name, holding `sure`, `LICENSE` and `RELEASE.txt` |
+| layout | one top-level directory of the same name, holding `sure`, `LICENSE`, `RELEASE.txt` and `THIRD_PARTY_NOTICES.txt` |
 | checksum | `<archive>.sha256` beside it: one `sha256sum`-format line, `<64 lowercase hex><two spaces><file name>`, ASCII, no BOM |
 | where | `target/tmp/release/` by default. `target/` is gitignored, so no binary is committed |
 | mode | `sure` is recorded as mode 755. A tar records the mode as a field of the format, which is why this artifact is not a ZIP |
@@ -131,7 +147,7 @@ set in the index deliberately.
 The two platforms' archives do not have to be the same shape: a Windows user
 expects a ZIP and `[System.IO.Compression.ZipFile]` writes one, and a macOS user
 expects a tarball. What is the same is the naming, the single top-level
-directory, the three files inside it, and the `.sha256` beside it.
+directory, the four files inside it, and the `.sha256` beside it.
 
 **The architecture is read from the artifact and never from the runner's name.**
 `macos-latest` is believed to be an arm64 image; the label's meaning has changed
@@ -395,7 +411,7 @@ the one a reader should leave with:
 The rest of this section is what that sentence rests on, and what it does not.
 
 It is produced by the same `scripts/Build-Release.sh` as the two macOS archives —
-one script, three targets, because the version read, the stage, the three files
+one script, three targets, because the version read, the stage, the four files
 inside the archive, the `.sha256` format, the extraction and the run of the
 extracted binary are the same for all three and two scripts holding one archive
 contract are two places for it to drift — and by a third job in the same workflow,
@@ -477,7 +493,7 @@ the file before, because no earlier target ran this script on a machine where
 | | |
 | --- | --- |
 | name | `sure-<version>-x86_64-unknown-linux-gnu.tar.gz`, where `<version>` is the version `sure` itself reports |
-| layout | one top-level directory of the same name, holding `sure`, `LICENSE` and `RELEASE.txt` |
+| layout | one top-level directory of the same name, holding `sure`, `LICENSE`, `RELEASE.txt` and `THIRD_PARTY_NOTICES.txt` |
 | checksum | `<archive>.sha256` beside it: one `sha256sum`-format line, `<64 lowercase hex><two spaces><file name>`, ASCII, no BOM |
 | where | `target/tmp/release/` by default. `target/` is gitignored, so no binary is committed |
 | mode | `sure` is recorded as mode 755, as in the macOS archives |
@@ -714,7 +730,8 @@ one of the refusals stops coming before the create, if `--draft` or
 `--verify-tag` leaves, if a job loses its runner or gains an `if:` or
 `continue-on-error`, if a packaging job stops running the workspace's tests
 before it packages, if one of the four archives, its `.sha256`, the aggregate or
-one of the nine asset paths leaves, if `contents: write` appears more than once,
+one of the nine asset paths leaves, if the release notes stop saying an archive
+carries `THIRD_PARTY_NOTICES.txt`, if `contents: write` appears more than once,
 or if any word from the forbidden-act and publication-channel lists appears in
 the code of either file. Each of those rules is turned red by an edit that breaks
 it; the edits are in the test. It proves
@@ -722,6 +739,31 @@ it; the edits are in the test. It proves
 `macos-26-intel` is obtainable, that `windows-latest` can package, or that any
 run passes — none of which this repository has observed, and none of which a
 file about a workflow can observe.
+
+### Before publishing a draft
+
+A draft release is reversible, and publishing it is a person's decision. That
+person's checklist, in the order the release was produced:
+
+- the four packaging jobs are green, including each one's
+  `cargo test --workspace` and the checks each `Build-Release.*` run prints;
+- every archive verified against its `.sha256`, and
+  `sure-<version>-release-checksums.txt` verified with `sha256sum -c`;
+- `THIRD_PARTY_NOTICES.txt` sits inside each archive beside `sure.exe`,
+  `LICENSE` and `RELEASE.txt`. The build generated it from that run's
+  `Cargo.lock`; to re-read it rather than trust the build, extract the archive
+  and run
+  `node scripts/Generate-ThirdPartyNotices.mjs --check <extracted>/THIRD_PARTY_NOTICES.txt`
+  from the same commit;
+- **license review.** Read the crate list and any note that a text came from
+  the generator's embedded canonical copies. The generator is a disclosure
+  gate, not a policy: it fails a build whose dependency declares no license at
+  all or whose must-have license text cannot be produced, and it does not judge
+  whether a license is acceptable for this project. No deny/compatibility
+  configuration exists — `docs/security/SUPPLY_CHAIN.md` records that — and a
+  person is the review step that the configuration would otherwise be;
+- the release notes' own statement — unsigned and unnotarized — is still what
+  `## Signing` above says may be written.
 
 ## Package managers
 

@@ -483,6 +483,16 @@ pub struct Build {
     /// product's name, and a field holding "SURE 0.1.2" makes each of
     /// them have to take it apart again. See [`crate::VERSION`].
     pub version: String,
+    /// The git commit this binary was built from, as a full 40-character
+    /// lowercase SHA-1, or "unknown".
+    ///
+    /// Stamped by the build script (`crates/sure-core/build.rs`) from
+    /// `git rev-parse HEAD` and carried in through `option_env!` — never read
+    /// at run time, because the binary is what this field is about and the
+    /// checkout next to it is a different question. "unknown" is the honest
+    /// answer for a build made outside a git checkout, or on a machine with no
+    /// `git`, such as one from a source archive; it is never a guessed value.
+    pub commit: &'static str,
     /// The harness protocol version it speaks.
     pub protocol_version: u32,
     /// The operating system this binary was built for.
@@ -676,6 +686,11 @@ pub fn examine_in(places: Result<Paths, PathError>, search_path: &OsStr) -> Doct
     DoctorReport {
         build: Build {
             version: crate::VERSION.to_owned(),
+            // Set by `build.rs`; absent from a build script that never ran —
+            // which cargo does not do, but `option_env!` is the only non-
+            // panicking way to read a compile-time variable, so the fallback
+            // states the same fact the build script states.
+            commit: option_env!("SURE_BUILD_COMMIT").unwrap_or("unknown"),
             protocol_version: crate::PROTOCOL_VERSION,
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -1315,6 +1330,27 @@ mod tests {
     fn the_schema_version_is_this_builds_own() {
         // The re-export is the same constant, not a copy that can drift.
         assert_eq!(latest_schema_version(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn the_build_commit_is_the_one_the_build_stamped() {
+        // The value a report carries is this binary's own compile-time stamp,
+        // and never something read from the machine at run time: the checkout a
+        // binary happens to run next to is a different question from the source
+        // it was made of. "unknown" is allowed — a source archive has no git —
+        // but a value that is not the stamp is not.
+        let report = examine(Ok(places_for(&scratch("build_commit"))));
+        let stamped = option_env!("SURE_BUILD_COMMIT").unwrap_or("unknown");
+        assert_eq!(report.build.commit, stamped);
+        let commit = report.build.commit;
+        assert!(
+            commit == "unknown"
+                || (commit.len() == 40
+                    && commit
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))),
+            "the build commit is neither a full lowercase SHA-1 nor \"unknown\": {commit:?}"
+        );
     }
 
     /// A finding document, shaped as `sure_core::store`'s own tests shape one:
