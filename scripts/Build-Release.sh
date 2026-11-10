@@ -25,7 +25,7 @@
 # shell script is what runs there: `/bin/sh` on macOS, `sh` on a Linux runner.
 # `P15-T007` adds Linux x64 to this script rather than to a sibling one, because
 # it is built on the same kind of runner and by the same shape of job as the two
-# macOS targets: the version read, the stage, the three files inside the
+# macOS targets: the version read, the stage, the four files inside the
 # archive, the `.sha256` format, the extraction and the run of the extracted
 # binary are identical, and two scripts holding the same archive contract are
 # two places for it to drift.
@@ -61,7 +61,7 @@
 #   artifact   sure-<version>-<target>.tar.gz
 #   checksum   sure-<version>-<target>.tar.gz.sha256, one sha256sum-format line
 #   layout     one top-level directory, sure-<version>-<target>/, holding
-#              sure, LICENSE and RELEASE.txt
+#              sure, LICENSE, RELEASE.txt and THIRD_PARTY_NOTICES.txt
 #   location   target/tmp/release/ by default
 #
 # `target/` is gitignored, so nothing binary is committed.
@@ -724,7 +724,7 @@ STAGE_ROOT="$SCRATCH/stage"
 #
 # **The Linux row is one code path and one table row apart in the same way, and
 # the one thing it changes is how many bytes the header read takes.** The
-# version read, the stage, the three files inside the archive, the `.sha256`
+# version read, the stage, the four files inside the archive, the `.sha256`
 # format, the entry-list comparison, the extraction, the second reader and the
 # run of the extracted binary are the same steps reached the same way. What
 # differs is the family: `HEADER_FAMILY` selects the reader, because the two
@@ -1545,6 +1545,7 @@ ARTIFACT_NAME=''
 ARCHIVE=''
 SHA_PATH=''
 BUILT_BINARY=''
+NOTICES_PATH=''
 
 if [ "$PHASE" = 'all' ]; then
     step 'Version'
@@ -1607,6 +1608,39 @@ if [ "$PHASE" = 'all' ]; then
         fail "cargo build succeeded but $BUILT_BINARY is not there"
     fi
 
+    # The third-party license notices. `scripts/Generate-ThirdPartyNotices.mjs`
+    # reads this checkout's Cargo.lock through `cargo metadata` and exits 1
+    # rather than omitting a crate whose license it cannot state, so a run that
+    # gets past this step has a complete notice file about these dependencies.
+    # Generated before staging, because the archive's contents are what this
+    # script states rather than what a directory happened to hold.
+    step 'Third-party notices'
+
+    if ! have node; then
+        fail "node is not on PATH, so scripts/Generate-ThirdPartyNotices.mjs cannot run and this artifact cannot carry the third-party license notices it promises. Nothing was packaged."
+    fi
+    NOTICES_PATH="$LOGS/THIRD_PARTY_NOTICES.txt"
+    notices_out="$LOGS/third-party-notices.txt"
+    notices_err="$LOGS/third-party-notices.err.txt"
+    notices_status=0
+    run_captured node "$notices_out" "$notices_err" "$ROOT/scripts/Generate-ThirdPartyNotices.mjs" --output "$NOTICES_PATH" --target "$TARGET" || notices_status=$?
+    if [ -s "$notices_out" ]; then
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then detail "$line"; fi
+        done <"$notices_out"
+    fi
+    if [ $notices_status -ne 0 ]; then
+        if [ -s "$notices_err" ]; then
+            while IFS= read -r line; do detail "stderr      $line"; done <"$notices_err"
+        fi
+        fail "scripts/Generate-ThirdPartyNotices.mjs exited $notices_status; its stderr is $notices_err. A release without a complete third-party notice file is not packaged."
+    fi
+    if [ ! -f "$NOTICES_PATH" ]; then
+        fail "the notice generator exited 0 but $NOTICES_PATH is not there"
+    fi
+    count_of -c "$NOTICES_PATH" 'third-party-notices'
+    detail "notices     $NOTICES_PATH ($COUNT bytes)"
+
     step 'Stage'
     ARTIFACT_NAME="sure-$VERSION-$TARGET"
     stage_dir="$STAGE_ROOT/$ARTIFACT_NAME"
@@ -1621,6 +1655,7 @@ if [ "$PHASE" = 'all' ]; then
     # builder's, and the archive should not depend on it.
     chmod 755 "$staged_binary"
     cp "$ROOT/LICENSE" "$stage_dir/LICENSE"
+    cp "$NOTICES_PATH" "$stage_dir/THIRD_PARTY_NOTICES.txt"
 
     commit='unknown'
     if have git; then
@@ -1728,7 +1763,7 @@ ELF is a detached file beside it or a digest in a distribution packager's
 database, never a field inside the image. So there is nothing in
 $ARTIFACT_NAME.tar.gz to read a certificate out of. The entries of the archive
 are listed and checked against the promised set before it is written, and
-they are three files. The .sha256 beside the archive is an integrity digest,
+they are four files. The .sha256 beside the archive is an integrity digest,
 not a signature: it says the bytes arrived unchanged and says nothing about
 who wrote them.
 
@@ -1919,7 +1954,7 @@ fi
 # The pipeline stays, and it cannot report success over a failed producer: `sort`
 # is the last element, its input is `sed`'s output, and the `cmp` immediately
 # below turns an empty or half-written result into a named failure — an empty
-# list is not the four-entry set this artifact promises. `pipefail` was not doing
+# list is not the five-entry set this artifact promises. `pipefail` was not doing
 # anything here that the comparison does not.
 normalised="$LOGS/archive-entries.normalised.txt"
 sed 's:/$::' "$entries_out" | LC_ALL=C sort >"$normalised"
@@ -1928,6 +1963,7 @@ cat >"$expected" <<EOF
 $ARTIFACT_NAME
 $ARTIFACT_NAME/LICENSE
 $ARTIFACT_NAME/RELEASE.txt
+$ARTIFACT_NAME/THIRD_PARTY_NOTICES.txt
 $ARTIFACT_NAME/sure
 EOF
 LC_ALL=C sort -o "$expected" "$expected"
@@ -2042,7 +2078,7 @@ fi
 detail "into        $extract_dir"
 
 extracted_binary="$extract_dir/sure"
-for required in sure LICENSE RELEASE.txt; do
+for required in sure LICENSE RELEASE.txt THIRD_PARTY_NOTICES.txt; do
     if [ ! -f "$extract_dir/$required" ]; then
         fail "the archive extracted but $required is not in it"
     fi
@@ -2126,7 +2162,7 @@ step 'Signature'
 if [ "$HEADER_FAMILY" = 'elf' ]; then
     # Linux has no `codesign`, and an ELF has no field a signature lives in: a
     # signature over one is a detached file beside it, and the entries of this
-    # archive were just checked against the promised set, which is three files
+    # archive were just checked against the promised set, which is four files
     # and none of them a signature. So there is nothing to read, and the honest
     # report of a reading that did not happen is that it did not happen. A line
     # saying "no signature found" would describe a question this run never

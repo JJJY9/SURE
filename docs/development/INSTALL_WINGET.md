@@ -60,13 +60,15 @@ NestedInstallerFiles:
 ```
 
 The release archive is a ZIP holding one top-level directory with `sure.exe`,
-`LICENSE` and `RELEASE.txt` in it (`docs/development/RELEASE_PROCESS.md:20-26`).
+`LICENSE`, `RELEASE.txt` and `THIRD_PARTY_NOTICES.txt` in it
+(`docs/development/RELEASE_PROCESS.md:20-26`).
 WinGet extracts that archive and puts the one executable where it wants it, so
 the manifest describes *what is in the archive* rather than running
 `scripts/Install-Sure.ps1`.
 
 That choice is the reason an uninstall is exact. `Install-Sure.ps1` writes a
-`bin\` directory holding `sure.exe`, `LICENSE` and `RELEASE.txt`, and writes an
+`bin\` directory holding `sure.exe`, `LICENSE`, `RELEASE.txt` and
+`THIRD_PARTY_NOTICES.txt`, and writes an
 `install-manifest.json` beside it — all inside `%LOCALAPPDATA%\SURE`, a directory
 that also holds `sure.db`, the user's evidence. A package whose install ran that
 script would own files WinGet has no record of, and WinGet's uninstall would

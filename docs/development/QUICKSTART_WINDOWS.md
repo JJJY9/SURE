@@ -94,8 +94,8 @@ sure-0.1.3-x86_64-pc-windows-msvc.zip.sha256
 The name is `sure-<version>-x86_64-pc-windows-msvc.zip`, where `<version>` is
 what `sure version` prints — `0.1.3` in this build.
 `docs/development/RELEASE_PROCESS.md` is the specification for the layout: one
-top-level directory named after the archive, holding `sure.exe`, `LICENSE` and
-`RELEASE.txt`.
+top-level directory named after the archive, holding `sure.exe`, `LICENSE`,
+`RELEASE.txt` and `THIRD_PARTY_NOTICES.txt`.
 
 **Do not use `-Phase Verify` to check a download.** It reads
 `target/tmp/release-gate.json` out of the checkout it is run from, so a person
@@ -115,14 +115,15 @@ Still in the root of the checkout, with the archive where section 2 left it:
 
 That is the whole install. It verifies the archive against the `.sha256` before
 it extracts anything — there is no switch to skip that check, and a check that
-can be turned off is not a check — and then it writes exactly four paths:
+can be turned off is not a check — and then it writes exactly five paths:
 
 ```text
 %LOCALAPPDATA%\SURE\
-    bin\sure.exe            the program
+    bin\sure.exe                  the program
     bin\LICENSE
-    bin\RELEASE.txt         the archive's own record of what was built
-    install-manifest.json   what this install wrote, with each file's digest
+    bin\RELEASE.txt               the archive's own record of what was built
+    bin\THIRD_PARTY_NOTICES.txt   the archive's third-party license notices
+    install-manifest.json         what this install wrote, with each file's digest
 ```
 
 `%LOCALAPPDATA%\SURE` is also the directory SURE keeps your evidence in

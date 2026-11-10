@@ -4,7 +4,8 @@
 #
 # The archive is the one `scripts/Build-Release.ps1` produces, laid out as
 # `docs/development/RELEASE_PROCESS.md` records: one top-level directory of the
-# archive's own name holding `sure.exe`, `LICENSE` and `RELEASE.txt`, and a
+# archive's own name holding `sure.exe`, `LICENSE`, `RELEASE.txt` and
+# `THIRD_PARTY_NOTICES.txt`, and a
 # `<archive>.sha256` beside the archive in `sha256sum` format.
 #
 # =============================================================================
@@ -60,9 +61,10 @@
 #         bin\sure.exe     what this install writes
 #         sure.db          the user's evidence; NOT this install's to remove
 #
-# This installer therefore writes exactly four paths:
+# This installer therefore writes exactly five paths:
 #
-#     bin\sure.exe, bin\LICENSE, bin\RELEASE.txt   copied out of the archive
+#     bin\sure.exe, bin\LICENSE, bin\RELEASE.txt,
+#     bin\THIRD_PARTY_NOTICES.txt                  copied out of the archive
 #     install-manifest.json                        what it created, with each
 #                                                  file's digest, so that
 #                                                  removal can be exact
@@ -508,7 +510,7 @@ try {
     }
 
     $payload = @()
-    foreach ($name in @('sure.exe', 'LICENSE', 'RELEASE.txt')) {
+    foreach ($name in @('sure.exe', 'LICENSE', 'RELEASE.txt', 'THIRD_PARTY_NOTICES.txt')) {
         $candidate = Join-Path $tops[0].FullName $name
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             $payload += [pscustomobject]@{ Name = $name; Source = $candidate }

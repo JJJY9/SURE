@@ -32,10 +32,22 @@ left for a reader to discover:
   versions are known-bad. The consequence is that "this release has no
   dependency with a known advisory" is a claim this repository cannot currently
   support, and it is not made here.
-- **Not there: license review or deny configuration.** No license policy exists
-  in the tree either, so no dependency's license is checked by anything
-  automated. The item was written as "as dependencies appear", and they have;
-  what is missing is the policy, not the moment.
+- **Partly there: license disclosure, not license policy.** Dependencies have
+  appeared, and the disclosure side now exists:
+  `scripts/Generate-ThirdPartyNotices.mjs` reads `cargo metadata --locked`,
+  lists every third-party crate with its SPDX expression, collects the license
+  texts the crate sources carry (embedding a canonical SPDX text only when none
+  can be found for a must-have license), and writes `THIRD_PARTY_NOTICES.txt`.
+  Both `scripts/Build-Release.*` stage that file into every archive and
+  `scripts/Install-Sure.ps1` installs it beside the binary. The generator fails
+  the packaging run when a crate declares no license at all or a must-have
+  license text cannot be produced, and `--check` re-reads a shipped copy
+  against the lockfile. What is still missing is a **policy**: no `deny.toml`
+  or compatibility configuration exists, so a license this project should not
+  ship is disclosed rather than refused, and whether a listed license is
+  acceptable remains a person's review — the pre-publish checklist in
+  `docs/development/RELEASE_PROCESS.md` carries that step rather than claiming
+  it is automated.
 - **Node plugin packages:** there are none to review — no package under
   `integrations/` carries a `package.json` — so that item is met by there being
   nothing to meet it with rather than by a dependency review.

@@ -219,6 +219,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath $PayloadExe -Destination (Join-Path $stage 'sure.exe') -Force
 $license = "test fixture: the archive's LICENSE entry`n"
 [System.IO.File]::WriteAllText((Join-Path $stage 'LICENSE'), $license, [System.Text.ASCIIEncoding]::new())
+$notices = "SURE THIRD-PARTY NOTICES`ntest fixture: the archive's third-party notice entry`n"
+[System.IO.File]::WriteAllText((Join-Path $stage 'THIRD_PARTY_NOTICES.txt'), $notices, [System.Text.ASCIIEncoding]::new())
 $release = "SURE $Version - a test fixture in the documented archive layout`n"
 [System.IO.File]::WriteAllText((Join-Path $stage 'RELEASE.txt'), $release, [System.Text.ASCIIEncoding]::new())
 $archive = Join-Path $ScratchRoot "$name.zip"

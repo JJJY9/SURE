@@ -713,8 +713,8 @@ jobs:
           | \`*.sha256\` | one line per archive, written beside it when it was built |
           | \`sure-$version-release-checksums.txt\` | all four archives, one line each |
 
-          Every archive holds one top-level directory with the binary, \`LICENSE\` and
-          \`RELEASE.txt\`. To check a download:
+          Every archive holds one top-level directory with the binary, \`LICENSE\`,
+          \`RELEASE.txt\` and \`THIRD_PARTY_NOTICES.txt\`. To check a download:
 
               sha256sum -c sure-$version-release-checksums.txt
 

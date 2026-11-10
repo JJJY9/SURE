@@ -158,6 +158,16 @@ const RELEASE_ARTIFACTS: [(&str, &str); 4] = [
     ("x86_64-unknown-linux-gnu", "tar.gz"),
 ];
 
+/// The license-disclosure file every archive carries, and that the release
+/// notes say it carries.
+///
+/// It is generated from `Cargo.lock` by `scripts/Generate-ThirdPartyNotices.mjs`
+/// and staged by both `Build-Release.*` scripts, so it is inside each archive
+/// rather than one of the nine assets attached to the release. The rule below
+/// is therefore about the notes' sentence, which is the only place in
+/// `release.yml` where a downloader is told what an archive holds.
+const THIRD_PARTY_NOTICES: &str = "THIRD_PARTY_NOTICES.txt";
+
 /// Tokens that would be automatic force or merge behaviour, and the act each is.
 ///
 /// This is the second acceptance clause turned into text a reader can find. It
@@ -1084,6 +1094,20 @@ fn release_violations(workflow: &str, assembler: &str) -> Vec<String> {
         }
     }
 
+    // Rule R5. The release notes say what every archive holds, and the file
+    // inside each archive that says which third-party licenses the binary is
+    // built from is one of them. This rule reads the whole text on purpose:
+    // the notes are prose the workflow writes into the release, so the
+    // sentence itself is the object being policed, and nothing in a `run:`
+    // command would say the same thing.
+    if line_carrying(&lines, THIRD_PARTY_NOTICES).is_none() {
+        out.push(format!(
+            "the release notes in {RELEASE_WORKFLOW} do not name `{THIRD_PARTY_NOTICES}` among the \
+             files an archive holds, so a downloader is not told the archive carries the \
+             third-party license texts of the crates compiled into the binary"
+        ));
+    }
+
     // --- the second clause: no automatic force, and no merge
 
     for &(token, act) in FORBIDDEN_ACTS {
@@ -1810,6 +1834,13 @@ const RELEASE_BREAKS: &[ReleaseBreak] = &[
         from: "sure-$version-release-checksums.txt",
         to: "sure-$version-checksums.txt",
         wanted: "does not name `sure-$version-release-checksums.txt`",
+    },
+    ReleaseBreak {
+        what: "the release notes stop saying an archive carries the third-party notices",
+        file: ReleaseFile::Workflow,
+        from: "\\`THIRD_PARTY_NOTICES.txt\\`",
+        to: "\\`THIRD_PARTY_NOTICES-absent.txt\\`",
+        wanted: "THIRD_PARTY_NOTICES.txt",
     },
     ReleaseBreak {
         what: "the source-tree manifest is attached as a release asset",
