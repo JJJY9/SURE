@@ -1342,6 +1342,7 @@ mod tests {
         Report::Doctor(Box::new(DoctorReport {
             build: Build {
                 version: "0.0.0-test".to_owned(),
+                commit: "unknown",
                 protocol_version: 1,
                 os: "test",
                 arch: "test",

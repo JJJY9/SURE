@@ -580,6 +580,58 @@ fn a_doctor_report_is_an_answer_however_it_turns_out() {
 }
 
 #[test]
+fn the_doctor_frame_names_the_commit_the_binary_was_built_from() {
+    // `details.build.commit` exists so that a binary — bundled or installed —
+    // can be traced to the source it was made from; `sure_version` alone
+    // cannot, because two builds can share a number and differ in code. This
+    // is the end-to-end half of that contract: the commit is a full SHA-1 or
+    // the explicit `"unknown"`, and when it is a SHA-1 it is the one this
+    // checkout's `HEAD` names, because that is the checkout the binary under
+    // test was built from.
+    let machine = run(&["--format", "json", "doctor"]);
+    let frame: serde_json::Value = serde_json::from_str(machine.stdout.trim())
+        .unwrap_or_else(|error| panic!("`sure --format json doctor` is not JSON: {error}"));
+    let commit = frame["details"]["build"]["commit"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the doctor frame names no build commit: {frame}"));
+    let full_sha = |text: &str| {
+        text.len() == 40
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    assert!(
+        commit == "unknown" || full_sha(commit),
+        "the build commit is neither a full lowercase SHA-1 nor \"unknown\": {commit:?}"
+    );
+    if commit == "unknown" {
+        // Not a checkout, or no git when the binary was built: there is
+        // nothing here to compare the answer against.
+        return;
+    }
+
+    // `git` is not required of a test run otherwise; if this machine has none,
+    // the check above is all this run can say about the field.
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let head = match Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&workspace)
+        .output()
+    {
+        Ok(head) if head.status.success() => head,
+        _ => return,
+    };
+    let head = String::from_utf8(head.stdout).unwrap_or_default();
+    assert_eq!(
+        commit,
+        head.trim(),
+        "the binary says it was built from {commit} and this checkout's HEAD is {}, so the \
+         binary and the sources it claims are two different states",
+        head.trim()
+    );
+}
+
+#[test]
 fn the_protocol_version_sure_reports_is_the_one_it_will_talk_to() {
     // The handshake rule is exact equality, so the number SURE prints and the
     // number that gets a yes have to be the same number. Taken from the frame

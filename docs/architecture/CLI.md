@@ -161,6 +161,20 @@ safe to paste into a bug report:
 machine: 0 when it found nothing wrong, 1 when it did. That is the false-green
 rule applied to SURE's own installation — `sure doctor || fix it` has to work.
 
+The machine form's `details.build` object describes the binary answering:
+`version`, `commit`, `protocol_version`, `os`, `arch`, `target_env` and
+`running_from`. `commit` is the git SHA the binary was built from — a full
+40-character lowercase hex SHA-1 — stamped at build time by
+`crates/sure-core/build.rs` from `git rev-parse HEAD`, and the literal
+`"unknown"` for a build made without a checkout or without `git` (a source
+archive, for one). It is never read from the machine at run time: the checkout
+a binary happens to run next to is a different question from the source it was
+made of, which is what lets a packaged or bundled build still name its commit.
+The human form prints `built from <commit>` on the line after the version, and
+omits the line when the answer is `unknown` — "built from unknown" is not a
+fact a person can act on, and the frame carries the explicit `"unknown"` for a
+script that asks.
+
 ## `sure history`
 
 The command the two harness integrations had been telling people to run since
@@ -1215,6 +1229,7 @@ anything about output or status: both are SURE's, and both have one home.
 | The two settings files can only differ in one direction | same file, `the_two_settings_can_only_differ_in_one_direction` |
 | A store location inside the checked project is refused when the run opens it, and nothing is written | same file, `a_store_inside_the_project_is_refused_before_anything_is_recorded` — the refusal is driven on the `--goal` road, which opens the store; a `sure check` with no goal opens none and never meets the rule, and the `--store-dir` section above states which states each command is refused in |
 | `sure doctor` says whether the location is the platform's or the caller's | same file, `a_doctor_report_says_which_store_location_the_run_is_using` |
+| `sure doctor` names the commit the binary was built from, or `"unknown"` | `crates/sure-cli/tests/cli_contract.rs`, `the_doctor_frame_names_the_commit_the_binary_was_built_from`; `crates/sure-core/src/doctor.rs`, `the_build_commit_is_the_one_the_build_stamped`; `crates/sure-cli/src/doctor.rs`, `the_build_commit_is_in_both_forms_or_in_neither` |
 | Nothing a project can write decides where the store goes | same file, `nothing_a_project_can_write_decides_where_the_store_goes` |
 | Every command is reached by the location the caller named | same file, `every_command_is_reached_by_the_location_the_caller_named` |
 | `sure config set` writes a setting only the user's own file can grant, and a later run reports it in force | `crates/sure-cli/tests/cli_contract.rs`, `a_setting_only_a_users_own_file_can_grant_is_written_and_a_later_run_reports_it_in_force` and `a_full_recording_granted_by_the_users_own_file_is_one_a_real_run_keeps` |
