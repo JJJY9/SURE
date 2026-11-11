@@ -480,6 +480,32 @@ pub fn escape_control_characters(text: &str) -> String {
     out
 }
 
+/// The most characters of one source line an evidence excerpt keeps.
+pub const EVIDENCE_EXCERPT_CHARS: usize = 240;
+
+/// Escape controls and keep at most [`EVIDENCE_EXCERPT_CHARS`] characters.
+///
+/// Heuristic detectors quote the line a candidate stands on. A minified bundle
+/// or a generated file is one line of megabytes, and storing it whole turned a
+/// real project's report into 26 MB of machine text and put the whole bundle in
+/// a finding's context (measured 2026-11-11, the `app` mini-program's
+/// `.tmp/cloudcenter-*.js`). The excerpt keeps the first
+/// [`EVIDENCE_EXCERPT_CHARS`] characters of the line — enough to find it again
+/// — and marks that it was cut. The cut happens on the source text and escaping
+/// after it, so a cut can never split an escape sequence; escapes inside the
+/// kept prefix may make the stored string slightly longer than the bound.
+#[must_use]
+pub fn evidence_excerpt(line: &str) -> String {
+    let trimmed = line.trim();
+    let kept: String = trimmed.chars().take(EVIDENCE_EXCERPT_CHARS).collect();
+    let cut = kept.chars().count() < trimmed.chars().count();
+    let mut escaped = escape_control_characters(&kept);
+    if cut {
+        escaped.push('…');
+    }
+    escaped
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -492,6 +518,24 @@ mod tests {
         assert!(!redacted.contains("hunter2"), "{redacted}");
         assert!(!redacted.contains("alice"), "{redacted}");
         assert_eq!(redacted, "https://***@api.example.com/v1");
+    }
+
+    #[test]
+    fn an_evidence_excerpt_keeps_the_start_and_marks_the_cut() {
+        let short = "path: '/pages/home/index'";
+        assert_eq!(evidence_excerpt(short), short);
+
+        let minified = "x".repeat(10_000);
+        let excerpt = evidence_excerpt(&minified);
+        assert_eq!(excerpt.chars().count(), EVIDENCE_EXCERPT_CHARS + 1);
+        assert!(excerpt.ends_with('…'));
+
+        // Escaping happens before the cut, so a control character near the
+        // boundary cannot be split into half an escape sequence.
+        let controls = "a".repeat(EVIDENCE_EXCERPT_CHARS - 1) + "\n" + &"b".repeat(10);
+        let excerpt = evidence_excerpt(&controls);
+        assert!(excerpt.contains("\\n"));
+        assert!(!excerpt.contains('\n'));
     }
 
     #[test]

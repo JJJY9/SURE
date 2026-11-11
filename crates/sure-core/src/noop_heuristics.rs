@@ -32,7 +32,7 @@ use crate::checks::check_id;
 use crate::discover::Discovery;
 use crate::finding_gravity::{GapKind, Reach, gravity_of};
 use crate::planned_work::{CheckOperation, PlannedWork, PrecomputedEvidence};
-use crate::redact::escape_control_characters;
+use crate::redact::evidence_excerpt;
 use crate::references::is_source_candidate;
 use crate::scan::display_path;
 use crate::schedule::{CheckProposal, CheckReason, PlanBuilder};
@@ -415,7 +415,7 @@ fn scan_source_files(
                     continue;
                 }
                 if category.matches(line) {
-                    let mut context = escape_control_characters(line.trim());
+                    let mut context = evidence_excerpt(line);
                     if context.len() > 120 {
                         context.truncate(120);
                         context.push_str("...");
