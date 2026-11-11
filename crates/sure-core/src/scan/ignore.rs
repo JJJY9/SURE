@@ -182,6 +182,16 @@ pub const IGNORED_DIRECTORIES: &[IgnoreRule] = &[
         name: ".output",
         reason: SkipReason::BuildOutput,
     },
+    // CloudBase/CloudBase-style toolchains stage the admin console they generate
+    // under `.tmp/` (`cloudcenter-*.js` here, minified webpack output). Measured
+    // 2026-11-11 on the `app` mini-program: every remaining route finding and a
+    // 26 MB report came from reads inside this tree — machine-written bundles,
+    // not the project's source. The name is the tool's own dotted directory,
+    // rebuilt by running the tool again.
+    IgnoreRule {
+        name: ".tmp",
+        reason: SkipReason::BuildOutput,
+    },
     // A tool's run output. `Dream-RSI/open-dream-rsi` keeps every agent run
     // under `.runtime/runs/<id>/`, including the HTML and JS each run renders;
     // measured 2026-11-03, 115 of that project's 122 findings were anchors

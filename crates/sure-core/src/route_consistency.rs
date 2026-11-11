@@ -30,6 +30,19 @@
 //! concatenated strings are skipped, because SURE has no value to put in the
 //! hole and guessing would produce false certainty.
 //!
+//! # Mini-program page paths
+//!
+//! A WeChat mini-program writes visitor destinations as `path: '/pages/…'`
+//! literals too — share configs (`onShareTimeline`/`onShareAppMessage` returns),
+//! tab and menu configurations, `navigateTo` arguments. Those name *pages*, not
+//! backend routes, and they are declared in the mini-program's `app.json`
+//! (`pages`, and `subPackages[].pages` under each `root`). Both layouts the
+//! official tools produce are read: `app.json` at the project root and
+//! `app.json` under a one-level subdirectory (`miniprogram/`). A `path:`
+//! expectation matching a declared page is not a backend expectation and is
+//! skipped here; a `path:` that is not declared remains a candidate, because
+//! nothing in the project says what serves it.
+//!
 //! # What it does not do
 //!
 //! It does not probe running services — that is `P5-T003`'s work. It reads
@@ -58,6 +71,7 @@ use crate::finding_gravity::{GapKind, Reach, gravity_of};
 use crate::http_routes::RouteReading;
 use crate::planned_work::{CheckOperation, PlannedWork, PrecomputedEvidence};
 use crate::redact::escape_control_characters;
+use crate::redact::evidence_excerpt;
 use crate::references::is_source_candidate;
 use crate::scan::display_path;
 use crate::schedule::{CheckProposal, CheckReason, PlanBuilder};
@@ -115,6 +129,7 @@ impl RouteConsistency {
         for not_probed in backend_reading.not_probed() {
             backend_paths.insert(not_probed.route().path().to_owned());
         }
+        let page_routes = mini_program_pages(discovery);
 
         let mut expectations: Vec<FrontendExpectation> = Vec::new();
         scan_frontend_files(discovery, &mut expectations);
@@ -129,6 +144,17 @@ impl RouteConsistency {
             seen_paths.insert(expectation.path.clone());
 
             if backend_paths.contains(&expectation.path) {
+                continue;
+            }
+            // A declared mini-program page is a visitor destination, not a
+            // backend route; the share/menu configs that name it cannot be
+            // settled as "missing backend" because no backend is involved.
+            let route = expectation
+                .path
+                .split(['?', '#'])
+                .next()
+                .unwrap_or(expectation.path.as_str());
+            if page_routes.contains(route) {
                 continue;
             }
 
@@ -296,7 +322,7 @@ fn scan_frontend_files(discovery: &Discovery, expectations: &mut Vec<FrontendExp
         for (index, line) in text.lines().enumerate() {
             let line_number = index + 1;
             for path in expectations_on_line(line) {
-                let context = escape_control_characters(line.trim());
+                let context = evidence_excerpt(line);
                 expectations.push(FrontendExpectation {
                     path,
                     file: file.clone(),
@@ -306,6 +332,91 @@ fn scan_frontend_files(discovery: &Discovery, expectations: &mut Vec<FrontendExp
             }
         }
     }
+}
+
+/// Visitor routes a WeChat mini-program declares in its `app.json`.
+///
+/// Reads the two layouts the official tooling produces (`app.json` at the
+/// project root, or under a one-level directory such as `miniprogram/`), and
+/// returns every declared page as an absolute route (`/pages/home/index`),
+/// including pages contributed by `subPackages` under their `root`. A file that
+/// does not parse is skipped rather than guessed at: an unreadable declaration
+/// means "not declared here", which keeps the candidate instead of inventing an
+/// exemption.
+fn mini_program_pages(discovery: &Discovery) -> HashSet<String> {
+    let mut pages: HashSet<String> = HashSet::new();
+    let mut add = |route: &str| {
+        let trimmed = route.trim().trim_start_matches('/');
+        if !trimmed.is_empty() {
+            pages.insert(format!("/{trimmed}"));
+        }
+    };
+
+    for entry in discovery.scan.files() {
+        let path = entry.path.as_path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name != "app.json" || path.components().count() > 2 {
+            continue;
+        }
+        let full = discovery.root.join(path);
+        if !is_within_project(&discovery.root, &full) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&full) else {
+            continue;
+        };
+        if metadata.len() > 256 * 1024 {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&full) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+
+        if let Some(list) = object.get("pages").and_then(|v| v.as_array()) {
+            for page in list {
+                if let Some(page) = page.as_str() {
+                    add(page);
+                }
+            }
+        }
+        for key in ["subPackages", "subpackages"] {
+            let Some(list) = object.get(key).and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for sub in list {
+                let Some(sub) = sub.as_object() else {
+                    continue;
+                };
+                let root = sub
+                    .get("root")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim_end_matches('/');
+                let Some(sub_pages) = sub.get("pages").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for page in sub_pages {
+                    let Some(page) = page.as_str() else {
+                        continue;
+                    };
+                    if root.is_empty() {
+                        add(page);
+                    } else {
+                        add(&format!("{root}/{page}"));
+                    }
+                }
+            }
+        }
+    }
+    pages
 }
 
 /// Whether a file is a frontend source file this module reads.
@@ -738,6 +849,97 @@ mod tests {
     #[test]
     fn first_quoted_literal_returns_none_for_template_literal() {
         assert_eq!(first_quoted_literal("`/api/users`"), None);
+    }
+
+    /// Writes `app.json` and a share config under a fresh temp project and
+    /// returns its root.
+    fn mini_program_project(
+        label: &str,
+        app_json_path: &str,
+        app_json: &str,
+        share_file: &str,
+        share_source: &str,
+    ) -> std::path::PathBuf {
+        let temp = std::env::temp_dir().join(format!(
+            "sure-route-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let app_path = temp.join(app_json_path);
+        std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+        std::fs::write(app_path, app_json).unwrap();
+        let share_path = temp.join(share_file);
+        std::fs::create_dir_all(share_path.parent().unwrap()).unwrap();
+        std::fs::write(share_path, share_source).unwrap();
+        temp
+    }
+
+    #[test]
+    fn a_declared_mini_program_page_is_not_a_backend_expectation() {
+        // The `miniprogram/` layout the official tools produce, with a page and
+        // a sub-package page named by share configs.
+        let temp = mini_program_project(
+            "mini-pages",
+            "miniprogram/app.json",
+            r#"{"pages":["pages/home/index"],"subPackages":[{"root":"pkg","pages":["detail/index"]}]}"#,
+            "miniprogram/pages/home/index.js",
+            "return { title, path: '/pages/home/index' };\n\
+             return { title, path: '/pkg/detail/index?from=share' };\n",
+        );
+
+        let discovery =
+            crate::discover::discover(&temp, &crate::discover::DiscoverOptions::default()).unwrap();
+        let consistency = RouteConsistency::of(&discovery);
+        assert!(
+            consistency.is_empty(),
+            "declared page routes must not be reported as missing backend routes: {:?}",
+            consistency
+                .proposed()
+                .iter()
+                .map(|p| p.title())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_undeclared_path_in_a_mini_program_is_still_a_candidate() {
+        let temp = mini_program_project(
+            "mini-undeclared",
+            "miniprogram/app.json",
+            r#"{"pages":["pages/home/index"]}"#,
+            "miniprogram/pages/home/other.js",
+            "const config = { path: '/api/missing' };\n",
+        );
+
+        let discovery =
+            crate::discover::discover(&temp, &crate::discover::DiscoverOptions::default()).unwrap();
+        let consistency = RouteConsistency::of(&discovery);
+        assert_eq!(
+            consistency.proposed().len(),
+            1,
+            "an undeclared path stays a candidate"
+        );
+        assert!(consistency.proposed()[0].title().contains("/api/missing"));
+    }
+
+    #[test]
+    fn a_root_app_json_declares_pages_too() {
+        let temp = mini_program_project(
+            "mini-root",
+            "app.json",
+            r#"{"pages":["pages/about/index"]}"#,
+            "pages/about/index.ts",
+            "return { title, path: '/pages/about/index' };\n",
+        );
+
+        let discovery =
+            crate::discover::discover(&temp, &crate::discover::DiscoverOptions::default()).unwrap();
+        assert!(RouteConsistency::of(&discovery).is_empty());
     }
 
     #[test]

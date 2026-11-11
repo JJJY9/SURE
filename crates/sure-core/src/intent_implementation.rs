@@ -41,6 +41,7 @@ use crate::discover::{Discovery, Findings};
 use crate::finding_gravity::{GapKind, Reach, gravity_of};
 use crate::http_routes::RouteReading;
 use crate::redact::escape_control_characters;
+use crate::redact::evidence_excerpt;
 use crate::references::is_source_candidate;
 use crate::scan::display_path;
 use crate::schedule::{CheckProposal, CheckReason};
@@ -339,7 +340,7 @@ fn source_anchors(discovery: &Discovery) -> Vec<IntentMatchAnchor> {
                 anchors.push(IntentMatchAnchor::SourceFile {
                     path: display.clone(),
                     line: line_number,
-                    context: escape_control_characters(line.trim()),
+                    context: evidence_excerpt(line),
                 });
                 // One anchor per file is enough for intent matching; the line
                 // text carries the concrete evidence.

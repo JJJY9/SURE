@@ -32,6 +32,7 @@ use crate::discover::Discovery;
 use crate::finding_gravity::{GapKind, Reach, gravity_of};
 use crate::planned_work::{CheckOperation, PlannedWork, PrecomputedEvidence};
 use crate::redact::escape_control_characters;
+use crate::redact::evidence_excerpt;
 use crate::scan::display_path;
 use crate::schedule::{CheckProposal, CheckReason, PlanBuilder};
 
@@ -431,7 +432,7 @@ fn scan_frontend_files(discovery: &Discovery, actions: &mut Vec<UiAction>) {
                 let element = element
                     .or_else(|| open_tag.clone())
                     .unwrap_or_else(|| default_element(kind).to_owned());
-                let context = escape_control_characters(line.trim());
+                let context = evidence_excerpt(line);
                 actions.push(UiAction {
                     kind,
                     element,
