@@ -2,8 +2,10 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sure",
   "description": "Check AI-built software with the local SURE engine and use grounded repair contracts.",
-  "version": "0.1.3",
-  "author": { "name": "SURE contributors" },
+  "version": "0.1.4",
+  "author": {
+    "name": "SURE contributors"
+  },
   "repository": "https://github.com/lichman0405/SURE",
   "license": "Apache-2.0",
   "mcpServers": "mcp.json",
