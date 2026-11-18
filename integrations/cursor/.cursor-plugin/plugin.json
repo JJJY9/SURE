@@ -1,6 +1,6 @@
 {
   "name": "sure",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Check AI-built projects, record agent evidence and return repair contracts without replacing Cursor.",
   "author": {
     "name": "SURE contributors"
