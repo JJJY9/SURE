@@ -78,10 +78,24 @@ pub fn classify_path(
     if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
         for segment in file_name.split('.') {
             let lower = segment.to_lowercase();
-            if lower == "test" || lower == "spec" {
+            if lower == "test" || lower == "spec" || lower == "e2e" {
                 return CandidateContext::Test;
             }
             if lower == "mock" || lower == "stub" {
+                return CandidateContext::MockFixture;
+            }
+            // 前缀形式（`e2e-flow.js`、`mock_server.py`）：脚本目录里以
+            // e2e/mock/stub + 分隔符命名的文件是测试工具链，不是生产代码。
+            // 只认带 `-`/`_` 的前缀——`mockery.ts`、`e2early.ts` 这类普通
+            // 单词不会被误判。
+            if lower.starts_with("e2e-") || lower.starts_with("e2e_") {
+                return CandidateContext::Test;
+            }
+            if lower.starts_with("mock-")
+                || lower.starts_with("mock_")
+                || lower.starts_with("stub-")
+                || lower.starts_with("stub_")
+            {
                 return CandidateContext::MockFixture;
             }
         }
@@ -92,7 +106,7 @@ pub fn classify_path(
         if let Some(name) = component.as_os_str().to_str() {
             let lower = name.to_lowercase();
             match lower.as_str() {
-                "tests" | "test" | "__tests__" => return CandidateContext::Test,
+                "tests" | "test" | "__tests__" | "e2e" => return CandidateContext::Test,
                 "examples" | "example" => return CandidateContext::Example,
                 "docs" | "doc" => return CandidateContext::Doc,
                 "fixtures" | "mocks" | "stubs" => return CandidateContext::MockFixture,
@@ -111,6 +125,39 @@ mod tests {
 
     fn classify(path: &str) -> CandidateContext {
         classify_path(Path::new(path), Path::new(""), None)
+    }
+
+    #[test]
+    fn e2e_tooling_directories_and_names_are_test_context() {
+        assert_eq!(classify("e2e/login.ts"), CandidateContext::Test);
+        assert_eq!(classify("tests/e2e/login.ts"), CandidateContext::Test);
+        assert_eq!(classify("scripts/e2e-flow.js"), CandidateContext::Test);
+        assert_eq!(classify("scripts/e2e_reset.py"), CandidateContext::Test);
+        assert_eq!(classify("app/login.e2e.ts"), CandidateContext::Test);
+    }
+
+    #[test]
+    fn mock_or_stub_prefixed_tooling_names_are_fixtures() {
+        assert_eq!(
+            classify("scripts/mock-ui-regression.js"),
+            CandidateContext::MockFixture
+        );
+        assert_eq!(
+            classify("scripts/mock_server.py"),
+            CandidateContext::MockFixture
+        );
+        assert_eq!(
+            classify("tools/stub-handlers.ts"),
+            CandidateContext::MockFixture
+        );
+    }
+
+    #[test]
+    fn ordinary_tooling_names_stay_product() {
+        assert_eq!(classify("scripts/init-db.js"), CandidateContext::Product);
+        assert_eq!(classify("scripts/build.js"), CandidateContext::Product);
+        assert_eq!(classify("src/mockery.ts"), CandidateContext::Product);
+        assert_eq!(classify("src/e2early.ts"), CandidateContext::Product);
     }
 
     #[test]
