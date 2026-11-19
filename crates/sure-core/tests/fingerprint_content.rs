@@ -449,6 +449,11 @@ fn churn_in_every_excluded_kind_of_directory_changes_nothing() {
         (".pytest_cache/v/cache/lastfailed", "{}\n"),
         (".sure/evidence.json", "{\"results\": []}\n"),
         (".venv/lib/site.py", "installed\n"),
+        // A harness's own runtime state inside a workspace root (measured on a
+        // MiQi workspace, 2026-11-18): the bridge database is rewritten while
+        // the harness runs, so covering it would make every check of a
+        // workspace-as-project invalidate the one before it.
+        (".forge-runtime/runtime.db", "{\"rows\": 1}\n"),
     ];
     for (path, contents) in excluded {
         fixture.write(path, contents);

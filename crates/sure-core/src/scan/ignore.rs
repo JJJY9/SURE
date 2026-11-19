@@ -202,6 +202,19 @@ pub const IGNORED_DIRECTORIES: &[IgnoreRule] = &[
         name: ".runtime",
         reason: SkipReason::BuildOutput,
     },
+    // An agent harness's own state inside the workspace it was pointed at.
+    // MiQi (a desktop harness) keeps its bridge runtime database under
+    // `.forge-runtime/` at the session workspace root; when that workspace is
+    // the project itself, the database sits inside the project. Measured
+    // 2026-11-18 on `cook`: the database changed between a check's fingerprint
+    // snapshot and its planned dynamic checks, and the report had to mark them
+    // stale instead of running them. The name is the tool's own dotted
+    // directory, the contents are machine state rebuilt as the tool runs, and
+    // the claim is the same one `.runtime` makes above.
+    IgnoreRule {
+        name: ".forge-runtime",
+        reason: SkipReason::BuildOutput,
+    },
     IgnoreRule {
         name: "DerivedData",
         reason: SkipReason::BuildOutput,
@@ -465,8 +478,11 @@ mod tests {
             (".pytest_cache", SkipReason::Cache),
             (".mypy_cache", SkipReason::Cache),
             // The tool's own run output (measured on Dream-RSI/open-dream-rsi,
-            // 2026-11-03: most of its findings came from `.runtime/runs/**`).
+            // 2026-11-03: most of its findings came from `.runtime/runs/**`),
+            // and the harness state directory measured on a MiQi workspace
+            // (2026-11-18).
             (".runtime", SkipReason::BuildOutput),
+            (".forge-runtime", SkipReason::BuildOutput),
         ];
         for (name, reason) in cases {
             assert_eq!(
@@ -568,8 +584,11 @@ mod tests {
             "dist-old",
             "builder",
             // A plain `runtime/` is a directory a project may have written
-            // itself; only the tool's dotted `.runtime` is its output.
+            // itself; only the tool's dotted `.runtime` is its output. The
+            // same goes for a project directory literally named
+            // `forge-runtime` without the dot.
             "runtime",
+            "forge-runtime",
             "Cargo.toml",
             "build.rs",
         ] {
@@ -657,6 +676,7 @@ mod tests {
                 SkipReason::Vendored,
             ),
             (".sure/evidence/current.json", SkipReason::SureCache),
+            (".forge-runtime/runtime.db", SkipReason::BuildOutput),
             ("src/__pycache__/mod.pyc", SkipReason::Cache),
         ];
         for (path, reason) in cases {
