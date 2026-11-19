@@ -1,6 +1,6 @@
 {
   "name": "sure",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Check what AI-built software actually does, record supported evidence, and hand repair contracts back to Claude Code.",
   "author": {
     "name": "SURE contributors"
