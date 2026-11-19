@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sure",
   "description": "Check AI-built software with the local SURE engine and use grounded repair contracts.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "SURE contributors"
   },

@@ -9,13 +9,12 @@ members = [
 ]
 
 [workspace.package]
-# 0.1.5: the fork series continues past 0.1.4. Carries the candidate-context
-# fix so e2e/mock/stub-named tooling under scripts/ is classified as
-# non-production (#50), plus the fixes already on main since the 0.1.4 tag.
-# Upstream's number is untouched upstream; this line is what makes an
-# installed fork copy say so in `sure --version`, the report header and doctor
-# output.
-version = "0.1.5"
+# 0.1.6: the fork series continues past 0.1.5. Carries the scan fix so a
+# harness's own runtime directory (`.forge-runtime`) is not treated as project
+# content (#52). Upstream's number is untouched upstream; this line is what
+# makes an installed fork copy say so in `sure --version`, the report header
+# and doctor output.
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
